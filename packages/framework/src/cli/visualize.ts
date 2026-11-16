@@ -10,11 +10,12 @@
 // result carries the Mermaid text; `--raw` in the bin prints only the
 // diagram for direct piping into docs.
 
+import { match } from "ts-pattern";
 import type { DescribedDag, DescribedEdge } from "../describe/index.js";
 import { runDescribe } from "./describe.js";
 import { LINE_TERMINATORS } from "./identifiers.js";
 import { DAG_INPUT } from "../types/ids.js";
-import { assertNever, type LintError } from "./types.js";
+import type { LintError } from "./types.js";
 
 type VisualizeResult =
   | {
@@ -38,7 +39,7 @@ type VisualizeResult =
 // Mermaid node ids must avoid `:`/`$` and other specials — map ids to safe
 // tokens. Two properties the encoding must hold:
 //   1. INJECTIVE — node ids may contain `_`, `:` and `-` (ID_PATTERN), and
-//      distinct ids must map to distinct Mermaid tokens (`a:b` and `a_b` must
+//      distinct ids must map to distinct Mermaid tokens (`a:b` and a_b must
 //      never merge into one node). The escape scheme below (`_` doubles as
 //      the lead-in, `:`/`-` get fixed 2-char escapes, anything else a
 //      `_x<hex>_` escape) is decodable left-to-right, hence injective.
@@ -46,18 +47,13 @@ type VisualizeResult =
 //      `dag_input` / `dag_output` virtual tokens (a node literally named
 //      `dag_input` must not merge with the request node).
 // Rendered labels still show the original id; only the token is encoded.
-const escapeIdChar = (c: string): string => {
-  switch (c) {
-    case "_":
-      return "__";
-    case ":":
-      return "_c";
-    case "-":
-      return "_d";
-    default:
-      return `_x${c.charCodeAt(0).toString(16)}_`;
-  }
-};
+const ID_CHAR_ESCAPES: ReadonlyMap<string, string> = new Map([
+  ["_", "__"],
+  [":", "_c"],
+  ["-", "_d"],
+]);
+const escapeIdChar = (c: string): string =>
+  ID_CHAR_ESCAPES.get(c) ?? `_x${c.charCodeAt(0).toString(16)}_`;
 const safeId = (id: string): string =>
   id === DAG_INPUT ? "dag_input" : `n_${id.replace(/[^A-Za-z0-9]/g, escapeIdChar)}`;
 
@@ -71,19 +67,15 @@ const escapeLabel = (s: string): string =>
 const edgeLine = (e: DescribedEdge): string => {
   const from = safeId(e.from);
   const to = safeId(e.to);
-  switch (e.kind) {
-    case "unconditional":
-      return `    ${from} --> ${to}`;
-    case "conditional":
-      return `    ${from} -->|"${escapeLabel(e.predicateLabel)} (v${e.predicateVersion})"| ${to}`;
-    case "default":
-      return `    ${from} -.->|default| ${to}`;
-    default:
-      // The return type is inferred, so a missing case would otherwise fall
-      // through to `undefined` silently — assertNever makes a new edge kind a
-      // compile error here.
-      return assertNever(e);
-  }
+  // `.exhaustive()` makes a new edge kind a compile error here.
+  return match(e)
+    .with({ kind: "unconditional" }, () => `    ${from} --> ${to}`)
+    .with(
+      { kind: "conditional" },
+      (c) => `    ${from} -->|"${escapeLabel(c.predicateLabel)} (v${c.predicateVersion})"| ${to}`,
+    )
+    .with({ kind: "default" }, () => `    ${from} -.->|default| ${to}`)
+    .exhaustive();
 };
 
 /**

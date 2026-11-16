@@ -30,7 +30,7 @@ interface ReviewActionData {
  * TOTAL preview renderer for the output under review (shared by the bot and
  * webhook transports — ONE encoding). `JSON.stringify` fails on cyclic
  * values; the catch fallback must itself be total: `String(output)` can THROW
- * again on a null-prototype object or a hostile `toString`/`Symbol.toPrimitive`
+ * again on a null-prototype object or a hostile `toString`/Symbol.toPrimitive
  * (a second throw would escape the notify surface as a raw rejection and the
  * review hook would escalate a parked run to a retriable node-failed).
  * `safeErrorMessage` is the framework's never-throwing renderer — constant

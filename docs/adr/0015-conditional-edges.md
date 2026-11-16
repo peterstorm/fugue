@@ -7,9 +7,9 @@
 
 > **Update (2026-05-10):** the `Guard = (output) => boolean` closure form
 > described below was replaced by a function-based `Predicate<T>` with
-> `{ label, version, check, minConfidence? }` — see `types/dag.ts` and
+> `{ label, version, check, minConfidence? }` — see `packages/framework/src/types/dag.ts` and
 > ADR 0028. The active-set runtime, else-totality, and routing rules below
-> are unchanged; only the `when` payload type and the `guard-threw` error
+> are unchanged; only the `when` payload type and the guard-threw error
 > kind (renamed `predicate-malformed`) differ.
 
 ## Context
@@ -25,7 +25,7 @@ Loops are **out of scope**. Conditional edges are a runtime filter on a static p
 
 ## Decision
 
-Extend `EdgeDef` to a discriminated union with three variants — unconditional, conditional (`when`), and default — kept compatible with the existing `{ from, to }` literal by field-presence. `NodeDef` gains `optionalDeps` for inputs that may be pruned.
+Extend `EdgeDef` to a discriminated union with three variants — unconditional, conditional (`when`), and default — kept compatible with the existing `{ from, to }` literal by field-presence. `NodeDef` gains optionalDeps for inputs that may be pruned.
 
 ```ts
 export type Guard = (output: unknown) => boolean;
@@ -37,13 +37,13 @@ export type EdgeDef =
 
 Routing model: **exclusive, first-match-wins**. When a node with guarded out-edges produces output, guards fire in declaration order; the first `true` selects that branch; the `default` edge fires only if no guard matched. The validator requires every node with guarded out-edges to have exactly one default edge (else-totality).
 
-Active-set runtime: `DagMachineContext.activeNodeIds` is seeded at compile time to every node forward-reachable from a wave-0 entry along unconditional edges. After each wave, `handleWaveDone` evaluates guards for completed nodes and expands the active set along the chosen branch (transitively, through unconditional descendants). `runWave` filters to the active subset before dispatching, so pruned nodes never run, never appear in `outputs`, and never emit spans.
+Active-set runtime: `DagMachineContext.activeNodeIds` is seeded at compile time to every node forward-reachable from a wave-0 entry along unconditional edges. After each wave, `handleWaveDone` evaluates guards for completed nodes and expands the active set along the chosen branch (transitively, through unconditional descendants). runWave filters to the active subset before dispatching, so pruned nodes never run, never appear in `outputs`, and never emit spans.
 
 Replay determinism is preserved by requiring **pure guards**: same `wave-done` event → same routing decision → same active set. No envelope changes; the event log is unchanged.
 
-`optionalDeps` on a node signals "this input may be undefined at runtime because its source branch was pruned". Whenever `optionalDeps` is non-empty, `nodeInput` is always an object keyed by `deps ∪ optionalDeps`. The validator partitions incoming edges into always-incoming (unconditional + default) and conditional-incoming (guarded); a `deps` entry whose only incoming edge is conditional is rejected with the message "use optionalDeps".
+optionalDeps on a node signals "this input may be undefined at runtime because its source branch was pruned". Whenever optionalDeps is non-empty, `nodeInput` is always an object keyed by `deps ∪ optionalDeps`. The validator partitions incoming edges into always-incoming (unconditional + default) and conditional-incoming (guarded); a `deps` entry whose only incoming edge is conditional is rejected with the message "use optionalDeps".
 
-A throwing guard surfaces a new `guard-threw` framework error for the upstream node and fails the run; guards are not retried.
+A throwing guard surfaces a new guard-threw framework error for the upstream node and fails the run; guards are not retried.
 
 Two new observer events — `route-decided` and `node-pruned` — make per-branch routing visible without changing the DAG event log.
 
@@ -60,7 +60,7 @@ Two new observer events — `route-decided` and `node-pruned` — make per-branc
 
 - Validator complexity: output reachability under guard assignments is bounded by requiring unconditional + default reachability — guards may bypass nodes, never the explicit `outputNodeId`. UX concession: per-branch outputs require an explicit rejoin.
 - Pure-guard discipline is enforced by docs + property tests, not by runtime checks. A closure over external state breaks replay silently.
-- `optionalDeps` is new API surface authors will forget. The validator catches the mismatch with a clear error.
+- optionalDeps is new API surface authors will forget. The validator catches the mismatch with a clear error.
 - Any DAG with conditional or default edges routes through the state-machine path (the legacy fast path doesn't support active-set filtering).
 
 ## Alternatives considered
@@ -68,18 +68,18 @@ Two new observer events — `route-decided` and `node-pruned` — make per-branc
 1. **`default` as sentinel `when: () => true` placed last.** Rejected: makes the validator's else-totality check stringly-typed and obscures intent. Discriminator variant is more explicit.
 2. **Lazy `activeNodeIds` (compute on demand).** Rejected in favour of pre-expanded seed + per-wave updates. The pre-expanded version is faster per-wave; equivalence is property-tested.
 3. **Multi-fan-out guarded edges (fire all matching guards).** Rejected — that's `skipWhen` again. Routing is exclusive by design.
-4. **Side-effecting guards.** Rejected. Side effects break replay and would force a `branch_taken` field in the event envelope.
+4. **Side-effecting guards.** Rejected. Side effects break replay and would force a branch_taken field in the event envelope.
 5. **Guarded multi-output (per-branch terminals).** Rejected. `outputNodeId` is reachable along unconditional + default edges only. If you want a branch to reach its own terminal, rejoin first.
 
 ## Test coverage
 
-- `conditional-edges-routing.test.ts` — 2-way, 3-way, default fires, branch-then-rejoin via `optionalDeps`, throwing guard.
+- `conditional-edges-routing.test.ts` — 2-way, 3-way, default fires, branch-then-rejoin via optionalDeps, throwing guard.
 - `conditional-edges-validator.test.ts` — missing-default, unreachable-output, optional-dep mismatches, duplicate-edge, deps-vs-optionalDeps partitioning.
 - `conditional-edges-replay.test.ts` — replay equivalence: live `(state, outputs, activeNodeIds)` matches `replayEvents` over the recorded log.
 - `conditional-edges-reroute.test.ts` — reroute back to before a routing node; verifies the active set re-decides on the next pass.
 
 ## Implementation notes
 
-- `decideRoute` (in `dag-runtime/conditional.ts`) is computed once per routing node per wave by the executor. The precomputed `routingDecisions` are passed to `handleWaveDone` for active-set update, and to the observer for `route-decided` event emission. A fallback to inline re-evaluation exists for legacy event-log replay paths where `routingDecisions` is absent.
+- `decideRoute` (in `packages/framework/src/dag-runtime/routing.ts`) is computed once per routing node per wave by the executor. The precomputed `routingDecisions` are passed to `handleWaveDone` for active-set update, and to the observer for `route-decided` event emission. A fallback to inline re-evaluation exists for legacy event-log replay paths where `routingDecisions` is absent.
 - Reroute clears outputs/retries for nodes in waves ≥ target wave and re-seeds `activeNodeIds` from the surviving outputs. Earlier guard decisions are deterministic over the same outputs and converge to the pre-reroute active set up through `targetWave - 1`.
 - The fallback output (when `outputNodeId` is unset) walks back through waves picking the last active node with a recorded output, so a fully-pruned final wave doesn't strand the run.

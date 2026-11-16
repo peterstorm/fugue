@@ -224,7 +224,7 @@ export const buildSitesReadHandle = (token: string, http: GraphHttp): SitesReadH
 /**
  * Build the `read`-only handle for `dynamics:read`, over the WIF token, targeting
  * the configured per-org Dataverse host (FR-042). `orgHost` is the bare host
- * (`DYNAMICS_ORG_HOST`, e.g. `org.crm4.dynamics.com`); the Dataverse Web API base
+ * (`DYNAMICS_ORG_HOST`, e.g. org.crm4.dynamics.com); the Dataverse Web API base
  * is `https://<orgHost>/api/data/v9.2`. The caller (the broker) only ever reaches
  * this for a `dynamics:read` scope AFTER `audienceForScope` resolved a non-undefined
  * audience, so `orgHost` is always present here — an UNSET host fails closed at the

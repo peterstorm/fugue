@@ -81,6 +81,19 @@ export interface AppendPlan {
 }
 
 /**
+ * The `event` member of the record bytes `serializeFileEventRecord` just
+ * produced. Those bytes are our own round-trip-verified output, so a non-object
+ * document here is an impossible state — reported, not cast around.
+ */
+const canonicalEventOf = (json: string): unknown => {
+  const record: unknown = JSON.parse(json);
+  if (typeof record !== "object" || record === null) {
+    throw new Error("serializeFileEventRecord produced a non-object record");
+  }
+  return "event" in record ? record.event : undefined;
+};
+
+/**
  * Decide the record an append commits: sequence assignment, record
  * construction, canonical serialization, and the durable file name.
  *
@@ -131,7 +144,7 @@ export const planAppend = (args: {
   // its persisted content (the strict reader would fail closed at resume,
   // FR-009). `serializeFileEventRecord` already accomplished the lossless
   // round-trip, so parsing its output is deterministic.
-  const canonicalEvent = (JSON.parse(json) as { readonly event: unknown }).event;
+  const canonicalEvent = canonicalEventOf(json);
 
   return {
     fileName: eventFileName(

@@ -18,7 +18,7 @@ import {
   EVENT_NODE_OUTPUT,
   EVENT_LLM_COST,
 } from "../packages/framework/src/tracing/semantic-conventions.js";
-import { trace, SpanStatusCode } from "@opentelemetry/api";
+import { trace, SpanStatusCode, type Tracer } from "@opentelemetry/api";
 
 const MLFLOW_URL = (() => {
   const idx = process.argv.indexOf("--url");
@@ -26,6 +26,28 @@ const MLFLOW_URL = (() => {
 })()!;
 
 const EXPERIMENT_NAME = "fugue-smoke-test";
+
+// ---------------------------------------------------------------------------
+// MLflow REST bodies are wire data: bound as `unknown` and narrowed, never cast.
+// ---------------------------------------------------------------------------
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const experimentIdOf = (body: unknown): string | undefined =>
+  isRecord(body) && typeof body.experiment_id === "string" && body.experiment_id !== ""
+    ? body.experiment_id
+    : undefined;
+
+const experimentIdByName = (body: unknown): string | undefined =>
+  isRecord(body) ? experimentIdOf(body.experiment) : undefined;
+
+/** The `request_id` of every well-formed trace in a traces-search response. */
+const requestIdsOf = (body: unknown): readonly string[] => {
+  if (!isRecord(body) || !Array.isArray(body.traces)) return [];
+  return body.traces.flatMap((t: unknown) =>
+    isRecord(t) && typeof t.request_id === "string" ? [t.request_id] : [],
+  );
+};
 
 // ---------------------------------------------------------------------------
 // 1. Ensure experiment exists and get its ID
@@ -37,15 +59,16 @@ async function ensureExperiment(): Promise<string> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: EXPERIMENT_NAME }),
   });
-  const body = await createRes.json() as Record<string, unknown>;
-  if (body.experiment_id) return body.experiment_id as string;
+  const body: unknown = await createRes.json();
+  const created = experimentIdOf(body);
+  if (created !== undefined) return created;
 
   // Already exists — look it up by name
   const getRes = await fetch(
     `${MLFLOW_URL}/api/2.0/mlflow/experiments/get-by-name?experiment_name=${encodeURIComponent(EXPERIMENT_NAME)}`,
   );
-  const getBody = await getRes.json() as { experiment?: { experiment_id: string } };
-  if (getBody.experiment?.experiment_id) return getBody.experiment.experiment_id;
+  const found = experimentIdByName(await getRes.json());
+  if (found !== undefined) return found;
   throw new Error(`Could not create or find experiment: ${JSON.stringify(body)}`);
 }
 
@@ -67,10 +90,10 @@ async function waitForTrace(experimentId: string, traceId: string, timeoutMs = 1
       await new Promise(r => setTimeout(r, 500));
       continue;
     }
-    const body = await res.json() as { traces?: Array<{ request_id: string }> };
+    const body: unknown = await res.json();
     // MLflow prefixes the OTLP traceId with "tr-" in its request_id field
-    const found = (body.traces ?? []).some(
-      t => t.request_id === traceId || t.request_id === `tr-${traceId}`,
+    const found = requestIdsOf(body).some(
+      id => id === traceId || id === `tr-${traceId}`,
     );
     if (found) return true;
     await new Promise(r => setTimeout(r, 500));
@@ -79,25 +102,9 @@ async function waitForTrace(experimentId: string, traceId: string, timeoutMs = 1
 }
 
 // ---------------------------------------------------------------------------
-// 3. Main
+// 3. Emit a root (CHAIN) span with two child spans; returns the trace id
 // ---------------------------------------------------------------------------
-async function main() {
-  console.log(`🔍  MLflow smoke test → ${MLFLOW_URL}`);
-
-  // Health check
-  const health = await fetch(`${MLFLOW_URL}/health`);
-  if (!health.ok) throw new Error(`MLflow not healthy: ${health.status}`);
-  console.log("✅  /health OK");
-
-  const experimentId = await ensureExperiment();
-  console.log(`✅  Experiment "${EXPERIMENT_NAME}" id=${experimentId}`);
-
-  // Spin up tracing with the real MLflow OTLP exporter
-  const exporter = createMlflowExporter({ url: MLFLOW_URL, experimentId });
-  const handle = await initTracing({ exporter, policy: alwaysOn() });
-  const tracer = trace.getTracer("fugue-smoke-test", "0.0.1");
-
-  // Emit a root (CHAIN) span with two child spans
+async function emitSmokeTrace(tracer: Tracer): Promise<string | undefined> {
   let traceId: string | undefined;
   await tracer.startActiveSpan("smoke-root", async (rootSpan) => {
     rootSpan.setAttribute(AI_SPAN_TYPE, "chain");
@@ -130,6 +137,30 @@ async function main() {
     rootSpan.setStatus({ code: SpanStatusCode.OK });
     rootSpan.end();
   });
+  return traceId;
+}
+
+// ---------------------------------------------------------------------------
+// 4. Main
+// ---------------------------------------------------------------------------
+async function main() {
+  console.log(`🔍  MLflow smoke test → ${MLFLOW_URL}`);
+
+  // Health check
+  const health = await fetch(`${MLFLOW_URL}/health`);
+  if (!health.ok) throw new Error(`MLflow not healthy: ${health.status}`);
+  console.log("✅  /health OK");
+
+  const experimentId = await ensureExperiment();
+  console.log(`✅  Experiment "${EXPERIMENT_NAME}" id=${experimentId}`);
+
+  // Spin up tracing with the real MLflow OTLP exporter
+  const exporter = createMlflowExporter({ url: MLFLOW_URL, experimentId });
+  const handle = await initTracing({ exporter, policy: alwaysOn() });
+  const tracer = trace.getTracer("fugue-smoke-test", "0.0.1");
+
+  // Emit a root (CHAIN) span with two child spans
+  const traceId = await emitSmokeTrace(tracer);
 
   // Flush and shut down so spans are exported before we poll
   await handle.flush();

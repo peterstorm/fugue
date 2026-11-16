@@ -96,7 +96,7 @@ type _SitesKeysExact = _Expect<_Equal<keyof SitesReadHandle, "readSite">>;
 // DynamicsReadHandle exposes EXACTLY `read`.
 type _DynamicsKeysExact = _Expect<_Equal<keyof DynamicsReadHandle, "read">>;
 
-// Reference the type aliases so the compiler keeps them (and so an `unused`
+// Reference the type aliases so the compiler keeps them (and so an unused
 // lint, if any, stays quiet). A `true` value only assigns if the assertions hold.
 const _mailOk: _MailKeysExact = true;
 const _sitesOk: _SitesKeysExact = true;

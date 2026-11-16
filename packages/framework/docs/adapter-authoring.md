@@ -58,7 +58,7 @@ step), `scripts: { build: "tsc", typecheck: "tsc --noEmit", test: "bun test" }`,
 > points `main`/`exports` at `./src/index.ts`, Bun resolves importers straight to
 > source — `bun install` after adding the package is enough. Do **not** add a TS
 > project-`references` block: this monorepo deliberately omits them (Bun runs the
-> TypeScript directly; references would only help an emit-to-`dist/` build the
+> TypeScript directly; references would only help an emit-to-dist/ build the
 > runtime never uses). The `build`/`typecheck` scripts run `tsc` for type
 > verification, not for resolution.
 
@@ -91,7 +91,7 @@ import { unsupportedRefError } from "@fuguejs/document-source";
 ```
 
 After augmentation (or importing a package that augments), `requires: ["vectors"]`
-is valid and `ctx.vectors` is typed and non-null.
+is valid and ctx.vectors is typed and non-null.
 
 ---
 

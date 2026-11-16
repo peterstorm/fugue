@@ -14,7 +14,7 @@
  *   - onSigchld       — installs a SIGCHLD handler driving `reapZombies`, plus a
  *     low-frequency interval as a delivery-quirk safety net.
  *
- * VALIDATED on real PID-namespace semantics (glibc box + `oven/bun` alpine/musl):
+ * VALIDATED on real PID-namespace semantics (glibc box + oven/bun alpine/musl):
  *   - `waitpid(-1, WNOHANG)` reaps re-parented orphan workers → zero zombies.
  *   - It does NOT steal the supervisor's exit status: Bun resolves `proc.exited`
  *     independently of who `waitpid()`s (pidfd), so the supervise loop never hangs
@@ -34,22 +34,18 @@ import { probeErrorCode, safeErrorMessage } from "@fuguejs/framework";
 import { cleanEnvRecord } from "./spawn-port.js";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { readdirSync } from "node:fs";
+import { match } from "ts-pattern";
 import type { LogPort } from "../../ports.js";
 import type { InitProcessPort } from "./thin-init.js";
 
 // ── Pure: libc resolution candidates (testable without dlopen) ──────────────────
 
 /** Map a Node `process.arch` to the musl shared-object arch token. */
-export const muslArchName = (arch: string): string => {
-  switch (arch) {
-    case "arm64":
-      return "aarch64";
-    case "x64":
-      return "x86_64";
-    default:
-      return arch;
-  }
-};
+export const muslArchName = (arch: string): string =>
+  match(arch)
+    .with("arm64", () => "aarch64")
+    .with("x64", () => "x86_64")
+    .otherwise((other) => other);
 
 /**
  * PURE: the ordered list of libc shared objects to try for the `waitpid` symbol,

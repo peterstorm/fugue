@@ -40,7 +40,7 @@ const toRunId = (rid: string | RunId): RunId => brandRunId(rid as string);
 // The checkpoint-address concern — the correlated address ADTs, their
 // canonical placeholders, the `stringOf` raw-value renderer and THE ONE
 // `checkpoint-write-failed` builder — lives in its own leaf module. Re-exported
-// here so every existing import path (`types/error-factories.js`, and the file
+// here so every existing import path (types/error-factories.js, and the file
 // codec's own re-export) keeps resolving.
 export {
   buildCheckpointWriteFailed,

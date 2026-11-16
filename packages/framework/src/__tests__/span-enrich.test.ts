@@ -5,9 +5,7 @@ import { describe, it, expect } from "bun:test";
 import { tokensOnly } from "../types/token-usage.js";
 import { computeCostUsd, PRICE_TABLE } from "../llm/cost.js";
 import { resolveContentFilter, IDENTITY_FILTER } from "../tracing/content-filter.js";
-import { context, trace, type Span } from "@opentelemetry/api";
-import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
-import { enrichLlmSpan } from "../tracing/span-enrich.js";
+import { captureEnrichment, type RecordedEvent } from "./_span-capture.js";
 import {
   AI_LLM_COST_PRICED,
   AI_LLM_COST_USD,
@@ -99,44 +97,10 @@ describe("resolveContentFilter", () => {
 // trace, and every claim it makes is an attribute KEY or a cost FIELD: a typo,
 // an inverted `isCacheInert`, or two swapped components would be invisible to
 // every other test in the suite.
+//
+// The span-capture harness lives in `_span-capture.ts`, shared with the
+// pr53 repair-regression suite.
 // ---------------------------------------------------------------------------
-
-// Without a real context manager the API default is a no-op that does not
-// propagate, so `trace.getActiveSpan()` inside the helper would never see the
-// recording span. Same registration the tool-call span tests use.
-context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
-
-interface RecordedEvent {
-  readonly name: string;
-  readonly attrs: Record<string, unknown>;
-}
-
-/**
- * Run `enrichLlmSpan` against a recording span installed as the active OTel
- * span, and return everything it set.
- */
-const captureEnrichment = (
-  opts: Parameters<typeof enrichLlmSpan>[0],
-): { attributes: Record<string, unknown>; events: RecordedEvent[] } => {
-  const attributes: Record<string, unknown> = {};
-  const events: RecordedEvent[] = [];
-  const span = {
-    setAttribute: (k: string, v: unknown) => {
-      attributes[k] = v;
-      return span;
-    },
-    addEvent: (name: string, attrs: Record<string, unknown>) => {
-      events.push({ name, attrs });
-      return span;
-    },
-    setStatus: () => span,
-    end: () => {},
-  } as unknown as Span;
-
-  const ctx = trace.setSpan(context.active(), span);
-  context.with(ctx, () => enrichLlmSpan(opts));
-  return { attributes, events };
-};
 
 const baseOpts = {
   model: "gpt-4o",

@@ -1,11 +1,11 @@
 /**
- * Shared strings (`xl/sharedStrings.xml`) and the rich-text reader shared with
- * inline strings (`<is>`), both following SheetJS 0.18.5 `parse_si`:
+ * Shared strings (xl/sharedStrings.xml) and the rich-text reader shared with
+ * inline strings (`<is>`), both following SheetJS 0.18.5 parse_si:
  *
  * - When the first child is `<t>`, the value is that element's text.
  * - Otherwise, when there are `<r>` runs, the value is every `<t>` text joined,
  *   excluding phonetic `<rPh>` runs.
- * - `_xHHHH_` escapes are decoded in the result.
+ * - _xHHHH_ escapes are decoded in the result.
  * - Anything else is `null` (SheetJS yields `undefined` there), except empty
  *   content, which is `""`.
  *
@@ -111,7 +111,7 @@ export const createRichTextReader = (mode: RichTextMode): RichTextReader => {
 };
 
 /**
- * `xl/sharedStrings.xml` → the table, indexed by `<c t="s">` values.
+ * xl/sharedStrings.xml → the table, indexed by `<c t="s">` values.
  *
  * Like SheetJS (which splits the table on `</si>`), the table carries one extra
  * trailing entry for whatever follows the last `<si>`: `""` when that is empty,

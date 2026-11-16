@@ -143,7 +143,7 @@ export const invocationFor = (
 export type CapabilityBroker = {
   /**
    * Declared as a readonly function property rather than method shorthand:
-   * method shorthand is checked bivariantly even under `strictFunctionTypes`,
+   * method shorthand is checked bivariantly even under strictFunctionTypes,
    * and this port resolves per-invocation authority — an implementation that
    * narrowed `inv` or `requires` must not type-check.
    */

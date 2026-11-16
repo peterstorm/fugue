@@ -9,7 +9,7 @@
 // endpoints, with `DAG_INPUT` admissible as the `NodeId` subtype `DagInputId`),
 // so the validated-id invariant that `buildNodeInput` advertises as structural
 // for its `nodeId` parameter is carried end-to-end instead of dropped at this
-// boundary. Importing `types/ids.js` forms no cycle: types/ is a leaf module.
+// boundary. Importing `types/ids.ts` forms no cycle: types/ is a leaf module.
 
 import type { NodeId } from "../types/ids.js";
 

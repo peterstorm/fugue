@@ -16,6 +16,7 @@
 
 import { base64url } from "./base64url.js";
 import { match } from "ts-pattern";
+import type { Result } from "@fuguejs/framework";
 
 // ── Branded Types ──────────────────────────────────────────────────────────
 
@@ -75,7 +76,7 @@ export const markTeam = (s: string): Team => s as Team;
  * every team WRITE path stores this canonical form, so the rule lives in ONE place
  * (here) rather than re-inlined as `.trim().toLowerCase()` at each boundary where
  * it could silently drift. String-level so callers that ALSO shape-validate the
- * name (e.g. `admin/teams`, the bootstrap parser) can reuse it before their regex.
+ * name (e.g. `http/handlers/admin/teams.ts`, the bootstrap parser) can reuse it before their regex.
  */
 export const canonicalizeTeamName = (s: string): string => s.trim().toLowerCase();
 
@@ -131,7 +132,7 @@ export const markSubjectToken = (verifiedCompactJwt: string): SubjectToken =>
  * The Keycloak client id an agent acts AS — the identity the broker's policy
  * gate (`AssignedScopes`), the token-cache identity, and the audit `azp` are
  * all keyed on. It is the REAL Keycloak agent-type client id (e.g.
- * `fugue-agent-mail`), resolved from a DAG id through the config-mapped
+ * fugue-agent-mail), resolved from a DAG id through the config-mapped
  * `AgentClientMap` by `agentClientIdForDag` (FR-040, ADR-0056). The DAG-id
  * placeholder is gone: a DAG with no mapping fails closed (no identity
  * passthrough), so a node can never mint as the wrong/absent client.
@@ -153,7 +154,7 @@ export type AgentClientId = string & { readonly __brand: "AgentClientId" };
 /**
  * The config-mapped DAG-id → real-Keycloak-agent-client-id registry (FR-040,
  * ADR-0056 Variant A: one Keycloak service-account client per agent TYPE). Keys
- * are DAG ids; values are the real client ids (`fugue-agent-mail`, …) on which
+ * are DAG ids; values are the real client ids (fugue-agent-mail, …) on which
  * `AGENT_CLIENT_SCOPES` and `KEYCLOAK_AGENT_CLIENT_CREDENTIALS` are keyed. A DAG
  * id absent from this map has NO agent client — its origin resolution fails
  * closed (see `agentClientIdForDag`).
@@ -449,6 +450,31 @@ export const hashToken = async (token: string): Promise<TokenHash> => {
   const hashArray = new Uint8Array(hashBuffer);
   return hexEncode(hashArray) as TokenHash;
 };
+
+// ── Realm JWT verifier port (signature verification — injected, never hardcoded) ──
+
+/**
+ * Reason a signature verifier could not produce verified claims. `invalid` is a
+ * client fault (bad signature / unparsable token) → 401; `unavailable` is an
+ * infrastructure fault (JWKS fetch failed, key rotation in flight) → 503,
+ * mirroring the Redis-unavailable branch. The verifier MUST fail closed.
+ *
+ * A DOMAIN type (not a middleware detail): the pure claim validator and every
+ * adapter implement against it, so it belongs where the auth model lives.
+ */
+export type JwtVerifyError =
+  | { readonly kind: "invalid"; readonly reason: string }
+  | { readonly kind: "unavailable"; readonly reason: string };
+
+/**
+ * Port for verifying a JWT's SIGNATURE and returning its (now branded) claims.
+ * The real implementation is JWKS-backed (keys fetched from the realm, never
+ * hardcoded); tests inject a fake. This port is the ONLY producer of
+ * `SignatureVerifiedClaims` (it calls `markSignatureVerified` AFTER checking the
+ * signature) — and `validateRealmJwtClaims` accepts only that brand, so the
+ * "signature first" ordering is enforced by the type system, not convention.
+ */
+export type VerifyRealmJwt = (token: string) => Promise<Result<SignatureVerifiedClaims, JwtVerifyError>>;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 

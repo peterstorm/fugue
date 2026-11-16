@@ -165,6 +165,53 @@ const corruptRecordContext = (
   `directory=${JSON.stringify(resolve(directory))} recordPath=${JSON.stringify(resolve(recordPath))} digest=${digest} reason=${reason}`;
 
 /**
+ * Read the stored singleton for `recordWrite` under the lock: `null` when the
+ * record is absent (ENOENT only), the parsed entry otherwise. Every failure is
+ * THROWN, not returned — the lock body signals failure by throwing so
+ * `withFileLock`'s release-failure arbitration preserves the primary verdict.
+ */
+const readCurrentFreshnessEntry = (
+  directory: string,
+  recordPath: string,
+  resource: string,
+  resourceDigest: string,
+): StoredFreshnessEntry | null => {
+  try {
+    // Follows symlinks deliberately — module header, "Symlink policy".
+    const text = readFileSync(recordPath, "utf-8");
+    const parsed = parseStoredFreshnessEntry(text, resource);
+    if (!parsed.ok) {
+      // Deterministic fail-closed (ADR-0079): the corrupted bytes reproduce the
+      // same rejection on every retry — retrying can neither clear them nor
+      // make the write safe. The PERMANENT verdict stays primary (journal
+      // appendEvent parity).
+      throw cacheFailure(
+        "freshness:recordWrite",
+        resourceDigest,
+        `stored freshness record is corrupt ${corruptRecordContext(directory, recordPath, resourceDigest, parsed.error)}`,
+        undefined,
+        "permanent",
+      );
+    }
+    return parsed.value;
+  } catch (error) {
+    // A TYPED rejection thrown above (the deterministic corrupt-record verdict)
+    // rides through unchanged — only raw fs throws get the ENOENT probe + class
+    // inference. Re-wrapping the typed verdict would drop its pinned permanent
+    // class (journal parity).
+    if (isFrameworkError(error)) throw error;
+    const codeProbe = probeErrorCode(error);
+    if (!isMissingPathProbe(codeProbe)) {
+      // Arbitrary non-ENOENT read failures also signal by throwing so the
+      // primary failure (with its inferred failureClass) survives a
+      // simultaneous release failure.
+      throw cacheFailure("freshness:recordWrite", resourceDigest, error, codeProbe);
+    }
+    return null;
+  }
+};
+
+/**
  * Freshness-index factory options (the port itself lives in
  * `types/freshness.ts`).
  *
@@ -271,42 +318,7 @@ const createFileFreshnessIndexUnchecked = (
           if (!clocked.ok) throw clocked.error;
           const nowMs = clocked.value;
 
-          let current: StoredFreshnessEntry | null = null;
-          try {
-            // Follows symlinks deliberately — module header, "Symlink policy".
-            const text = readFileSync(recordPath, "utf-8");
-            const parsed = parseStoredFreshnessEntry(text, prepared.value.resource);
-            if (!parsed.ok) {
-              // Deterministic fail-closed (ADR-0079): the corrupted bytes
-              // reproduce the same rejection on every retry — retrying can
-              // neither clear them nor make the write safe. Thrown, not
-              // returned: the lock body signals failure by throwing so
-              // `withFileLock`'s release-failure arbitration preserves this
-              // PERMANENT verdict as primary (journal appendEvent parity).
-              throw cacheFailure(
-                "freshness:recordWrite",
-                resourceDigest,
-                `stored freshness record is corrupt ${corruptRecordContext(directory, recordPath, resourceDigest, parsed.error)}`,
-                undefined,
-                "permanent",
-              );
-            }
-            current = parsed.value;
-          } catch (error) {
-            // A TYPED rejection thrown above (the deterministic corrupt-record
-            // verdict) rides through unchanged — only raw fs throws get the
-            // ENOENT probe + class inference. Re-wrapping the typed verdict
-            // would drop its pinned permanent class (journal parity).
-            if (isFrameworkError(error)) throw error;
-            const codeProbe = probeErrorCode(error);
-            if (!isMissingPathProbe(codeProbe)) {
-              // Thrown, not returned: arbitrary non-ENOENT read failures also
-              // signal by throwing so the primary failure (with its inferred
-              // failureClass) survives a simultaneous release failure.
-              throw cacheFailure("freshness:recordWrite", resourceDigest, error, codeProbe);
-            }
-          }
-
+          const current = readCurrentFreshnessEntry(directory, recordPath, prepared.value.resource, resourceDigest);
           const next = selectLatestWrite(current, prepared.value, nowMs);
           atomicWriteFile(recordPath, serializeStoredFreshnessEntry(next), opts.atomicWriteFileHooks);
           return ok(undefined);

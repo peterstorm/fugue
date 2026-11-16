@@ -25,9 +25,9 @@ const MAX = maxWidth(25);
 
 describe("maxWidth — author-declared bound (FR-F1-002)", () => {
   it("accepts a positive safe integer", () => {
-    // Compared as plain numbers: `toBe` infers the branded type from its
+    // Compared as plain numbers: toBe infers the branded type from its
     // receiver, and the assertion here is about the VALUE surviving the
-    // constructor unchanged, not about the brand (which `branding` below owns).
+    // constructor unchanged, not about the brand (which branding below owns).
     expect(maxWidth(1) as number).toBe(1);
     expect(maxWidth(25) as number).toBe(25);
     expect(maxWidth(Number.MAX_SAFE_INTEGER) as number).toBe(Number.MAX_SAFE_INTEGER);
@@ -287,7 +287,7 @@ describe("resolveMappedItems — the three arms (FR-F1-003/004/005)", () => {
   // Round-24 C1/C2 — the THIRD access, between the two the previous round
   // guarded.
   //
-  // `Array.isArray` performs `IsArray`, which unwraps a Proxy to its target
+  // `Array.isArray` performs IsArray, which unwraps a Proxy to its target
   // without invoking any trap. So this value satisfies the array guard on the
   // line above and then throws on the `length` read below it — the one access
   // in the function that was still outside a `try`. The escape was real: past
@@ -351,7 +351,7 @@ describe("resolveMappedItems — the three arms (FR-F1-003/004/005)", () => {
   // established that what came back from `length` is a number at all. It need
   // not be: a `get` trap can return anything, and `let width: number` was a
   // compile-time label over a value the compiler never saw produced. An object
-  // with a stateful `valueOf` — reporting an in-bound number the first time it
+  // with a stateful valueOf — reporting an in-bound number the first time it
   // is coerced and a huge one afterwards — passed `width > max` on that first
   // ToPrimitive call and then lengthened the "fixed-count" loop on every
   // iteration, because `i < width` re-coerces the SAME object each time. The

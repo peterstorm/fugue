@@ -26,7 +26,7 @@ against `main` at authoring time):
 | Inbound messaging endpoint | `packages/host/src/http/router.ts:86` mounts `app.post("/teams/messages", …)` | Registered **before** the team-token auth middleware (Teams authenticates with a Bot Framework JWT, not a `fug_` token). Only mounted when `deps.teamsBot` is wired, i.e. when `BOT_APP_ID`/`BOT_APP_PASSWORD` are set. |
 | Inbound auth (fail-closed) | `packages/host/src/hitl/adapters/bot/verify.ts` | Verifies the inbound `Authorization: Bearer <jwt>` against the Bot Framework JWKS; enforces issuer `https://api.botframework.com` and **audience = the bot's app id** (`BOT_APP_ID`), RS256 only. Any failure → 401; JWKS fetch failure → 503. |
 | Activity handling | `packages/host/src/hitl/adapters/bot/messages-handler.ts` | `conversationUpdate` (bot added) → persist conversation reference (default + per-team via `HITL_TEAM_CHANNELS`); `invoke adaptiveCard/action` with our verb → **authorize the clicker against the run's team** (see below), then record the decision and refresh the card. |
-| **In-Teams approver authz (per-team)** | `messages-handler.ts` + `hitl/identity.ts` (`approverTeamIdentity`) | The button click carries the clicker's `from.aadObjectId`; it is resolved through `HITL_APPROVER_TEAMS` (fail-closed on an unknown id) and gated on the SAME `canAccessDag` predicate the HTTP approve path uses, against the run's DAG-owning team. A non-member's (or unknown user's) click is refused and `recordDecision` is never called (SC-006). |
+| **In-Teams approver authz (per-team)** | `messages-handler.ts` + `packages/host/src/hitl/identity.ts` (`approverTeamIdentity`) | The button click carries the clicker's `from.aadObjectId`; it is resolved through `HITL_APPROVER_TEAMS` (fail-closed on an unknown id) and gated on the SAME `canAccessDag` predicate the HTTP approve path uses, against the run's DAG-owning team. A non-member's (or unknown user's) click is refused and `recordDecision` is never called (SC-006). |
 | Adaptive Card | `packages/host/src/hitl/adapters/bot/card.ts` | AdaptiveCard v1.4, Approve/Reject `Action.Execute` (verb `fugue.review`) with a required reason on reject. |
 | Proactive send | `packages/host/src/hitl/adapters/bot/connector.ts` | Mints an app-only connector token via `client_credentials` using `BOT_APP_ID` + `BOT_APP_PASSWORD`; default token endpoint `https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token`, scope `https://api.botframework.com/.default`. Single-tenant bots override via `BOT_TOKEN_URL`. |
 | `serviceUrl` allowlist | `packages/host/src/hitl/adapters/bot/trusted-host.ts` | The connector only ever sends its bearer token to `*.botframework.com` / `*.skype.com` / `smba.trafficmanager.net` (SSRF / credential-leak defence). |
@@ -40,7 +40,7 @@ against `main` at authoring time):
 > The clicker's `from.aadObjectId` is resolved through `HITL_APPROVER_TEAMS`
 > (config map: `aadObjectId → team ids`) to an approver identity — **fail-closed on
 > an unknown id** — and gated on the same `canAccessDag` check the HTTP path uses
-> (`messages-handler.ts`; `approverTeamIdentity` in `hitl/identity.ts`). A
+> (`messages-handler.ts`; `approverTeamIdentity` in `packages/host/src/hitl/identity.ts`). A
 > non-member's or unmapped user's click is **refused without recording** (SC-006).
 > Per-team conversation routing (`HITL_TEAM_CHANNELS`) additionally delivers each
 > team's cards to its own channel.
@@ -74,7 +74,7 @@ secret**; these become `BOT_APP_ID` and `BOT_APP_PASSWORD`. The exact creation U
 varies; the load-bearing outputs are what the host needs.
 
 1. **Azure portal → Create a resource → Azure Bot.**
-   - Bot handle: e.g. `fugue-hitl-bot`.
+   - Bot handle: e.g. fugue-hitl-bot.
    - **Type of App / Microsoft App ID:** create a **new** Entra app registration
      (single-tenant is the common case; if you choose single-tenant you MUST set
      `BOT_TOKEN_URL` in step 4). Record the **Microsoft App ID** → this is
@@ -138,7 +138,7 @@ The Azure Bot needs a Teams app package (manifest + icons) so the bot can be add
 to a channel.
 
 1. Create a Teams app manifest (`manifest.json`) whose `bots[].botId` = `BOT_APP_ID`,
-   with the `team`/`groupChat` scopes as needed and `supportsCalling`/`supportsVideo`
+   with the `team`/groupChat scopes as needed and supportsCalling/supportsVideo
    = false.
 2. Zip the manifest + a colour and outline icon; upload via Teams (Apps → Manage
    your apps → Upload a custom app) or your tenant's app catalog.

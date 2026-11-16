@@ -9,7 +9,7 @@
 
 ADR 0009 fixed the silent-HITL-drop in the original ADR 0007 predicate, but the routing surface has since grown:
 
-- **Retries declared on the DAG.** A DAG with `defaultRetryLimit` or `retryLimits: {…}` set on `DagDef` requires the state-machine path — `runDagInner` has no retry loop. The pre-ADR-0019 predicate routed such DAGs through the legacy path and ignored the retry config entirely, producing silently zero-retry runs.
+- **Retries declared on the DAG.** A DAG with `defaultRetryLimit` or `retryLimits: {…}` set on `DagDef` requires the state-machine path — runDagInner has no retry loop. The pre-ADR-0019 predicate routed such DAGs through the legacy path and ignored the retry config entirely, producing silently zero-retry runs.
 - **Conditional edges.** ADR 0015 introduced `EdgeDef.when` predicates and ADR 0016 added structural predicates. The active-set / pruning logic that makes these edges meaningful lives only in `runDagStateful` (via `decideRoute` and `computeIncomingByNode`). The legacy fast path has no concept of edge pruning. Without this routing trigger, a conditional edge in a DAG with no other SM trigger silently degrades to "edge is always active."
 - **`onBackground` as routing trigger.** Removed by ADR 0018 — `onBackground` is now supported on both paths and routing is decided by *durability* requirements, not by tail-latency preferences.
 
@@ -50,7 +50,7 @@ Where:
 
 - `dagDeclaresHITL` = `dag.nodes.some(n => n.humanReview !== undefined)` — unchanged from ADR 0009.
 - `dagDeclaresRetries` = `dag.defaultRetryLimit !== undefined || (dag.retryLimits && Object.keys(dag.retryLimits).length > 0)`.
-- `dagDeclaresConditionalEdges` = `dag.edges.some(e => isConditionalEdge(e) || isDefaultEdge(e))` — uses the type-guards from `types/dag.ts`.
+- `dagDeclaresConditionalEdges` = `dag.edges.some(e => isConditionalEdge(e) || isDefaultEdge(e))` — uses the type-guards from `packages/framework/src/types/dag.ts`.
 - `opts?.jobLike !== undefined` — call-site supplies a durable job handle.
 - `opts?.retryLimits !== undefined` — call-site overrides per-node retry budgets.
 
@@ -75,14 +75,14 @@ From ADR 0009 — unchanged:
 
 ### `resume` × SM-path incompatibility retained
 
-From ADR 0007, unchanged: `opts.resume` is the legacy-path-only checkpoint replay. If `useStateMachinePath` is `true` and `opts.resume` is also set, `runDag` returns a `node-crash` error directing the caller to use `jobLike.data.context.outputs` instead.
+From ADR 0007, unchanged: `opts.resume` is the legacy-path-only checkpoint replay. If useStateMachinePath is `true` and `opts.resume` is also set, `runDag` returns a `node-crash` error directing the caller to use `jobLike.data.context.outputs` instead.
 
 ## Consequences
 
 **Positive:**
 
 - Three classes of silent-degradation removed: retries-declared, conditional-edges-declared, and no-`jobLike` durability-claim. All three now either *do* what the author declared or *say* (via warning or error) that they aren't doing it.
-- The predicate's right-hand side now matches the SM path's feature set 1:1 — every feature `runDagStateful` implements that `runDagInner` does not is in the disjunction. New SM-only features will add one disjunct each.
+- The predicate's right-hand side now matches the SM path's feature set 1:1 — every feature `runDagStateful` implements that runDagInner does not is in the disjunction. New SM-only features will add one disjunct each.
 - The warning gives operators a single search string (`"DAG declares retries/conditional edges"`) to find at-risk runs in production logs, before they crash.
 - The HITL contract from ADR 0009 is preserved as-is — no regressions on the previously-documented behavior.
 
@@ -98,7 +98,7 @@ From ADR 0007, unchanged: `opts.resume` is the legacy-path-only checkpoint repla
 
 2. **Make `dagDeclaresRetries` / `dagDeclaresConditionalEdges` errors when `jobLike` is missing (not just warnings).** Rejected for the same reason — too aggressive for cases where in-memory is the intent.
 
-3. **Encode the predicate as a method on `DagDef` (`dag.requiresStateMachine()`).** Considered. The predicate is half DAG-shape (HITL nodes, retries, conditional edges) and half call-site opts (`jobLike`, `retryLimits`). Splitting the encoding loses the unified-disjunction readability. Kept as a flat predicate at the routing site.
+3. **Encode the predicate as a method on `DagDef` (dag.requiresStateMachine()).** Considered. The predicate is half DAG-shape (HITL nodes, retries, conditional edges) and half call-site opts (`jobLike`, `retryLimits`). Splitting the encoding loses the unified-disjunction readability. Kept as a flat predicate at the routing site.
 
 4. **Phase 5 retirement instead of extending the predicate.** Considered. Wave 7 §7.3 plans this; it is the right long-term fix. Until then, the predicate must be correct, because the legacy path is still reachable for the DAGs the predicate misses.
 

@@ -71,7 +71,7 @@ Inputs/outputs are stored via `SpanAttributeRegistry` as `mlflow.spanInputs` / `
 
 OTel's JS SDK only accepts primitive attribute values (`string | number | boolean | Array<...>`). Calling `span.setAttribute("mlflow.llm.cost", {input_cost: 0.001})` is silently dropped.
 
-MLflow's server expects `mlflow.llm.cost` as a **structured object** (decoded from protobuf `kvlist_value`).
+MLflow's server expects `mlflow.llm.cost` as a **structured object** (decoded from protobuf kvlist_value).
 
 ### Solution: SpanAttributeRegistry
 
@@ -88,7 +88,7 @@ SpanAttributeRegistry.set(spanId, {
 });
 ```
 
-At export time the exporter wraps each `ReadableSpan` in a `Proxy` whose `attributes` getter merges the registry entry on top of the underlying primitive attributes — the original span object is never mutated. The `otlp-transformer` handles objects natively (emits `kvlist_value`), bypassing the SDK's validation.
+At export time the exporter wraps each `ReadableSpan` in a `Proxy` whose `attributes` getter merges the registry entry on top of the underlying primitive attributes — the original span object is never mutated. The otlp-transformer handles objects natively (emits kvlist_value), bypassing the SDK's validation.
 
 ### Declarative translator tables
 
@@ -139,20 +139,20 @@ const handle = await initTracing({
 });
 ```
 
-`TracingConfig` takes `{ exporter, policy }` — there is no `trackingUri`/`experimentId` on it. The MLflow tracking server and experiment are configured on the exporter: `createMlflowExporter({ url, experimentId })`. The exporter's `url` is the OTLP endpoint base — the exporter POSTs to `{url}/v1/traces` — and `experimentId` is sent as the `x-mlflow-experiment-id` header. The `exporter` field also accepts a non-empty list of exporters for multi-backend export (see [Multi-Backend Trace Export](#multi-backend-trace-export-mlflow--azure-ai-foundry)).
+`TracingConfig` takes `{ exporter, policy }` — there is no trackingUri/`experimentId` on it. The MLflow tracking server and experiment are configured on the exporter: `createMlflowExporter({ url, experimentId })`. The exporter's `url` is the OTLP endpoint base — the exporter POSTs to `{url}/v1/traces` — and `experimentId` is sent as the `x-mlflow-experiment-id` header. The `exporter` field also accepts a non-empty list of exporters for multi-backend export (see [Multi-Backend Trace Export](#multi-backend-trace-export-mlflow--azure-ai-foundry)).
 
 ## Why Not Use MlflowSpanExporter?
 
-The `@mlflow/core` JS SDK's `MlflowSpanExporter` uses a different path:
+The `@mlflow/core` JS SDK's MlflowSpanExporter uses a different path:
 - `POST /api/3.0/mlflow/traces` (StartTraceV3) — creates trace metadata in SQL
 - `PUT .../traces.json` — uploads spans as JSON artifacts
 
-This path **does not populate `span_metrics`** because:
-1. Spans are stored as artifacts, not parsed by `log_spans()`
+This path **does not populate span_metrics** because:
+1. Spans are stored as artifacts, not parsed by log_spans()
 2. The server never extracts `mlflow.llm.cost` from artifact data
-3. The Cost Breakdown card queries `span_metrics` which remains empty
+3. The Cost Breakdown card queries span_metrics which remains empty
 
-The OTLP path (`POST /v1/traces`) goes through `log_spans()` which extracts cost from span attributes and writes to `span_metrics`.
+The OTLP path (`POST /v1/traces`) goes through log_spans() which extracts cost from span attributes and writes to span_metrics.
 
 ## Multi-Backend Trace Export (MLflow + Azure AI Foundry)
 
@@ -221,6 +221,6 @@ See [observability-backends.md](./observability-backends.md) for the full select
 ## Limitations
 
 - **ReadableSpan.attributes mutation**: We mutate the attributes object after the SDK's validation. This works because JS doesn't enforce immutability, but could break if a future OTel SDK version freezes the object.
-- **Trace ID quotes**: MLflow's `from_otel_proto()` double-encodes the trace ID attribute, resulting in `"tr-..."` (with embedded quotes) in the database. This is cosmetic and doesn't affect UI functionality.
+- **Trace ID quotes**: MLflow's from_otel_proto() double-encodes the trace ID attribute, resulting in `"tr-..."` (with embedded quotes) in the database. This is cosmetic and doesn't affect UI functionality.
 - **Cache hits have no cost**: If an LLM response is served from Redis cache, no cost/token attributes are recorded for that span (correct — no LLM call was made).
 - **Foundry connection string still required under Entra ID**: even with `AZURE_AUTH_MODE=entra-id`, an Application Insights connection string must be supplied — the Azure Monitor SDK needs it to locate the ingestion endpoint. Project-endpoint auto-discovery of the connection string is out of scope this iteration (FR-024).

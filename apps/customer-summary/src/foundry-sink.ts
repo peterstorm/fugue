@@ -15,15 +15,15 @@
  * (`useGlobalProviders: false`): manual track calls only, NO global Azure
  * Monitor distro and NO global OpenTelemetry provider registration. This keeps
  * the app's domain-event sink from colliding with the framework's own global
- * `TracerProvider` (the tracing pipeline's `NodeSDK`), which would otherwise
+ * TracerProvider (the tracing pipeline's `NodeSDK`), which would otherwise
  * race the distro for the single process-global provider with undefined
  * last-writer-wins precedence.
  *   - connection-string mode: the connection string governs auth.
  *   - entra-id mode: the same isolated client, plus a `DefaultAzureCredential`
  *     attached via `config.aadTokenCredential` (the connection string still
  *     carries the ingestion endpoint). The shim's lazy `initialize()` reads that
- *     credential through `parseConfig()` into the isolated client's Azure Monitor
- *     exporter — so AAD auth needs NO global `useAzureMonitor` pipeline.
+ *     credential through parseConfig() into the isolated client's Azure Monitor
+ *     exporter — so AAD auth needs NO global useAzureMonitor pipeline.
  *
  * Fail-tolerance (observability spec FR-028): track-call fault isolation is provided by the observer
  * wrappers (the framework's `AiFoundryObserver` and the app's
@@ -86,7 +86,7 @@ export const foundrySinkOver = (client: AppInsightsClient): FoundryTelemetrySink
 /**
  * The mutable AAD-auth surface of the shim `TelemetryClient`. `applicationinsights@3.x`
  * exposes `client.config.aadTokenCredential`; the lazy `initialize()` reads it
- * via `parseConfig()` into the isolated client's Azure Monitor exporter
+ * via parseConfig() into the isolated client's Azure Monitor exporter
  * credential. Narrowed here so {@link applyCredential} can set it without the
  * whole `Config` surface, and so the cast lives in exactly one place.
  */

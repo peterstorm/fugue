@@ -175,14 +175,14 @@ const assertIndexOrAttempt = (kind: "index" | "attempt", value: number): void =>
   // `isNonNegativeSafeInteger` carries the `typeof value === "number"` guard
   // as its own first conjunct — no separate clause is needed, and the
   // predicate short-circuits on non-numbers before any `>= 0`/coercion, so a
-  // hostile `valueOf`/`toString` cannot trap here (pinned in
+  // hostile valueOf/`toString` cannot trap here (pinned in
   // composite-node-key.test.ts, "rejects a throwing-hook … with the codec's
   // own typed message (never a raw trap)").
   if (!isNonNegativeSafeInteger(value)) {
     // The codec's contract is TYPED throws: the diagnostic names the codec's
     // rule, never the hostile value's own error text. `safeDiagnosticRender`
     // is total — it renders objects via the object tag before any guarded
-    // coercion, so a hostile `toString`/`valueOf` cannot trap inside this
+    // coercion, so a hostile `toString`/valueOf cannot trap inside this
     // codec's own message construction (pinned in the same test: the
     // rejection must not contain the hostile's "exploded" text).
     throw new Error(

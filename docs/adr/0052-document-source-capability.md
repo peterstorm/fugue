@@ -113,8 +113,8 @@ it rots into a lowest-common-denominator lie.
 
 Because a node requires `["documents"]` without naming a provider, the type
 system cannot guarantee that the `FileRef` variant handed in is one this
-adapter understands. The MS Graph adapter handles the `msGraph`-style variants;
-a future foreign variant (`googleDriveFile`) handed to it returns a
+adapter understands. The MS Graph adapter handles the msGraph-style variants;
+a future foreign variant (googleDriveFile) handed to it returns a
 **fail-closed `FrameworkError`**, not a crash. This is the deliberate price of
 "the node doesn't know the provider." (Before the second adapter, with a single
 adapter over a closed union, this was a compile-time guarantee; now that
@@ -141,7 +141,7 @@ theoretical.
 ### Local files in a container (OpenShift)
 
 The `@fuguejs/fs` adapter reads from a `rootDir` on the pod filesystem, confined to
-that tree (the local equivalent of `Sites.Selected` — `../` traversal and
+that tree (the local equivalent of Sites.Selected — `../` traversal and
 absolute escapes are rejected non-retriably). Because a pod's filesystem is
 ephemeral and per-replica, "get the file onto disk" in OpenShift is a *delivery*
 question separate from the read, and ranks roughly:
@@ -159,9 +159,9 @@ question separate from the read, and ranks roughly:
    container, which then reads it via `@fuguejs/fs`. Bridges a remote source to a
    local read without a persistent volume.
 4. **ConfigMap / Secret volume.** Only for small (<~1 MiB), static files; use a
-   Secret (binary via `binaryData`) for sensitive content. Most spreadsheets are
+   Secret (binary via binaryData) for sensitive content. Most spreadsheets are
    too large.
-5. **Baked into the image** (`COPY`). Only for truly static, non-sensitive,
+5. **Baked into the image** (COPY). Only for truly static, non-sensitive,
    build-time data; immutable and versioned with the image.
 
 Object storage (S3 / Azure Blob) is the cloud-native answer to "a file in the
@@ -180,9 +180,9 @@ large enough that in-memory download hurts, or live ranges are needed.)
 
 ### Least privilege
 
-When the backend is SharePoint, provision the Entra app with **`Sites.Selected`**
+When the backend is SharePoint, provision the Entra app with **Sites.Selected**
 (admin grants access to only the specific site(s) holding the file) rather than
-tenant-wide `Sites.Read.All` / `Files.Read.All`. This matches the team-isolation
+tenant-wide Sites.Read.All / Files.Read.All. This matches the team-isolation
 posture enforced elsewhere.
 
 ## Consequences
@@ -231,14 +231,14 @@ Delivered on this branch (compiling, unit-tested, no network):
 Remaining (gated on decisions not yet available):
 
 - (delivered) Token-provider wiring in the host config: app-only client
-  credentials (no auth SDK — the provider is pure, `adapters/ms-graph-token.ts`:
+  credentials (no auth SDK — the provider is pure, `packages/host/src/adapters/ms-graph-token.ts`:
   single-flight, cached with a 60 s refresh lead, secrets never logged), wired
   from `MSGRAPH_TENANT_ID` / `MSGRAPH_CLIENT_ID` / `MSGRAPH_CLIENT_SECRET` with
   sovereign-cloud overrides (`MSGRAPH_BASE_URL` / `MSGRAPH_TOKEN_URL` /
   `MSGRAPH_SCOPE` / `MSGRAPH_REQUEST_TIMEOUT_MS`). `DOCUMENTS_ADAPTER=ms-graph`
   is now a first-class host config value in BOTH entries (single-tenant
   `main.ts` and multi-tenant `worker-main.ts`) via the shared
-  `adapters/documents-capability.ts` builder.
+  `packages/host/src/adapters/documents-capability.ts` builder.
 - (delivered) The concrete variant in production is SharePoint
   `sharePointPathRef`. Tenants whose Graph backend rejects the documented
   item-path URL forms tenant-wide (probed live — peterstorm/fugue#36) use the

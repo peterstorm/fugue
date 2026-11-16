@@ -4,38 +4,18 @@ import { match } from "ts-pattern";
 import type { Result, FrameworkError, GuardrailResult } from "@fuguejs/framework";
 import { SummaryResponseSchema } from "../../schemas/response.js";
 import type { SummaryResponse } from "../../schemas/response.js";
-import { SynthesisOutputSchema } from "../../schemas/summary.js";
+import {
+  GuardrailFailedSchema,
+  GuardrailSkippedSchema,
+  GuardrailValidatedSchema,
+} from "../../schemas/guardrail.js";
 import type { SynthesisOutput } from "../../schemas/summary.js";
 import type { ExtractionResult } from "./extract-features.js";
 
-const GuardrailCheckSchema = z.object({
-  dimension: z.string(),
-  passed: z.boolean(),
-  detail: z.string(),
-});
-
 const GuardrailResultSchema = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("skipped"),
-    value: z.undefined(),
-    passed: z.literal(true),
-    warnings: z.array(z.string()),
-    checks: z.array(GuardrailCheckSchema),
-  }),
-  z.object({
-    kind: z.literal("validated"),
-    value: SynthesisOutputSchema,
-    passed: z.boolean(),
-    warnings: z.array(z.string()),
-    checks: z.array(GuardrailCheckSchema),
-  }),
-  z.object({
-    kind: z.literal("failed"),
-    passed: z.literal(false),
-    error: z.string(),
-    warnings: z.array(z.string()),
-    checks: z.array(GuardrailCheckSchema),
-  }),
+  GuardrailSkippedSchema,
+  GuardrailValidatedSchema,
+  GuardrailFailedSchema,
 ]);
 
 const InputSchema = z.object({
@@ -71,10 +51,19 @@ export const createAssembleResponseNode = () =>
         )
         .with({ branch: "ok" }, () => {
           const guardrail = input["grounding-guardrail"];
-          if (guardrail === undefined || guardrail.kind === "skipped" || guardrail.kind === "failed") {
-            // Guardrail output missing, skipped, or failed — degrade gracefully.
+          if (guardrail === undefined || guardrail.kind === "skipped") {
+            // Guardrail output missing or skipped — degrade gracefully.
             // The transform is pure; diagnostics belong to the observer shell.
             return ok({ status: "degraded" as const, customerId, message: "Guardrail data unavailable" });
+          }
+          if (guardrail.kind === "failed") {
+            // The wrapper caught a validator throw: degrade AND surface the
+            // error — the run continues, but the message must say why.
+            return ok({
+              status: "degraded" as const,
+              customerId,
+              message: `Guardrail failed: ${guardrail.error}`,
+            });
           }
           const synthesis = guardrail.value;
 

@@ -12,7 +12,7 @@ Single-host multi-tenancy (`.claude/plans/2026-06-18-multi-tenant-single-host.md
 **AD-4**) gives each tenant's worker a **Redis ACL user scoped to one key
 prefix**: `~fugue:<tenant>:*`, `+@all` within that keyspace. A compromised /
 RCE'd worker that runs `SCAN fugue:*` or `GET fugue:<other>:...` is then
-**refused by Redis** with a `NOPERM` error — isolation is enforced by Redis, not
+**refused by Redis** with a NOPERM error — isolation is enforced by Redis, not
 by application code the attacker controls.
 
 That ACL scoping is only **sound if no key escapes the tenant prefix.** Before
@@ -65,7 +65,7 @@ live under `fugue:<tenant>:…`, and **no** host-produced key escapes the prefix
 - **`packages/host/src/domain/cache-keys.ts`** — `TenantId` is now a **required,
   hard-branded first argument** on `cacheKeyPrefix`, `buildCacheKey`,
   `checkpointKeyPrefix`, `buildCheckpointKey`. A plain `string` does not satisfy
-  `TenantId`; the smart constructor `tenantId` (`domain/tenant.ts`) validates
+  `TenantId`; the smart constructor `tenantId` (`packages/host/src/domain/tenant.ts`) validates
   against `TENANT_ID_REGEX` = `^[A-Za-z0-9_-]{1,64}$` — **`:` and glob
   metacharacters (`*`, `?`, `[`, `]`) are rejected** so a tenant id can never
   inject an extra `:` segment to forge another tenant's namespace NOR craft a
@@ -78,7 +78,7 @@ live under `fugue:<tenant>:…`, and **no** host-produced key escapes the prefix
   store instance can only ever name its own tenant's keys.
 - **`packages/host/src/hitl/adapters/*`** — the four durable HITL stores
   (`run-store` run/ckpt, `decision-store` pending/decision, `run-queue` lock,
-  `bot/conversation-store` convref) each take a bound `TenantId` and force every
+  `packages/host/src/hitl/adapters/bot/conversation-store` convref) each take a bound `TenantId` and force every
   key under `fugue:<tenant>:hitl:…`. A store instance can only ever name its own
   tenant's HITL keys.
 - **`packages/host/src/adapters/node-context-factory.ts`** — threads the tenant
@@ -218,7 +218,7 @@ spawns fail closed (`worker-unavailable`) — leave the flag off until the admin
 credential is provisioned.
 
 Verify isolation (SC-001): connected as `fugue-tenant-<tenantA>`, the following must
-return `NOPERM`, proving zero bytes escape the prefix:
+return NOPERM, proving zero bytes escape the prefix:
 
 ```
 SCAN 0 MATCH fugue:*
@@ -230,12 +230,12 @@ GET  fugue:<tenantB>:tokens:<anyhash>
 ## Verification checklist
 
 - [ ] `bun run typecheck` green (a bare `string` no longer satisfies a key builder).
-- [ ] `packages/host/src/domain/cache-keys.test.ts`: every builder output starts
+- [ ] `packages/host/src/__tests__/domain/cache-keys.test.ts`: every builder output starts
       with `fugue:<tenant>:`; two tenants never collide; per-DAG isolation
       preserved within a tenant.
 - [ ] `packages/host/src/__tests__/token-store.test.ts`: token/team keys
       tenant-prefixed; two tenants with an identical team + hash do not collide;
       revoke/list/resolve never cross tenants.
 - [ ] `tenantId` rejects a `:`-containing id AND a glob-metacharacter id (`*`,
-      `?`, `[`, `]`) — see `packages/host/src/domain/tenant.test.ts`.
-- [ ] After rekey: `SCAN fugue:*` as a tenant ACL user returns `NOPERM`.
+      `?`, `[`, `]`) — see `packages/host/src/__tests__/domain/tenant.test.ts`.
+- [ ] After rekey: `SCAN fugue:*` as a tenant ACL user returns NOPERM.

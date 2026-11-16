@@ -218,13 +218,14 @@ const reachedBy = (observed: number, limit: number): boolean =>
 export const breachOf = (spend: Spend, ceiling: Ceiling, basis: Basis): Breach | undefined =>
   match(ceiling)
     .returnType<Breach | undefined>()
-    .with({ kind: "tokens" }, (c) =>
-      spend.usage === "unknown"
-        ? { kind: "unknown-usage", ceiling: c, basis, observedAtLeast: spend.tokens }
-        : reachedBy(spend.tokens, c.limit)
-          ? { kind: "reached", ceiling: c, basis, observed: spend.tokens }
-          : undefined,
-    )
+    .with({ kind: "tokens" }, (c) => {
+      if (spend.usage === "unknown") {
+        return { kind: "unknown-usage", ceiling: c, basis, observedAtLeast: spend.tokens };
+      }
+      return reachedBy(spend.tokens, c.limit)
+        ? { kind: "reached", ceiling: c, basis, observed: spend.tokens }
+        : undefined;
+    })
     .with({ kind: "calls" }, (c) =>
       reachedBy(spend.calls, c.limit)
         ? { kind: "reached", ceiling: c, basis, observed: spend.calls }

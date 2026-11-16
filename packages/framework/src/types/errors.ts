@@ -5,7 +5,7 @@
 //   Two fan outcome kinds, built ONLY through the sole constructors in
 //   `types/error-factories.ts` (`frameworkError.fanBudgetRefused` /
 //   `.fanChildFailed`; INV-2, enforced fail-closed by the
-//   `inv-2-fan-errors-via-factory` lint rule, tests excepted):
+//   `.claude/linter/rules/inv-2-fan-errors-via-factory.json` lint rule, tests excepted):
 //
 //   - `fan-budget-refused { nodeId; refusal }` — the drain cause was a
 //     projection refusal and NO child failed (FR-014, FR-015). It is
@@ -39,7 +39,7 @@
 //   versa) — the failure mode that previously shipped two silently divergent
 //   hand-maintained lists.
 
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import { z } from "zod";
 import { tryNodeId, tryRunId } from "./ids.js";
 // The checkpoint-address ADTs and their ONE construction path live in a leaf
@@ -933,6 +933,36 @@ export const usageOfError = (e: FrameworkError): PartialTokenUsage | undefined =
 export type Retriability = "retriable" | "non-retriable";
 
 /**
+ * The kinds that carry no per-instance discriminant of their own: the failure
+ * is fully described by its structured context fields. `retriabilityOf` sends
+ * them down the standard backoff path and `messageOf` serialises the whole
+ * value. One list of context-only kinds shared by both matches, so the set is
+ * written once rather than copied. Each match still lists its other kinds
+ * itself (`retriabilityOf` puts `transient` beside it) and stays
+ * `.exhaustive()`; that, not this list, is what stops a kind going
+ * unclassified. Being a `P.union`, every member stays visible to that check.
+ */
+const CONTEXT_ONLY_KINDS = P.union(
+  { kind: "retry-exhausted" },
+  { kind: "checkpoint-missing" },
+  { kind: "checkpoint-expired" },
+  { kind: "checkpoint-corrupt" },
+  { kind: "checkpoint-version-mismatch" },
+  { kind: "prompt-not-found" },
+  { kind: "cache-error" },
+  { kind: "cycle-detected" },
+  { kind: "rejected" },
+  { kind: "invalid-reroute" },
+  { kind: "missing-default-edge" },
+  { kind: "output-unreachable-under-routing" },
+  { kind: "duplicate-edge" },
+  { kind: "root-expects-input" },
+  { kind: "source-has-incoming" },
+  { kind: "invalid-dag-input-edge" },
+  { kind: "infra-unreachable" },
+);
+
+/**
  * The single total classification used by the DAG retry machinery. Adding a
  * FrameworkError kind without classifying it is a compile error, so a new kind
  * can never silently default to the unsafe retriable direction.
@@ -980,23 +1010,7 @@ export const retriabilityOf = (e: FrameworkError): Retriability =>
     // historical fall-through default rather than asserting they would retry.
     .with(
       { kind: "transient" },
-      { kind: "retry-exhausted" },
-      { kind: "checkpoint-missing" },
-      { kind: "checkpoint-expired" },
-      { kind: "checkpoint-corrupt" },
-      { kind: "checkpoint-version-mismatch" },
-      { kind: "prompt-not-found" },
-      { kind: "cache-error" },
-      { kind: "cycle-detected" },
-      { kind: "rejected" },
-      { kind: "invalid-reroute" },
-      { kind: "missing-default-edge" },
-      { kind: "output-unreachable-under-routing" },
-      { kind: "duplicate-edge" },
-      { kind: "root-expects-input" },
-      { kind: "source-has-incoming" },
-      { kind: "invalid-dag-input-edge" },
-      { kind: "infra-unreachable" },
+      CONTEXT_ONLY_KINDS,
       () => "retriable" as const,
     )
     .exhaustive();
@@ -1042,23 +1056,7 @@ export const messageOf = (e: unknown): string => {
         { kind: "downstream-denied" },
         { kind: "llm-budget-exceeded" },
         { kind: "missing-capability" },
-        { kind: "retry-exhausted" },
-        { kind: "checkpoint-missing" },
-        { kind: "checkpoint-expired" },
-        { kind: "checkpoint-corrupt" },
-        { kind: "checkpoint-version-mismatch" },
-        { kind: "prompt-not-found" },
-        { kind: "cache-error" },
-        { kind: "cycle-detected" },
-        { kind: "rejected" },
-        { kind: "invalid-reroute" },
-        { kind: "missing-default-edge" },
-        { kind: "output-unreachable-under-routing" },
-        { kind: "duplicate-edge" },
-        { kind: "root-expects-input" },
-        { kind: "source-has-incoming" },
-        { kind: "invalid-dag-input-edge" },
-        { kind: "infra-unreachable" },
+        CONTEXT_ONLY_KINDS,
         (rest) => JSON.stringify(rest),
       )
       .exhaustive();

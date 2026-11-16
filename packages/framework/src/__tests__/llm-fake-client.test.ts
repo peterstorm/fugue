@@ -489,7 +489,7 @@ describe("FakeLlmClient — FR-040 total guards (never a raw rejection)", () => 
   });
 
   // Round-10 A6 (type-design-analyzer): `sendStructured` used to return
-  // `raw as O` with no validation, while the `withTools` final-turn seam
+  // `raw as O` with no validation, while the `sendWithTools` final-turn seam
   // runs `req.schema.safeParse` — a fixture violating the declared schema
   // silently passed the cast. The fake now validates the toolless path too.
   test("a sendStructured fixture violating the declared schema is a typed node-crash (never a silent O cast)", async () => {
@@ -774,7 +774,7 @@ describe("FakeLlmClient: scripted prompt-cache figures", () => {
 // ── LlmClient port variance pin (round-14 C1) ───────────────────────────────
 // `LlmClient`'s members are declared as readonly ARROW PROPERTIES, not method
 // shorthand. TypeScript checks method-shorthand parameters BIVARIANTLY even
-// under `strictFunctionTypes`, so a shorthand declaration would let an
+// under strictFunctionTypes, so a shorthand declaration would let an
 // implementation narrow `ctx` to a type demanding fields a plain `NodeContext`
 // does not carry — satisfying the interface structurally, then crashing at
 // runtime when the framework invokes it with the context it built itself

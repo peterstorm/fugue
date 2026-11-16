@@ -1194,7 +1194,7 @@ describe("authored codegen survives the gauntlet", () => {
   it("an llm ASSEMBLE consumes the { join, $input } fan-in with '$input' sanitized to '_input'", () => {
     const scaffold = buildAuthoredScaffold(mustParse(FIXTURES["sources-llm-assemble"]!));
     // buildInput reads the raw fan-in keys but emits identifier-safe
-    // placeholder names — `$input` → `_input`, `join-all` → `join_all`.
+    // placeholder names — `$input` → `_input`, join-all → join_all.
     expect(scaffold.dagTs).toContain('_input: JSON.stringify(input["$input"])');
     expect(scaffold.dagTs).toContain('join_all: JSON.stringify(input["join-all"])');
     // The prompt uses the SAME sanitized placeholder, so template and
@@ -1573,7 +1573,7 @@ describe("structuralProjection (loom cross-repo contract)", () => {
     // against the exact projected string:
     //   lazy→greedy   — a greedy match swallows `const between = 1;` into one
     //                   region and the exact output loses it → FAIL.
-    //   g-flag removal — only the first region collapses; `body-two` survives
+    //   g-flag removal — only the first region collapses; body-two survives
     //                   into the output → FAIL.
     //   replacement    — anything but the bare START marker as the
     //                   replacement token changes the output → FAIL.
@@ -1755,7 +1755,7 @@ describe("hostile free-text properties", () => {
   // free-text property never mutates enum values, so these four sites went
   // uncovered against hostile input. Note: an LLM node's `confidence` field is
   // pinned to the exact bucket enum, so we cover the LLM-prompt jsonShape via a
-  // NON-confidence enum output field (`sources-llm`) and the router when.equals
+  // NON-confidence enum output field (sources-llm) and the router when.equals
   // via a fetch classifier's free-form enum (plain `router`).
   const HOSTILE_ENUMS = ['a"b', "a`b", "a${b}", '"; DROP TABLE dags; --'] as const;
 

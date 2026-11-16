@@ -191,18 +191,19 @@ type CorruptTenantRecord = {
 const corruptTenantRecord = (reason: string): Result<never, CorruptTenantRecord> =>
   err({ kind: "corrupt-tenant-record", reason });
 
-/** Parse persisted bytes into the validated tenant ADT or a typed corruption. */
-const deserialize = (raw: string): Result<TenantConfig, CorruptTenantRecord> => {
-  let obj: unknown;
-  try {
-    obj = JSON.parse(raw);
-  } catch {
-    return corruptTenantRecord("invalid JSON");
-  }
-  if (typeof obj !== "object" || obj === null || Array.isArray(obj)) {
-    return corruptTenantRecord("record must be an object");
-  }
-  const o = obj as Record<string, unknown>;
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** The identity/shape facts of a persisted record, checked before any field is read. */
+interface RecordShell {
+  readonly id: TenantId;
+  readonly secretsRef: string;
+  readonly km: Record<string, unknown>;
+  readonly adm: Record<string, unknown>;
+}
+
+/** Check the record's identity, status and the two nested objects. */
+const parseRecordShell = (o: Record<string, unknown>): Result<RecordShell, CorruptTenantRecord> => {
   if (typeof o.id !== "string") return corruptTenantRecord("id must be a string");
   const idR = tenantId(o.id);
   if (!idR.ok) return corruptTenantRecord("id is invalid");
@@ -215,19 +216,39 @@ const deserialize = (raw: string): Result<TenantConfig, CorruptTenantRecord> => 
   if (o.status === "deregistered" && typeof o.deregisteredAt !== "number") {
     return corruptTenantRecord("deregisteredAt must be numeric for a deregistered tenant");
   }
-  if (typeof o.keycloakClientMapping !== "object" || o.keycloakClientMapping === null || Array.isArray(o.keycloakClientMapping)) {
+  if (!isPlainObject(o.keycloakClientMapping)) {
     return corruptTenantRecord("keycloakClientMapping must be an object");
   }
-  if (typeof o.admission !== "object" || o.admission === null || Array.isArray(o.admission)) {
+  if (!isPlainObject(o.admission)) {
     return corruptTenantRecord("admission must be an object");
   }
-  const km = o.keycloakClientMapping as Record<string, unknown>;
-  const adm = o.admission as Record<string, unknown>;
-  const rawTeam = o.team;
-  const rawRealm = km.realm;
-  const rawClientId = km.clientId;
-  const rawFsRoot = o.fsRoot;
-  const rawDagsRoot = o.dagsRoot;
+  return ok({ id: idR.value, secretsRef: o.secretsRef, km: o.keycloakClientMapping, adm: o.admission });
+};
+
+const parseAgentClientIdsByDagRecord = (
+  rawAgentMap: unknown,
+): Result<Record<string, string>, CorruptTenantRecord> => {
+  if (!isPlainObject(rawAgentMap)) {
+    return corruptTenantRecord("agentClientIdsByDag must be an object");
+  }
+  const agentClientIdsByDag: Record<string, string> = {};
+  for (const [dag, value] of Object.entries(rawAgentMap)) {
+    if (typeof value !== "string") {
+      return corruptTenantRecord("agentClientIdsByDag values must be strings");
+    }
+    agentClientIdsByDag[dag] = value;
+  }
+  return ok(agentClientIdsByDag);
+};
+
+/** Build the validated tenant ADT from a record whose shell already parsed. */
+const tenantFromRecord = (
+  o: Record<string, unknown>,
+  shell: RecordShell,
+): Result<TenantConfig, CorruptTenantRecord> => {
+  const { km, adm } = shell;
+  const { team: rawTeam, fsRoot: rawFsRoot, dagsRoot: rawDagsRoot } = o;
+  const { realm: rawRealm, clientId: rawClientId } = km;
   if (
     typeof rawTeam !== "string" ||
     typeof rawRealm !== "string" ||
@@ -237,40 +258,23 @@ const deserialize = (raw: string): Result<TenantConfig, CorruptTenantRecord> => 
   ) {
     return corruptTenantRecord("team, realm, clientId, fsRoot, and dagsRoot must be strings");
   }
-  const rawAgentMap = km.agentClientIdsByDag;
-  if (typeof rawAgentMap !== "object" || rawAgentMap === null || Array.isArray(rawAgentMap)) {
-    return corruptTenantRecord("agentClientIdsByDag must be an object");
-  }
-  const agentClientIdsByDag: Record<string, string> = {};
-  for (const [dag, value] of Object.entries(rawAgentMap as Record<string, unknown>)) {
-    if (typeof value !== "string") {
-      return corruptTenantRecord("agentClientIdsByDag values must be strings");
-    }
-    agentClientIdsByDag[dag] = value;
-  }
-  const rawMaxConcurrentRuns = adm.maxConcurrentRuns;
-  const rawMaxQueuedRuns = adm.maxQueuedRuns;
-  if (typeof rawMaxConcurrentRuns !== "number" || typeof rawMaxQueuedRuns !== "number") {
+  const agentMap = parseAgentClientIdsByDagRecord(km.agentClientIdsByDag);
+  if (!agentMap.ok) return agentMap;
+  const { maxConcurrentRuns, maxQueuedRuns } = adm;
+  if (typeof maxConcurrentRuns !== "number" || typeof maxQueuedRuns !== "number") {
     return corruptTenantRecord("admission limits must be numbers");
   }
   if (typeof o.eagerPin !== "boolean") {
     return corruptTenantRecord("eagerPin must be a boolean");
   }
   const parsed = tenantConfig({
-    id: idR.value,
+    id: shell.id,
     team: markTeam(rawTeam),
-    keycloakClientMapping: {
-      realm: rawRealm,
-      clientId: rawClientId,
-      agentClientIdsByDag,
-    },
+    keycloakClientMapping: { realm: rawRealm, clientId: rawClientId, agentClientIdsByDag: agentMap.value },
     fsRoot: rawFsRoot,
     dagsRoot: rawDagsRoot,
-    secretsRef: markSecretsRef(o.secretsRef),
-    admission: {
-      maxConcurrentRuns: rawMaxConcurrentRuns,
-      maxQueuedRuns: rawMaxQueuedRuns,
-    },
+    secretsRef: markSecretsRef(shell.secretsRef),
+    admission: { maxConcurrentRuns, maxQueuedRuns },
     eagerPin: o.eagerPin,
   });
   if (!parsed.ok) return corruptTenantRecord("record violates tenant configuration invariants");
@@ -280,6 +284,22 @@ const deserialize = (raw: string): Result<TenantConfig, CorruptTenantRecord> => 
     status: "deregistered",
     deregisteredAt: o.deregisteredAt as number,
   });
+};
+
+/** Parse persisted bytes into the validated tenant ADT or a typed corruption. */
+const deserialize = (raw: string): Result<TenantConfig, CorruptTenantRecord> => {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    return corruptTenantRecord("invalid JSON");
+  }
+  if (!isPlainObject(obj)) {
+    return corruptTenantRecord("record must be an object");
+  }
+  const shell = parseRecordShell(obj);
+  if (!shell.ok) return shell;
+  return tenantFromRecord(obj, shell.value);
 };
 
 // ── Port ─────────────────────────────────────────────────────────────────────
@@ -701,18 +721,14 @@ export const createRedisTenantRegistry = (
 // ── Subscriber wiring (AD-5) ─────────────────────────────────────────────────
 
 /**
- * Subscribe to `fugue:tenants:events` and invoke `onEvent` for each well-formed
- * `TenantEvent`. The supervisor uses this to re-read a changed tenant's config
- * (workers pick up changes on their NEXT spawn, AD-5). Malformed messages are
- * dropped (logged), never thrown — a poisoned bus message must not crash the
- * subscriber. A subscribe failure fails closed via the degraded hook.
+ * Build the isolating event dispatcher: a throwing or rejecting `onEvent`
+ * handler (sync or async) is contained and logged, never allowed to surface as
+ * an unhandled pub/sub exception.
  */
-export const subscribeTenantEvents = async (
-  pubsub: RedisPubSubPort,
+const createEventDispatcher = (
   onEvent: (event: TenantEvent) => void | Promise<void>,
-  hooks: RegistryDegradedHooks = {},
-  logger?: LogPort,
-): Promise<Result<{ readonly unsubscribe: () => Promise<void> }, HostError>> => {
+  logger: LogPort | undefined,
+): ((event: TenantEvent) => void) => {
   const reportHandlerFailure = (event: TenantEvent, error: unknown): void => {
     let message: string;
     try {
@@ -741,6 +757,24 @@ export const subscribeTenantEvents = async (
       reportHandlerFailure(event, error);
     }
   };
+
+  return dispatchEvent;
+};
+
+/**
+ * Subscribe to `fugue:tenants:events` and invoke `onEvent` for each well-formed
+ * `TenantEvent`. The supervisor uses this to re-read a changed tenant's config
+ * (workers pick up changes on their NEXT spawn, AD-5). Malformed messages are
+ * dropped (logged), never thrown — a poisoned bus message must not crash the
+ * subscriber. A subscribe failure fails closed via the degraded hook.
+ */
+export const subscribeTenantEvents = async (
+  pubsub: RedisPubSubPort,
+  onEvent: (event: TenantEvent) => void | Promise<void>,
+  hooks: RegistryDegradedHooks = {},
+  logger?: LogPort,
+): Promise<Result<{ readonly unsubscribe: () => Promise<void> }, HostError>> => {
+  const dispatchEvent = createEventDispatcher(onEvent, logger);
 
   let sub;
   try {
@@ -786,29 +820,35 @@ interface InMemoryRedisFake {
   setFail: (fail: boolean) => void;
 }
 
-export const createInMemoryRedisFake = (): InMemoryRedisFake => {
-  const store = new Map<string, string>();
-  const sets = new Map<string, Set<string>>();
-  const published: Array<{ channel: string; message: string }> = [];
-  const subscribers = new Map<string, Set<(m: string) => void>>();
-  let failing = false;
+/** The shared mutable backing state of one fake: both ports read the same outage switch. */
+interface FakeState {
+  readonly store: Map<string, string>;
+  readonly sets: Map<string, Set<string>>;
+  readonly published: Array<{ channel: string; message: string }>;
+  readonly subscribers: Map<string, Set<(m: string) => void>>;
+  failing: boolean;
+}
 
-  const failErr = (op: string): Result<never, HostError> => err(redisUnavailable(op));
+const fakeFailErr = (op: string): Result<never, HostError> => err(redisUnavailable(op));
 
-  const redis: RedisPort = {
-    get: async (key) => (failing ? failErr("get") : ok(store.get(key) ?? null)),
+const createFakeKeyValuePort = (
+  state: FakeState,
+): Pick<RedisPort, "get" | "set" | "del" | "scan" | "setNx" | "compareAndDelete"> => {
+  const { store } = state;
+  return {
+    get: async (key) => (state.failing ? fakeFailErr("get") : ok(store.get(key) ?? null)),
     set: async (key, value) => {
-      if (failing) return failErr("set");
+      if (state.failing) return fakeFailErr("set");
       store.set(key, value);
       return ok(null);
     },
     del: async (key) => {
-      if (failing) return failErr("del");
+      if (state.failing) return fakeFailErr("del");
       const had = store.delete(key);
       return ok(had ? 1 : 0);
     },
     scan: async (pattern, cursor = "0") => {
-      if (failing) return failErr("scan");
+      if (state.failing) return fakeFailErr("scan");
       // Single-shot scan: return all matching keys, cursor "0" (done).
       void cursor;
       const prefix = pattern.endsWith("*") ? pattern.slice(0, -1) : pattern;
@@ -816,19 +856,25 @@ export const createInMemoryRedisFake = (): InMemoryRedisFake => {
       return ok({ cursor: "0", keys });
     },
     setNx: async (key, value) => {
-      if (failing) return failErr("setNx");
+      if (state.failing) return fakeFailErr("setNx");
       if (store.has(key)) return ok(false);
       store.set(key, value);
       return ok(true);
     },
     compareAndDelete: async (key, expected) => {
-      if (failing) return failErr("compareAndDelete");
+      if (state.failing) return fakeFailErr("compareAndDelete");
       if (store.get(key) !== expected) return ok(false);
       store.delete(key);
       return ok(true);
     },
+  };
+};
+
+const createFakeSetPort = (state: FakeState): Pick<RedisPort, "sAdd" | "sRem" | "sMembers"> => {
+  const { sets } = state;
+  return {
     sAdd: async (key, member) => {
-      if (failing) return failErr("sAdd");
+      if (state.failing) return fakeFailErr("sAdd");
       const set = sets.get(key) ?? new Set<string>();
       const had = set.has(member);
       set.add(member);
@@ -836,49 +882,64 @@ export const createInMemoryRedisFake = (): InMemoryRedisFake => {
       return ok(had ? 0 : 1);
     },
     sRem: async (key, member) => {
-      if (failing) return failErr("sRem");
+      if (state.failing) return fakeFailErr("sRem");
       const set = sets.get(key);
       if (!set || !set.has(member)) return ok(0);
       set.delete(member);
       return ok(1);
     },
     sMembers: async (key) => {
-      if (failing) return failErr("sMembers");
+      if (state.failing) return fakeFailErr("sMembers");
       return ok(Array.from(sets.get(key) ?? []));
     },
   };
+};
 
-  const pubsub: RedisPubSubPort = {
-    publish: async (channel, message) => {
-      if (failing) return failErr("publish");
-      published.push({ channel, message });
-      const subs = subscribers.get(channel);
-      if (subs) for (const h of subs) h(message);
-      return ok(undefined);
-    },
-    subscribe: async (channel, handler) => {
-      if (failing) return failErr("subscribe");
-      let set = subscribers.get(channel);
-      if (!set) {
-        set = new Set();
-        subscribers.set(channel, set);
-      }
-      set.add(handler);
-      return ok({
-        unsubscribe: async () => {
-          set?.delete(handler);
-        },
-      });
-    },
+const createFakeRedisPort = (state: FakeState): RedisPort => ({
+  ...createFakeKeyValuePort(state),
+  ...createFakeSetPort(state),
+});
+
+const createFakePubSubPort = (state: FakeState): RedisPubSubPort => ({
+  publish: async (channel, message) => {
+    if (state.failing) return fakeFailErr("publish");
+    state.published.push({ channel, message });
+    const subs = state.subscribers.get(channel);
+    if (subs) for (const h of subs) h(message);
+    return ok(undefined);
+  },
+  subscribe: async (channel, handler) => {
+    if (state.failing) return fakeFailErr("subscribe");
+    let set = state.subscribers.get(channel);
+    if (!set) {
+      set = new Set();
+      state.subscribers.set(channel, set);
+    }
+    set.add(handler);
+    return ok({
+      unsubscribe: async () => {
+        set?.delete(handler);
+      },
+    });
+  },
+});
+
+export const createInMemoryRedisFake = (): InMemoryRedisFake => {
+  const state: FakeState = {
+    store: new Map(),
+    sets: new Map(),
+    published: [],
+    subscribers: new Map(),
+    failing: false,
   };
 
   return {
-    redis,
-    pubsub,
-    store,
-    published,
+    redis: createFakeRedisPort(state),
+    pubsub: createFakePubSubPort(state),
+    store: state.store,
+    published: state.published,
     setFail: (fail) => {
-      failing = fail;
+      state.failing = fail;
     },
   };
 };

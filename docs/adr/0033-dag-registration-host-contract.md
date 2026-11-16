@@ -40,7 +40,7 @@ Key forces:
      - Pollutes framework types with deployment concerns that mean nothing in standalone/test usage.
      - Optional fields mean the host can't rely on their presence — must validate anyway, but without type-level enforcement.
 
-3. **Separate metadata file alongside DAG code (e.g., `dag.meta.json` or `fugue.yaml` for all metadata)**
+3. **Separate metadata file alongside DAG code (e.g., dag.meta.json or `fugue.yaml` for all metadata)**
    - Pros:
      - No code coupling between DAG implementation and host contract.
      - Could be edited by non-developers (YAML is approachable).
@@ -69,8 +69,8 @@ Concrete design:
   }
   ```
 - **Runtime validation schema:** `DagRegistrationSchema` (Zod) validates the shape of the dynamic import's default export. Checks that `dag` has the expected `DagDef` structure, `inputSchema` has a `.parse` method, and `meta` (if present) matches the expected shape.
-- **Import flow:** The module loader (`adapters/module-loader.ts`) calls `import(modulePath)`, extracts `.default`, and parses it with `DagRegistrationSchema.safeParse()`. Failures produce `HostError { kind: "validation-failed" }` or `{ kind: "no-default-export" }`.
-- **`inputSchema` is mandatory:** Every DAG declares what input it accepts. The host validates incoming HTTP payloads against this schema before execution. This replaces per-app ad-hoc Zod validation (e.g., the inline schema in `apps/customer-summary/server.ts`).
+- **Import flow:** The module loader (`packages/host/src/adapters/module-loader.ts`) calls `import(modulePath)`, extracts `.default`, and parses it with `DagRegistrationSchema.safeParse()`. Failures produce `HostError { kind: "validation-failed" }` or `{ kind: "no-default-export" }`.
+- **`inputSchema` is mandatory:** Every DAG declares what input it accepts. The host validates incoming HTTP payloads against this schema before execution. This replaces per-app ad-hoc Zod validation (e.g., the inline schema in apps/customer-summary/server.ts).
 - **Host-specific config (`fugue.yaml`)** remains separate — it covers operational concerns (team ownership, concurrency limits, timeouts) that aren't part of the code contract. `DagRegistration` is the *code* contract; `fugue.yaml` is the *ops* contract.
 
 ## Consequences

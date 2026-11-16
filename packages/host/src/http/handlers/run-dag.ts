@@ -47,7 +47,7 @@ import { DEFAULTS } from "../../domain/circuit-breaker.js";
 import type { CircuitPort, CircuitConfig } from "../../domain/circuit-guard.js";
 import { classifyFrameworkError } from "../../domain/framework-error-http.js";
 import type { HitlRunService } from "../../hitl/service.js";
-import { settleBeforeDeadline } from "../../adapters/settle-before-deadline.js";
+import { settleBeforeDeadline } from "../../domain/settle-before-deadline.js";
 import { logWithoutThrowing } from "../../hitl/diagnostic-logging.js";
 import type { LogPort } from "../../ports.js";
 

@@ -162,7 +162,7 @@ Key invariants:
   The per-tenant Redis ACL credential (ADR-0067) is the *one* secret deliberately
   minted supervisor-side, but it is never *retained*: `apply` mints it on the admin
   connection and the worker-lifecycle manager injects it into the owning worker's
-  **spawn env** (`FUGUE_REDIS_ACL_USERNAME`/`PASSWORD`), keeping no copy. (This is
+  **spawn env** (`FUGUE_REDIS_ACL_USERNAME` and `FUGUE_REDIS_ACL_PASSWORD`), keeping no copy. (This is
   separate from the `SecretsSource` port, which resolves a `vault://`-style
   `SecretsRef` to env-file bytes *inside* the worker — the ACL credential does not
   transit that port.) That bounded, unretained, never-logged handoff

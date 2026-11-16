@@ -10,13 +10,13 @@
  *   - the complete `BOT_APP_ID` + `BOT_APP_PASSWORD` pair selects the Bot
  *     Framework transport — and BEATS the webhook when both are configured;
  *   - a lone `BOT_APP_ID` (password missing) with NO webhook is classified
- *     `disabled/bot-password-missing` (the shell's single boot warning);
+ *     disabled/bot-password-missing (the shell's single boot warning);
  *   - a lone `BOT_APP_ID` with a configured webhook still selects the webhook
  *     (the original chain's order — a complete webhook wins over an
  *     incomplete bot pair; behavior preserved by the extraction);
  *   - `TEAMS_WEBHOOK_URL` selects the webhook transport with the explicit
  *     `HITL_APPROVAL_BASE_URL` or the `http://localhost:<PORT>` default;
- *   - neither transport configured → `disabled/unconfigured` (HITL stays off).
+ *   - neither transport configured → disabled/unconfigured (HITL stays off).
  */
 
 import { describe, it, expect } from "bun:test";

@@ -161,7 +161,7 @@ describe("loadResultToRegisteredDag", () => {
 
   test("canonicalizes a mixed-case / whitespace fugue.yaml team (so the DAG === its registered team)", () => {
     // The DAG-ownership boundary lowercases + trims, so a `fugue.yaml` `team: Foo`
-    // authorizes against a tenant registered as `foo` in canAccessDag rather than
+    // authorizes against a tenant registered as foo in canAccessDag rather than
     // mismatching it (fail-closed wrongful 403).
     const lr = { ...makeLoadResult("d", "/repo/dags/path-team/d/dag.ts"), team: "  Yaml-Team  " };
     const reg = loadResultToRegisteredDag(lr, SHA, NOW, defaults);

@@ -45,7 +45,7 @@ type ProductionRead = {
 };
 type RealWorkbook = { readonly file: string; readonly reads: readonly ProductionRead[] };
 
-/** The 10 source workbooks the direct-sales DAGs read (fugue-dags `lib/sources.ts`). */
+/** The 10 source workbooks the direct-sales DAGs read (fugue-dags lib/sources.ts). */
 const REAL_SOURCE_WORKBOOKS: readonly RealWorkbook[] = [
   { file: "Brancheliste.xlsx", reads: [{ label: "master list", opts: {}, presence: "required" }] },
   {

@@ -3,7 +3,7 @@
  * `(rowIndex, cells)` call per worksheet row holding cells, in ascending row
  * order, plus the `<dimension>` bounds.
  *
- * Addressing follows SheetJS 0.18.5 `parse_ws_xml_data`, whose cell map this
+ * Addressing follows SheetJS 0.18.5 parse_ws_xml_data, whose cell map this
  * reproduces without ever holding it:
  * - A `<row>` element's number is its `r` attribute, else the previous row
  *   element's plus one; a self-closing `<row/>` is skipped and does not advance
@@ -48,7 +48,7 @@ export interface SheetSink {
 
 // ── A1 addressing (SheetJS ports) ────────────────────────────────────────────
 
-/** SheetJS `safe_decode_range`: lenient, stops at the first unexpected character. */
+/** SheetJS safe_decode_range: lenient, stops at the first unexpected character. */
 const safeDecodeRange = (range: string): { sc: number; sr: number; ec: number; er: number } => {
   let i = 0;
   let cc = 0;
@@ -79,7 +79,7 @@ const safeDecodeRange = (range: string): { sc: number; sr: number; ec: number; e
 
 /**
  * A `<dimension ref>` SheetJS accepts: it must look like `\w*:\w*` (SheetJS's
- * `dimregex`; a single-cell `A1` is ignored) and decode to a non-empty range.
+ * dimregex; a single-cell `A1` is ignored) and decode to a non-empty range.
  */
 export const parseDimensionRef = (ref: string): SheetBounds | null => {
   if (!/^\w*:\w*$/.test(ref)) return null;
@@ -183,9 +183,6 @@ type PhaseOf<K extends Phase["kind"]> = Extract<Phase, { readonly kind: K }>;
 const BEFORE_SHEET_DATA: Phase = Object.freeze({ kind: "before-sheet-data" });
 const FINISHED: Phase = Object.freeze({ kind: "finished" });
 const FAILED: Phase = Object.freeze({ kind: "failed" });
-
-/** Compile-time exhaustiveness: a `Phase` kind a dispatcher forgot fails to type-check here. */
-const exhausted = (_phase: never): void => undefined;
 
 /**
  * One worksheet's parse progress. It is mutated in place as SAX events arrive
@@ -348,19 +345,8 @@ const onOpen = (a: Assembly, name: string, attrs: XmlAttrs, selfClosing: boolean
   exhausted(p);
 };
 
-const closeInline = (a: Assembly, p: PhaseOf<"in-inline">, name: string, at: number): void => {
-  if (at !== p.inline.depth) return p.inline.reader.close(name);
-  p.cell.inline = p.inline.reader.result();
-  a.phase = { kind: "in-cell", frame: p.frame, cell: p.cell };
-};
-
-const closeInCell = (a: Assembly, p: PhaseOf<"in-cell">, name: string, at: number): void => {
-  const { cell } = p;
-  if (at === cell.depth) {
-    a.phase = { kind: "in-row", frame: p.frame };
-    closeCell(a, cell);
-  } else if (name === "v" && cell.value.kind === "reading") cell.value = { kind: "read", text: cell.value.text };
-};
+/** ONE shared never-proof: a `Phase` kind added without a branch above makes `p` non-`never`. */
+const exhausted = (_phase: never): void => undefined;
 
 const onClose = (a: Assembly, name: string): void => {
   const at = --a.depth;
@@ -377,6 +363,20 @@ const onClose = (a: Assembly, name: string): void => {
   }
   if (p.kind === "before-sheet-data" || p.kind === "finished" || p.kind === "failed") return;
   exhausted(p);
+};
+
+const closeInline = (a: Assembly, p: PhaseOf<"in-inline">, name: string, at: number): void => {
+  if (at !== p.inline.depth) return p.inline.reader.close(name);
+  p.cell.inline = p.inline.reader.result();
+  a.phase = { kind: "in-cell", frame: p.frame, cell: p.cell };
+};
+
+const closeInCell = (a: Assembly, p: PhaseOf<"in-cell">, name: string, at: number): void => {
+  const { cell } = p;
+  if (at === cell.depth) {
+    a.phase = { kind: "in-row", frame: p.frame };
+    closeCell(a, cell);
+  } else if (name === "v" && cell.value.kind === "reading") cell.value = { kind: "read", text: cell.value.text };
 };
 
 const onText = (a: Assembly, text: string): void => {

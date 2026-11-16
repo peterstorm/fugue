@@ -107,6 +107,80 @@ const assertFanInKeys = (
   });
 };
 
+// Friendly upfront errors: at least one source, and every source MUST be a
+// source node (no incoming edges, no input). Otherwise they would land as
+// input-expecting roots and fail later with the more cryptic `root-expects-input`.
+const assertSourceNodes = (config: SourcesDagConfig): void => {
+  if (config.sources.length === 0) {
+    throw new DagDefinitionError(config.id, {
+      kind: "validation",
+      nodeId: nodeId(config.id),
+      message: "defineSources requires at least one source",
+    });
+  }
+
+  for (const s of config.sources) {
+    if (s.isSource !== true) {
+      throw new DagDefinitionError(config.id, {
+        kind: "root-expects-input",
+        nodeId: nodeId(s.id as string),
+        message:
+          `defineSources source '${s.id as string}' is not a source node — build it with ` +
+          `createSourceNode so its fetch is (ctx) => …. A source consumes no DAG input`,
+      });
+    }
+  }
+};
+
+/** Which fan-in nodes (join / assemble) receive the DAG request in a `"$input"` slot. */
+interface RequestSlots {
+  readonly join: boolean;
+  readonly assemble: boolean;
+}
+
+// $input → {join, assemble} when (and only when) that node declares "$input".
+// A declared "$input" must be required — reject the optional form up front.
+const resolveRequestSlots = (config: SourcesDagConfig): RequestSlots => {
+  const join = declaresInputKey(config.join.inputSchema);
+  if (join) assertInputKeyRequired(config.id, config.join.id as string, config.join.inputSchema);
+  const assembleNode = config.assemble;
+  const assemble = assembleNode !== undefined && declaresInputKey(assembleNode.inputSchema);
+  if (assembleNode && assemble) {
+    assertInputKeyRequired(config.id, assembleNode.id as string, assembleNode.inputSchema);
+  }
+  return { join, assemble };
+};
+
+const requestEdgesFor = (
+  config: SourcesDagConfig,
+  slots: RequestSlots,
+): { from: string; to: string }[] => {
+  const edges: { from: string; to: string }[] = [];
+  if (slots.join) edges.push({ from: DAG_INPUT as string, to: config.join.id as string });
+  if (config.assemble && slots.assemble) {
+    edges.push({ from: DAG_INPUT as string, to: config.assemble.id as string });
+  }
+  return edges;
+};
+
+// Definition-time fan-in key validation. The join receives an object keyed by
+// its incoming ids (source ids, plus "$input" when the request edge is wired);
+// assemble receives the join (plus "$input" when wired). Catch a key/source
+// mismatch here instead of leaving it for `fugue lint` or a runtime parse.
+const assertSourcesFanInKeys = (config: SourcesDagConfig, slots: RequestSlots): void => {
+  const joinId = config.join.id as string;
+  assertFanInKeys(config.id, joinId, config.join.inputSchema, [
+    ...config.sources.map((s) => s.id as string),
+    ...(slots.join ? [DAG_INPUT as string] : []),
+  ]);
+  if (config.assemble) {
+    assertFanInKeys(config.id, config.assemble.id as string, config.assemble.inputSchema, [
+      joinId,
+      ...(slots.assemble ? [DAG_INPUT as string] : []),
+    ]);
+  }
+};
+
 /**
  * Define a multi-source DAG: N parallel source roots → keyed fan-in join →
  * optional assemble.
@@ -124,31 +198,9 @@ const assertFanInKeys = (
  * `defineSources` adds the `{ from: DAG_INPUT, to: "assemble-leads" }` edge.
  */
 export const defineSources = (config: SourcesDagConfig): DagDef => {
-  if (config.sources.length === 0) {
-    throw new DagDefinitionError(config.id, {
-      kind: "validation",
-      nodeId: nodeId(config.id),
-      message: "defineSources requires at least one source",
-    });
-  }
-
-  // Friendly upfront error: sources MUST be source nodes (no incoming edges,
-  // no input). Otherwise they would land as input-expecting roots and fail
-  // later with the more cryptic `root-expects-input`.
-  for (const s of config.sources) {
-    if (s.isSource !== true) {
-      throw new DagDefinitionError(config.id, {
-        kind: "root-expects-input",
-        nodeId: nodeId(s.id as string),
-        message:
-          `defineSources source '${s.id as string}' is not a source node — build it with ` +
-          `createSourceNode so its fetch is (ctx) => …. A source consumes no DAG input`,
-      });
-    }
-  }
+  assertSourceNodes(config);
 
   const joinId = config.join.id as string;
-  const sourceIds = config.sources.map((s) => s.id as string);
 
   // source → join
   const sourceEdges = config.sources.map((s) => ({
@@ -162,37 +214,9 @@ export const defineSources = (config: SourcesDagConfig): DagDef => {
     ? [{ from: joinId, to: assembleNode.id as string }]
     : [];
 
-  // $input → {join, assemble} when (and only when) that node declares "$input".
-  // A declared "$input" must be required — reject the optional form up front.
-  const joinWantsInput = declaresInputKey(config.join.inputSchema);
-  if (joinWantsInput) assertInputKeyRequired(config.id, joinId, config.join.inputSchema);
-  const assembleWantsInput =
-    assembleNode !== undefined && declaresInputKey(assembleNode.inputSchema);
-  if (assembleNode && assembleWantsInput) {
-    assertInputKeyRequired(config.id, assembleNode.id as string, assembleNode.inputSchema);
-  }
-  const requestEdges: { from: string; to: string }[] = [];
-  if (joinWantsInput) {
-    requestEdges.push({ from: DAG_INPUT as string, to: joinId });
-  }
-  if (assembleNode && assembleWantsInput) {
-    requestEdges.push({ from: DAG_INPUT as string, to: assembleNode.id as string });
-  }
-
-  // Definition-time fan-in key validation. The join receives an object keyed by
-  // its incoming ids (source ids, plus "$input" when the request edge is wired);
-  // assemble receives the join (plus "$input" when wired). Catch a key/source
-  // mismatch here instead of leaving it for `fugue lint` or a runtime parse.
-  assertFanInKeys(config.id, joinId, config.join.inputSchema, [
-    ...sourceIds,
-    ...(joinWantsInput ? [DAG_INPUT as string] : []),
-  ]);
-  if (assembleNode) {
-    assertFanInKeys(config.id, assembleNode.id as string, assembleNode.inputSchema, [
-      joinId,
-      ...(assembleWantsInput ? [DAG_INPUT as string] : []),
-    ]);
-  }
+  const slots = resolveRequestSlots(config);
+  const requestEdges = requestEdgesFor(config, slots);
+  assertSourcesFanInKeys(config, slots);
 
   const nodes = assembleNode
     ? [...config.sources, config.join, assembleNode]

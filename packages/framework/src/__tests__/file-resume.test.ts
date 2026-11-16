@@ -141,7 +141,7 @@ interface HostileThrownValue {
 }
 
 /**
- * An object whose `toString` AND `Symbol.toPrimitive` both throw on ACCESS — the
+ * An object whose `toString` AND Symbol.toPrimitive both throw on ACCESS — the
  * hardest case for any diagnostic that tries to render an unknown value. Named
  * once because it is used both as a matrix entry and directly by the hostile
  * runId tests.
@@ -156,7 +156,7 @@ const trapObject = (): unknown => Object.defineProperties({}, {
 });
 
 /** Every value is legal to throw in JavaScript and breaks at least one common
- * `try/catch` formatter (`instanceof Error`, `.message`, `String`, or tag
+ * try/catch formatter (`instanceof Error`, `.message`, `String`, or tag
  * inspection). Factories keep revoked/stateful values isolated per seam. */
 const hostileThrownValueMatrix = (): readonly HostileThrownValue[] => [
   {
@@ -433,7 +433,7 @@ describe("resumeFileJob — runId boundary re-validation", () => {
 // directory boundary re-validation — the factory siblings' domain rule
 // (non-empty NUL-free string, `isFileBackendPathString`) is re-checked at the
 // shell BEFORE any file-backend I/O: `directory: ""` would otherwise read a
-// CWD-relative `events/` as the caller's run, and a NUL-bearing or bypassed
+// CWD-relative events/ as the caller's run, and a NUL-bearing or bypassed
 // string would reach `join`/fs as a raw TypeError.
 // ---------------------------------------------------------------------------
 
@@ -453,7 +453,7 @@ describe("resumeFileJob — directory boundary re-validation", () => {
     if (resumed.ok) return;
     // A gate regression would instead surface as `checkpoint-corrupt` (the
     // journal factory's raw TypeError re-tagged at step 2) or, when a
-    // CWD-relative `events/` happens to exist, a resume of the WRONG run —
+    // CWD-relative events/ happens to exist, a resume of the WRONG run —
     // the identity pin below discriminates both.
     expect(resumed.error.kind).toBe("cache-error");
     if (resumed.error.kind !== "cache-error") return;
@@ -1800,7 +1800,7 @@ describe("resumeFileJob — cross-process reader under an active writer (round-1
 
     // Deterministic overlap (round-17): wait for the writer's ready marker so
     // the polling loop starts while the writer is mid-flight. Without the
-    // gate a loaded parent could first wake after `writer-done` and the run
+    // gate a loaded parent could first wake after writer-done and the run
     // would prove nothing about concurrent reads.
     const readyDeadline = Date.now() + 15_000;
     while (!existsSync(ready) && Date.now() < readyDeadline) {

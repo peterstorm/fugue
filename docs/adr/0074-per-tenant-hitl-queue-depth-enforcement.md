@@ -45,18 +45,18 @@ per-tenant Redis ACL (ADR-0067) `scan`/`keys`/`randomkey`/`dbsize` are DENIED
 (keyspace enumeration is not reliably constrained by a key-pattern ACL across
 Redis/Valkey versions). The codebase already established the alternative for
 tenant-scoped enumeration: a per-tenant **index SET** read with `sMembers`
-(`adapters/token-store.ts` `listTeams`, `ports.ts` `RedisPort` security note).
+(`packages/host/src/adapters/token-store.ts` `listTeams`, `ports.ts` `RedisPort` security note).
 
 ## Decision
 
 Enforce `maxQueuedRuns` in the worker at `HitlRunService.startRun`, against a
-durable per-tenant **active-run index SET** maintained by the `RunStore`.
+durable per-tenant **active-run index SET** maintained by the `RunStorePort`.
 
 ### The active-run SET
 
 A single Redis SET per tenant, `fugue:<tenant>:hitl:active`, holding the run ids of
 all NON-terminal runs (queued / running / suspended). It is maintained by the
-`RunStore` adapter, co-located with the run records it indexes:
+`RunStorePort` adapter, co-located with the run records it indexes:
 
 - `create(record)` → `SADD` the run id (a fresh non-terminal run joins the index).
 - `setStatus(runId, terminal)` → `SREM` the run id when the status is `completed`
@@ -85,7 +85,7 @@ compatible, fail-open ONLY on the queue-depth soft limit (never on isolation).
 
 ### Why a SET, not a counter
 
-A free-standing `INCR`/`DECR` counter drifts: a suspended run whose record TTLs out
+A free-standing INCR/DECR counter drifts: a suspended run whose record TTLs out
 without ever settling would never be decremented, so the counter inflates
 monotonically and eventually rejects every legitimate run. The SET is **idempotent**
 (`SADD` of a present member and `SREM` of an absent member are no-ops, so

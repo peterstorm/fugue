@@ -234,45 +234,27 @@ const parseModelArray = (value: unknown): Result<readonly string[], string> => {
   return ok(models);
 };
 
-/** Parse an adapter-supplied value before it enters budget arithmetic. */
-export const parseSpend = (value: unknown): Result<Spend, string> => {
-  const spend = parseObject(value, "Spend");
-  if (!spend.ok) return spend;
-  const usage = ownValue(spend.value, "usage");
-  const tokens = ownValue(spend.value, "tokens");
-  const calls = ownValue(spend.value, "calls");
-  const usd = ownValue(spend.value, "usd");
-  if (!usage.ok) return usage;
-  if (usage.value !== "known" && usage.value !== "unknown") {
-    return err("Spend.usage must be 'known' or 'unknown'");
-  }
-  if (!tokens.ok) return tokens;
-  const parsedTokens = parseSafeInteger(tokens.value, "Spend.tokens");
-  if (!parsedTokens.ok) return parsedTokens;
-  if (!calls.ok) return calls;
-  const parsedCalls = parseSafeInteger(calls.value, "Spend.calls");
-  if (!parsedCalls.ok) return parsedCalls;
-  if (!usd.ok) return usd;
-  const usdObject = parseObject(usd.value, "Spend.usd");
-  if (!usdObject.ok) return usdObject;
-  const kind = ownValue(usdObject.value, "kind");
-  if (!kind.ok) return kind;
-  if (kind.value === "priced") {
-    const micros = ownValue(usdObject.value, "micros");
-    if (!micros.ok) return micros;
-    const parsedMicros = parseSafeInteger(micros.value, "Spend.usd.micros");
-    return parsedMicros.ok
-      ? ok(makeSpend({
-          usage: usage.value,
-          tokens: parsedTokens.value,
-          calls: parsedCalls.value,
-          usd: { kind: "priced", micros: microUsd(parsedMicros.value) },
-        }))
-      : parsedMicros;
-  }
-  if (kind.value !== "unpriced") return err("Spend.usd.kind is invalid");
-  const models = ownValue(usdObject.value, "models");
-  const knownMicros = ownValue(usdObject.value, "knownMicros");
+const parseUsage = (read: Result<unknown, string>): Result<UsageKnowledge, string> => {
+  if (!read.ok) return read;
+  return read.value === "known" || read.value === "unknown"
+    ? ok(read.value)
+    : err("Spend.usage must be 'known' or 'unknown'");
+};
+
+const parseOwnSafeInteger = (read: Result<unknown, string>, path: string): Result<number, string> =>
+  read.ok ? parseSafeInteger(read.value, path) : read;
+
+const parsePricedUsd = (usd: Readonly<Record<PropertyKey, unknown>>): Result<PricedSpend, string> => {
+  const micros = ownValue(usd, "micros");
+  const parsedMicros = parseOwnSafeInteger(micros, "Spend.usd.micros");
+  return parsedMicros.ok
+    ? ok({ kind: "priced", micros: microUsd(parsedMicros.value) })
+    : parsedMicros;
+};
+
+const parseUnpricedUsd = (usd: Readonly<Record<PropertyKey, unknown>>): Result<PricedSpend, string> => {
+  const models = ownValue(usd, "models");
+  const knownMicros = ownValue(usd, "knownMicros");
   if (!models.ok) return models;
   const rawModels = parseModelArray(models.value);
   if (!rawModels.ok) return rawModels;
@@ -281,20 +263,49 @@ export const parseSpend = (value: unknown): Result<Spend, string> => {
       canonical.some((model, index) => model !== rawModels.value[index])) {
     return err("Spend.usd.models must be sorted and deduplicated");
   }
-  if (!knownMicros.ok) return knownMicros;
-  const parsedMicros = parseSafeInteger(knownMicros.value, "Spend.usd.knownMicros");
+  const parsedMicros = parseOwnSafeInteger(knownMicros, "Spend.usd.knownMicros");
   return parsedMicros.ok
-    ? ok(makeSpend({
-        usage: usage.value,
-        tokens: parsedTokens.value,
-        calls: parsedCalls.value,
-        usd: {
-          kind: "unpriced",
-          models: canonical,
-          knownMicros: microUsd(parsedMicros.value),
-        },
-      }))
+    ? ok({ kind: "unpriced", models: canonical, knownMicros: microUsd(parsedMicros.value) })
     : parsedMicros;
+};
+
+// The cost axis: an object tagged `priced` (exact micros) or `unpriced`
+// (canonical model names plus the priced lower bound).
+const parseUsd = (read: Result<unknown, string>): Result<PricedSpend, string> => {
+  if (!read.ok) return read;
+  const usdObject = parseObject(read.value, "Spend.usd");
+  if (!usdObject.ok) return usdObject;
+  const kind = ownValue(usdObject.value, "kind");
+  if (!kind.ok) return kind;
+  if (kind.value === "priced") return parsePricedUsd(usdObject.value);
+  if (kind.value !== "unpriced") return err("Spend.usd.kind is invalid");
+  return parseUnpricedUsd(usdObject.value);
+};
+
+/** Parse an adapter-supplied value before it enters budget arithmetic. */
+export const parseSpend = (value: unknown): Result<Spend, string> => {
+  const spend = parseObject(value, "Spend");
+  if (!spend.ok) return spend;
+  const usage = ownValue(spend.value, "usage");
+  const tokens = ownValue(spend.value, "tokens");
+  const calls = ownValue(spend.value, "calls");
+  const usd = ownValue(spend.value, "usd");
+
+  const parsedUsage = parseUsage(usage);
+  if (!parsedUsage.ok) return parsedUsage;
+  const parsedTokens = parseOwnSafeInteger(tokens, "Spend.tokens");
+  if (!parsedTokens.ok) return parsedTokens;
+  const parsedCalls = parseOwnSafeInteger(calls, "Spend.calls");
+  if (!parsedCalls.ok) return parsedCalls;
+  const parsedUsd = parseUsd(usd);
+  if (!parsedUsd.ok) return parsedUsd;
+
+  return ok(makeSpend({
+    usage: parsedUsage.value,
+    tokens: parsedTokens.value,
+    calls: parsedCalls.value,
+    usd: parsedUsd.value,
+  }));
 };
 
 /** The additive identity — a run that has consumed nothing. */

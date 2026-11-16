@@ -8,6 +8,7 @@ const cleanupDirectories: string[] = [];
 
 const phases = [
   "run check:verification-prerequisites",
+  "run lint",
   "run typecheck",
   "run check:docs",
   "run test:scripts",

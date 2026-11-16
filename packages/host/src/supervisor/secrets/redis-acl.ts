@@ -13,8 +13,8 @@
  *   KEYSPACE ENUMERATION IS DENIED OUTRIGHT (defense-in-depth, version-INDEPENDENT):
  *   key-pattern ACLs (`~fugue:<tenant>:*`) reliably gate commands that ACCESS a
  *   key's VALUE, but they do NOT reliably constrain commands that ENUMERATE the
- *   keyspace across Redis/Valkey versions. `SCAN`/`SCAN MATCH`/`RANDOMKEY` can
- *   return — and `DBSIZE` counts — keys OUTSIDE the user's key pattern on many
+ *   keyspace across Redis/Valkey versions. `SCAN`/`SCAN MATCH`/RANDOMKEY can
+ *   return — and DBSIZE counts — keys OUTSIDE the user's key pattern on many
  *   servers. Since key NAMES themselves encode sensitive data here
  *   (`fugue:<tenant>:teams:<team>` = team names, `fugue:<tenant>:tokens:<hash>` =
  *   token hashes, the `<tenant>` segment = the deliberately-unprobeable tenant
@@ -33,7 +33,7 @@
  * WHAT the user may do, never the credential.
  *
  * SCOPE-ONLY GUARANTEE (the load-bearing invariant):
- *   - EXACTLY ONE key pattern: `~fugue:<tenant>:*`. No `~*`, no `allkeys`, no
+ *   - EXACTLY ONE key pattern: `~fugue:<tenant>:*`. No `~*`, no allkeys, no
  *     second pattern. This is sound only because (a) `TenantId` (see
  *     `domain/tenant.ts`, `TENANT_ID_REGEX`) forbids `:` and every glob
  *     metacharacter, so the interpolated `<tenant>` can never widen the pattern
@@ -53,7 +53,7 @@
  *     carried by the single KEY SCOPE (`~fugue:<tenant>:*`), not by the command
  *     grant. The subtractive `+@all`-minus-dangerous shape is fail-closed for
  *     ENUMERATION/admin (a worker cannot reconfigure the server, ENUMERATE the
- *     keyspace — `SCAN`/`RANDOMKEY`/`DBSIZE`/`KEYS` are denied, see banner —
+ *     keyspace — `SCAN`/RANDOMKEY/DBSIZE/`KEYS` are denied, see banner —
  *     flush data, run Lua, inspect internals, or touch ACLs) while still letting
  *     a worker read/write any data command WITHIN its own keyspace.
  */
@@ -68,7 +68,7 @@ import type { Result } from "@fuguejs/framework";
 
 /**
  * A single ACL rule token, in Redis `ACL SETUSER` argument form (e.g. `on`,
- * `~fugue:t1:*`, `+@all`, `-@admin`, `-keys`, `resetkeys`). Modelled as a
+ * `~fugue:t1:*`, `+@all`, `-@admin`, `-keys`, resetkeys). Modelled as a
  * branded-free readonly string list rather than a free-form string so the
  * provisioner forwards exactly these tokens, in order, with no re-parsing.
  */
@@ -232,8 +232,8 @@ const DENIED_CATEGORIES: readonly string[] = ["@admin", "@dangerous", "@scriptin
  * KEYSPACE ENUMERATION DENIED (`scan`, `randomkey`, `dbsize`, `keys`):
  *   A per-tenant key-pattern ACL (`~fugue:<tenant>:*`) gates commands that ACCESS
  *   a key's VALUE, but it does NOT reliably scope commands that ENUMERATE the
- *   keyspace across Redis/Valkey versions — `SCAN`/`RANDOMKEY` can return, and
- *   `DBSIZE` counts, keys OUTSIDE the user's pattern. Because key NAMES here
+ *   keyspace across Redis/Valkey versions — `SCAN`/RANDOMKEY can return, and
+ *   DBSIZE counts, keys OUTSIDE the user's pattern. Because key NAMES here
  *   encode sensitive data (team names, token hashes, the tenant roster itself), a
  *   scoped worker that could enumerate the keyspace would leak other tenants'
  *   data. We therefore deny enumeration outright rather than relying on the
@@ -328,7 +328,7 @@ export const buildAclSpec = (tenant: TenantId): RedisAclSpec => {
     "on",
     // No pub/sub channel access (restated; `reset` already cleared channels).
     "resetchannels",
-    // EXACTLY ONE key pattern. No `~*`, no `allkeys`, no second pattern.
+    // EXACTLY ONE key pattern. No `~*`, no allkeys, no second pattern.
     keyPattern,
     // `+@all` grant minus dangerous categories/commands (see commandRules).
     ...commandRules(),

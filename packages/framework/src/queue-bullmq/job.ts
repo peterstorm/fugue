@@ -92,6 +92,65 @@ export type AdaptBullMQJobOpts = EventLogOpts & {
   ) => Result<{ state: unknown; context: unknown }, FrameworkError>;
 };
 
+/** The Redis Stream entry `type` field: the event's own string `type`, else "event". */
+const eventTypeOf = (event: unknown): string => {
+  const eventObj = event as Record<string, unknown>;
+  return typeof eventObj?.type === "string" ? eventObj.type : "event";
+};
+
+interface AppendScriptInput {
+  readonly maxLen: number;
+  readonly approximate: boolean;
+  /** Entry ID hint: `${recordedAtMs}-*`. */
+  readonly id: string;
+  readonly dedupKey: string | undefined;
+  readonly type: string;
+  readonly payload: string;
+}
+
+// ARGV[1..7] of `APPEND_EVENT_SCRIPT`, in script order.
+const appendScriptArgv = (input: AppendScriptInput): string[] => [
+  String(input.maxLen),
+  input.approximate ? "1" : "0",
+  input.id,
+  input.dedupKey ?? "",
+  input.type,
+  input.payload,
+  // ADR 0014: dedup against the MOST RECENT entry only (last-seen-only).
+  // The per-job lock serializes appends to this job's stream, so there is
+  // no concurrent interleaving to scan deeper for — and a deeper scan would
+  // wrongly drop a legitimately-recurring transition key (e.g. k1, k2, k1).
+  // This also keeps the BullMQ adapter consistent with the in-memory one,
+  // which remembers only the last-seen key.
+  "1",
+];
+
+// Atomic dedup + XADD via single Lua script. Single round-trip and
+// truly race-free regardless of BullMQ lock-window timing. Script is
+// SCRIPT-LOADed lazily; NOSCRIPT recovers via inline EVAL on next call.
+// Lua returns the literal string "skipped" when dedup matched — a no-op on
+// the caller's behalf, matching the previous two-step contract.
+const runAppendScript = async (
+  redis: Redis,
+  streamKey: string,
+  argv: readonly string[],
+): Promise<unknown> => {
+  let sha = appendEventShaByClient.get(redis);
+  if (!sha) {
+    sha = (await redis.script("LOAD", APPEND_EVENT_SCRIPT)) as string;
+    appendEventShaByClient.set(redis, sha);
+  }
+  try {
+    return await redis.evalsha(sha, 1, streamKey, ...argv);
+  } catch (e) {
+    if (e instanceof Error && e.message.includes("NOSCRIPT")) {
+      appendEventShaByClient.delete(redis);
+      return await redis.eval(APPEND_EVENT_SCRIPT, 1, streamKey, ...argv);
+    }
+    throw e;
+  }
+};
+
 /**
  * Returns the Redis Stream key for a given queue + job.
  * Default: `events:{queueName}:{jobId}` per AD-3.
@@ -179,8 +238,7 @@ export function adaptBullMQJob<S, C>(
     async appendEvent(event: unknown, dedupKey?: string): Promise<void> {
       // XADD events:{queueName}:{jobId} MAXLEN ~ <maxLen> ${recordedAtMs}-*
       //   type <type> payload <json> [dedupKey <key>]
-      const eventObj = event as Record<string, unknown>;
-      const type = typeof eventObj?.type === "string" ? eventObj.type : "event";
+      const type = eventTypeOf(event);
       // Wrap the event in a RecordedEvent envelope so wall-clock time is
       // captured at the durable-write boundary, transport-independent.
       // Events may carry node outputs containing Map/Set; tag them for JSON.
@@ -194,48 +252,10 @@ export function adaptBullMQJob<S, C>(
       // than the previous; non-decreasing now() satisfies this. If a caller
       // injects a now() that goes backwards, Redis rejects with an error.
       const id = `${recordedAtMs}-*`;
-
-      // Atomic dedup + XADD via single Lua script. Single round-trip and
-      // truly race-free regardless of BullMQ lock-window timing. Script is
-      // SCRIPT-LOADed lazily; NOSCRIPT recovers via inline EVAL on next call.
-      const argv = [
-        String(maxLen),
-        approximate ? "1" : "0",
-        id,
-        dedupKey ?? "",
-        type,
-        payload,
-        // ADR 0014: dedup against the MOST RECENT entry only (last-seen-only).
-        // The per-job lock serializes appends to this job's stream, so there is
-        // no concurrent interleaving to scan deeper for — and a deeper scan would
-        // wrongly drop a legitimately-recurring transition key (e.g. k1, k2, k1).
-        // This also keeps the BullMQ adapter consistent with the in-memory one,
-        // which remembers only the last-seen key.
-        "1",
-      ];
-
-      const runScript = async (): Promise<unknown> => {
-        let sha = appendEventShaByClient.get(redis);
-        if (!sha) {
-          sha = (await redis.script("LOAD", APPEND_EVENT_SCRIPT)) as string;
-          appendEventShaByClient.set(redis, sha);
-        }
-        try {
-          return await redis.evalsha(sha, 1, streamKey, ...argv);
-        } catch (e) {
-          if (e instanceof Error && e.message.includes("NOSCRIPT")) {
-            appendEventShaByClient.delete(redis);
-            return await redis.eval(APPEND_EVENT_SCRIPT, 1, streamKey, ...argv);
-          }
-          throw e;
-        }
-      };
+      const argv = appendScriptArgv({ maxLen, approximate, id, dedupKey, type, payload });
 
       try {
-        const result = await runScript();
-        // Lua returns the literal string "skipped" when dedup matched — no-op
-        // on the caller's behalf, matching the previous two-step contract.
-        void result;
+        await runAppendScript(redis, streamKey, argv);
       } catch (err) {
         throw new Error(
           `[BullMQ] appendEvent failed for queue "${queueName}" job "${bullJob.id}" stream "${streamKey}": ${err instanceof Error ? err.message : String(err)}`,

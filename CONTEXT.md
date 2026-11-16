@@ -30,7 +30,7 @@ gates, freshness-aware state management, and production observability.
 | **Machine** | A generic state machine: `transition(state, event, context) → (state, context)`. |
 | **Executor** | An async function that observes the current phase and produces the next event. Lives in the imperative shell. |
 | **Transition** | A pure function that computes the next (phase, context) from (phase, event, context). No I/O. |
-| **JobLike** | Durable job handle: `updateData`, `updateProgress`, `appendEvent`. Backed by in-memory, BullMQ+Redis, or the file backend (`file/` subpath). |
+| **JobLike** | Durable job handle: `updateData`, `updateProgress`, `appendEvent`. Backed by in-memory, BullMQ+Redis, or the file backend (`@fuguejs/framework/file` subpath). |
 | **Checkpoint** | A persisted snapshot of node outputs for crash-resume. |
 | **Fingerprint** | A content-hash of DAG topology + predicate versions. Detects shape drift between checkpoint write and resume. |
 | **FrameworkVersion** | Content-hash of the framework's runtime semantics (validation, retry, coercion). Resume rejects checkpoints from a different version to prevent silent behavioral drift. |
@@ -73,7 +73,7 @@ gates, freshness-aware state management, and production observability.
 | **Side-Effect Profile** | Declared on every node: `"none"`, `"reads"`, `"writes"`, `"external-call"`. Determines freshness tracking behavior. |
 | **Witness** | A token asserting the version of a resource at a point in time: `{ kind, resource, value }`. |
 | **Freshness Violation** | Detected when a write's `conditionedOn` witness has been superseded by a later write to the same resource. Its event derives the resource solely from `conditionedOnWitness.resource`; no duplicate resource field can drift. |
-| **FreshnessIndex** | Port interface for witness tracking. Conflict lookup and durable logical-write acknowledgement are separate questions: `findConflict` selects the latest write, while `hasRecordedWrite` addresses `(runId, nodeId, executionEpoch, newWitness)` even after supersession. Three adapters: `InMemoryFreshnessIndex` (single-process), Redis-backed (distributed), file-backed (digest-addressed singletons, `file/` subpath). |
+| **FreshnessIndex** | Port interface for witness tracking. Conflict lookup and durable logical-write acknowledgement are separate questions: `findConflict` selects the latest write, while `hasRecordedWrite` addresses `(runId, nodeId, executionEpoch, newWitness)` even after supersession. Three adapters: `InMemoryFreshnessIndex` (single-process), Redis-backed (distributed), file-backed (digest-addressed singletons, `@fuguejs/framework/file` subpath). |
 | **Freshness Completion Proof** | Durable set of node IDs whose post-wave freshness bookkeeping completed. It is distinct from node outputs because output persistence can precede witness emission; retries and replacement workers use this proof to emit only genuinely outstanding bookkeeping. |
 | **Freshness Execution Epoch** | Durable non-negative generation stamped onto every write witness. Bookkeeping retries preserve the epoch; each valid HITL reroute increments it before replacement work executes, so a same-valued re-execution is distinct from an ambiguously acknowledged retry. The parent's persisted `freshnessExecutionEpoch` also supplies fan-completion `attempt` and mapped child write scope; it is not a retry counter or input hash. |
 | **`checkFreshness` (batch)** | The same stale-read rule in BATCH form over an event log. Off the runtime path — used for post-hoc forensics and as the differential oracle a property test checks `InMemoryFreshnessIndex` against, so the rule cannot drift between the two implementations. Not exported from the package barrel. |
@@ -115,7 +115,7 @@ gates, freshness-aware state management, and production observability.
 
 | Term | Definition |
 |------|-----------|
-| **Token Usage** | The four figures every LLM call reports: `tokensIn`, `tokensOut`, `cacheWriteTokens`, `cacheReadTokens`. One value type (`types/token-usage.ts`) shared by `LlmResponse`, the error `usage` field, the tool loop's cross-turn accumulator, span enrichment, cost and the host meter. Combined with `addUsage` (a monoid over `NO_TOKENS`). |
+| **Token Usage** | The four figures every LLM call reports: `tokensIn`, `tokensOut`, `cacheWriteTokens`, `cacheReadTokens`. One value type (`packages/framework/src/types/token-usage.ts`) shared by `LlmResponse`, the error `usage` field, the tool loop's cross-turn accumulator, span enrichment, cost and the host meter. Combined with `addUsage` (a monoid over `NO_TOKENS`). |
 | **`tokensIn`** | ALL prompt tokens — uncached + cache-write + cache-read — normalised across providers. Anthropic reports its `input_tokens` as the UNCACHED REMAINDER and is summed; OpenAI's is already inclusive and passes through. The uncached remainder is DERIVED (`uncachedInputTokens`), never stored, so `total !== sum(parts)` is unrepresentable. |
 | **Prompt Cache** | The provider-side cache of a request prefix. A prefix match over the rendered `tools → system → messages` order: any byte change in the prefix invalidates everything after it. Distinct from the Response Cache (see above). |
 | **Prompt Cache Policy** | What the caller declares is stable: `none` \| `static-prefix` \| `conversation`. `conversation` is available only on a tool-loop request — a single-shot call has no second turn to read what the first wrote, so asking for it is a compile error. Opt-in everywhere; omitted ≡ `none` ≡ byte-identical to a pre-caching request. |
@@ -129,7 +129,7 @@ gates, freshness-aware state management, and production observability.
 
 | Term | Definition |
 |------|-----------|
-| **Spend** | What a run has consumed, on every axis a ceiling can limit: `tokens` (all trustworthy reported wire traffic, both directions), `calls` (delegated LLM attempts settled by the Run Spend Authority — success, typed failure, malformed return, or throw; a `sendWithTools` loop is ONE), `usd`, and monotone usage knowledge (`known` \| `unknown`). A settled attempt with no trustworthy usage records one call and explicit unknown usage; known figures remain lower bounds. Call ceilings remain evaluable, while token/USD admission fails closed. Combined with `addSpend`, a commutative monoid over `NO_SPEND`; unknown usage absorbs. `types/spend.ts`. |
+| **Spend** | What a run has consumed, on every axis a ceiling can limit: `tokens` (all trustworthy reported wire traffic, both directions), `calls` (delegated LLM attempts settled by the Run Spend Authority — success, typed failure, malformed return, or throw; a `sendWithTools` loop is ONE), `usd`, and monotone usage knowledge (`known` \| `unknown`). A settled attempt with no trustworthy usage records one call and explicit unknown usage; known figures remain lower bounds. Call ceilings remain evaluable, while token/USD admission fails closed. Combined with `addSpend`, a commutative monoid over `NO_SPEND`; unknown usage absorbs. `packages/framework/src/types/spend.ts`. |
 | **MicroUsd** | Non-negative safe-integer 1e-6 USD, branded. What ceilings compare against; raw USD floats stay display-only. Every positive call rounds upward to at least one micro-USD; positive infinity/overflow and addition/projection saturate at `Number.MAX_SAFE_INTEGER`. Positive billable cost therefore cannot disappear or create budget headroom. |
 | **PricedSpend** | `priced` \| `unpriced`. The framework's deeply frozen, readonly `PRICE_TABLE` is the single pricing authority shared by pre-call admission and `spendOfCall`; tenant/DAG code cannot mutate it. It is hand-maintained, so cost is not always knowable, and zero cannot mean "unknown". `unpriced` ABSORBS under `addSpend` and carries offending model names plus `knownMicros` as a lower bound. |
 | **Ceiling** | One limit, on one axis: `tokens` \| `calls` \| `usd`. |
@@ -153,7 +153,7 @@ gates, freshness-aware state management, and production observability.
 | **CronScheduler** | Drives periodic DAG runs via a registry of `TaskConfig` entries with cron expressions. |
 | **DeadLetterNotifier** | Called when a job exhausts all queue-level attempts. |
 
-### File-Backed Durable Runtime (`file/` subpath)
+### File-Backed Durable Runtime (`@fuguejs/framework/file` subpath)
 
 The F6 feature (ADRs 0075–0080) adds a self-contained durable filesystem backend behind the dedicated `@fuguejs/framework/file` subpath: node built-ins only, no optional peer deps (FR-041).
 
@@ -161,7 +161,7 @@ The F6 feature (ADRs 0075–0080) adds a self-contained durable filesystem backe
 |------|-----------|
 | **Event Log (file)** | The durable append-only journal: `events/NNNNNN-<digest>.json` records with contiguous 6-digit sequences and keyed/keyless digest addressing. The authoritative history (ADR-0076). |
 | **Checkpoint Projection (file)** | The lagging `checkpoint.json` + per-node files under `<runId>/nodes/`. May lag the log inside the benign lag window; the log always wins on resume (ADR-0077). |
-| **Append Lock** | The per-directory `events/append.lock` — a rename-born lock serializing the whole append transaction (list → dedup → sequence → commit) across processes (ADR-0078). |
+| **Append Lock** | The per-directory events/append.lock — a rename-born lock serializing the whole append transaction (list → dedup → sequence → commit) across processes (ADR-0078). |
 | **Benign Lag Window** | The window in which the log holds records not yet folded into the checkpoint. Proved harmless by the resume agreement proof — never a corruption (ADR-0077). |
 | **Resume Agreement Proof** | The pure `proveResumeAgreement`: full-replay vs checkpoint state-key comparison plus a single-pass strict-prefix scan (genesis included). Closed verdicts: agreement / benign lag / `checkpoint-missing` / `checkpoint-corrupt` (ADR-0077). |
 | **Digest Addressing** | Record and node filenames are sha256 hex digests: keyed `sha256(dedupKey)` vs keyless `sha256(sequence ‖ eventJson)` — structurally disjoint by the `|` exclusion; 6-digit lexicographic sequence ceiling (ADR-0076). |
@@ -170,14 +170,14 @@ The F6 feature (ADRs 0075–0080) adds a self-contained durable filesystem backe
 | **File Spend Store** | High-level `@fuguejs/framework/file` store: one strict V1 whole-spend snapshot at `<sha256(runId)>.json`, serialized per run by the F6 lock and committed by atomic rename. The host's file Spend Ledger is a thin typed-error adapter over it. |
 | **FileOperation** | The closed `cache-error` operation vocabulary of the file backend; every file failure is a typed `FrameworkError` whose operation comes from this set (ADR-0080). |
 
-**Deepening-round decisions (2026-08-18).** The interface advisories deferred across review rounds 10–16 were adjudicated once, in a `file/` + `Checkpointer`-port deepening round (plan: `.claude/plans/2026-08-18-file-port-deepening-round.md`):
+**Deepening-round decisions (2026-08-18).** The interface advisories deferred across review rounds 10–16 were adjudicated once, in a `packages/framework/src/file/` + `Checkpointer`-port deepening round (plan: `.claude/plans/2026-08-18-file-port-deepening-round.md`):
 
 - **Identifier ownership (D1)** — the port re-typed to branded `RunId`/`NodeId`/`DagId` (see *Checkpoint identifier ownership* under Type Safety).
-- **One truthful-branding path (D2)** — `checkpoint-write-failed` is constructed by ONE builder (`buildCheckpointWriteFailed`, `types/error-factories.ts`); the codec re-exports it. The per-backend error-KIND divergence documented in the port's mapping table is a deliberate ADR-0080 surface, not a mirror.
+- **One truthful-branding path (D2)** — `checkpoint-write-failed` is constructed by ONE builder (`buildCheckpointWriteFailed`, `packages/framework/src/types/error-factories.ts`); the codec re-exports it. The per-backend error-KIND divergence documented in the port's mapping table is a deliberate ADR-0080 surface, not a mirror.
 - **Composite-key error channels (D3)** — `parseCompositeNodeKey → … | null` is the read-side classifier over untrusted stored bytes; `CompositeNodeKeyOpts` makes namespace-only input unrepresentable for typed callers while `compositeNodeKey` retains a runtime invariant throw for forged input; the file boundary converts that to the port-level typed `Result`. The contract is pinned in the module header and ADR-0075.
 - **Test-owned store (D4)** — `InMemoryCheckpointer` exposes no accessor to its internals; tests adopt a `Map` at construction (`testStore`) and seed stored records directly — the Redis-raw-set analog. Alias-ing the adapter's live internals is unrepresentable.
-- **Depth ceiling is a grammar knob (D5)** — `MAX_SAFE_RECORD_DEPTH` (512) lives in the serializer grammar module (`state-machine/serialize.ts`), with the grammar it bounds. The two write-side FR-009 losslessness pre-scans (journal events, node outputs) keep their per-module pinned message corpora, but their accept/reject VERDICTS are pinned to agree on a shared hostile + safe corpus (`losslessness-parity.test.ts`) — drift fails the build.
-- **Two clock domains (D6)** — the raw-ms guards (journal `recordedAtMs`, freshness `writtenAtMs`/`sinceMs`) are finiteness-only: the value is STORED as a raw number and consumed by arithmetic, so `Date` representability is out of domain. The ms→Date guards (both checkpointers' `readClock`, the codec serializers' timestamp checks) share ONE encoding, `isRepresentableTimestampMs` (`types/clock.ts`). `±1e300` is the discriminator row (raw-ms accepts, ms→Date rejects), pinned in `clock-parity.test.ts`.
+- **Depth ceiling is a grammar knob (D5)** — `MAX_SAFE_RECORD_DEPTH` (512) lives in the serializer grammar module (`packages/framework/src/state-machine/serialize.ts`), with the grammar it bounds. The two write-side FR-009 losslessness pre-scans (journal events, node outputs) keep their per-module pinned message corpora, but their accept/reject VERDICTS are pinned to agree on a shared hostile + safe corpus (`losslessness-parity.test.ts`) — drift fails the build.
+- **Two clock domains (D6)** — the raw-ms guards (journal `recordedAtMs`, freshness `writtenAtMs`/`sinceMs`) are finiteness-only: the value is STORED as a raw number and consumed by arithmetic, so `Date` representability is out of domain. The ms→Date guards (both checkpointers' `readClock`, the codec serializers' timestamp checks) share ONE encoding, `isRepresentableTimestampMs` (`packages/framework/src/types/clock.ts`). `±1e300` is the discriminator row (raw-ms accepts, ms→Date rejects), pinned in `clock-parity.test.ts`.
 
 **Plan decision codes.** The F6 plan's `AD-1`…`AD-6` codes — cited in `file/*` and `checkpoint/*` comments — map to the ADRs one-to-one:
 
@@ -198,19 +198,19 @@ The F6 feature (ADRs 0075–0080) adds a self-contained durable filesystem backe
 
 | Layer | Imports From | Responsibility |
 |-------|-------------|---------------|
-| `types/` | Nothing | Domain types, branded IDs, discriminated unions |
-| `shared/` | `types/` | Pure utilities (topo sort, validation, input assembly, composite node-address codec) |
-| `dag-runtime/` | `types/`, `shared/` | Pure transitions + imperative execution shell |
-| `state-machine/` | `types/` | Generic state machine kernel |
-| `executor/` | `types/`, `shared/`, `dag-runtime/`, `state-machine/` | Public API (`defineDag`, `runDag`) |
-| `llm/` | `types/` | LLM client implementations |
-| `observer/` | `types/` | Observer implementations |
-| `checkpoint/` | `types/`, `shared/` | Checkpoint persistence — in-memory + Redis adapter; named codec exports delegate to `shared/composite-node-key.ts` |
-| `file/` | `types/`, `shared/`, `checkpoint/`, `state-machine/` | Durable file backend: event journal, checkpointer, freshness index, spend store, job, resume (subpath `@fuguejs/framework/file`) |
-| `cache/` | `types/` | Response caching — in-memory + Redis adapter |
-| `queue/` | `types/`, `state-machine/` | Queue abstractions |
-| `queue-bullmq/` | `queue/`, `state-machine/` | BullMQ adapter |
-| `tracing/` | `types/` | OpenTelemetry integration |
+| `packages/framework/src/types/` | Nothing | Domain types, branded IDs, discriminated unions |
+| `packages/framework/src/shared/` | `packages/framework/src/types/` | Pure utilities (topo sort, validation, input assembly, composite node-address codec) |
+| `packages/framework/src/dag-runtime/` | `packages/framework/src/types/`, `packages/framework/src/shared/` | Pure transitions + imperative execution shell |
+| `packages/framework/src/state-machine/` | `packages/framework/src/types/` | Generic state machine kernel |
+| `packages/framework/src/executor/` | `packages/framework/src/types/`, `packages/framework/src/shared/`, `packages/framework/src/dag-runtime/`, `packages/framework/src/state-machine/` | Public API (`defineDag`, `runDag`) |
+| `packages/framework/src/llm/` | `packages/framework/src/types/` | LLM client implementations |
+| `packages/framework/src/observer/` | `packages/framework/src/types/` | Observer implementations |
+| `packages/framework/src/checkpoint/` | `packages/framework/src/types/`, `packages/framework/src/shared/` | Checkpoint persistence — in-memory + Redis adapter; named codec exports delegate to `packages/framework/src/shared/composite-node-key.ts` |
+| `packages/framework/src/file/` | `packages/framework/src/types/`, `packages/framework/src/shared/`, `packages/framework/src/checkpoint/`, `packages/framework/src/state-machine/` | Durable file backend: event journal, checkpointer, freshness index, spend store, job, resume (subpath `@fuguejs/framework/file`) |
+| `packages/framework/src/cache/` | `packages/framework/src/types/` | Response caching — in-memory + Redis adapter |
+| `packages/framework/src/queue/` | `packages/framework/src/types/`, `packages/framework/src/state-machine/` | Queue abstractions |
+| `packages/framework/src/queue-bullmq/` | `packages/framework/src/queue/`, `packages/framework/src/state-machine/` | BullMQ adapter |
+| `packages/framework/src/tracing/` | `packages/framework/src/types/` | OpenTelemetry integration |
 
 **Subpath exports.** The main barrel (`@fuguejs/framework`) is dependency-light. Adapters that pull heavy optional peer deps live behind dedicated subpaths so consumers who do not need them never load them:
 
@@ -220,7 +220,7 @@ The F6 feature (ADRs 0075–0080) adds a self-contained durable filesystem backe
 | `@fuguejs/framework/bullmq` | BullMQ queue/worker adapters | `bullmq`, `ioredis` |
 | `@fuguejs/framework/file` | File backend: journal, checkpointer, freshness index, job, resume | none (node built-ins only — FR-041) |
 
-`check-imports.ts` enforces that `ioredis` is reachable only from `cache/redis-cache.ts`, `checkpoint/redis-*.ts`, and `queue-bullmq/`.
+`check-imports.ts` enforces that `ioredis` is reachable only from `packages/framework/src/cache/redis-cache.ts`, `packages/framework/src/checkpoint/redis-*.ts`, and `packages/framework/src/queue-bullmq/`.
 
 ### Key Invariants
 
@@ -250,7 +250,7 @@ A map fan runs up to *C* children at once and is admitted against the run's budg
 
 Concurrency here is **child-level**: children of one fan inside one run. It is a different thing from the **run-level** limits `MAX_GLOBAL_CONCURRENCY`, `DEFAULT_DAG_CONCURRENCY` and `fugue.yaml` `maxConcurrent`, which bound concurrent *runs*. Never call either one plain "concurrency" or `maxConcurrency`.
 
-The decisions are made by one pure typed reducer, `fanStep` (LC-1, `dag-runtime/fan/fan-machine.ts`, phases `fan-dispatching | fan-draining | fan-done`). `run-mapped-fan.ts` interprets it.
+The decisions are made by one pure typed reducer, `fanStep` (LC-1, `packages/framework/src/dag-runtime/fan/fan-machine.ts`, phases `fan-dispatching | fan-draining | fan-done`). `run-mapped-fan.ts` interprets it.
 
 | Term | Definition |
 |------|-----------|
@@ -258,7 +258,7 @@ The decisions are made by one pure typed reducer, `fanStep` (LC-1, `dag-runtime/
 | **Fan Concurrency Cap** | The host operator's host-wide ceiling on every fan's Child Concurrency. Branded `FanConcurrencyCap`, configured as `FAN_CHILD_CONCURRENCY_MAX` (default `8`, `DEFAULT_FAN_CONCURRENCY_CAP`), and passed to the framework as `DagRunOpts.fanConcurrencyCap`. An invalid value fails host startup, naming the setting. It is not per-tenant and has no per-run override. `1` forces every fan sequential; it does not turn **Projection** off. |
 | **Effective Concurrency** | *C* = `min(Child Concurrency, Fan Concurrency Cap)`: the fan's in-flight bound, never exceeded. When the authored value exceeds the cap, the fan is **clamped**: one `logger.warn` and one `fan-start{clamped: true}` event per fan start. For an unbudgeted fan at C=1, dispatch order, checkpoint calls, reducer input and errors are byte-identical to the pre-ADR-0090 sequential fan. A budgeted fan still applies **Projection** at C=1, so it may refuse earlier than the per-call meter alone would, and it then writes a **Refusal Seed** (ADR-0090 §10). |
 | **Probe Batch** | The first `min(C, unreplayed)` dispatches of a fan that has no Refusal Seed. They are dispatched **without Projection**, because no Per-Child Estimate exists yet. Bounded by C × M plus the host per-call meter (the *probe carve-out*). Absent when a Refusal Seed exists for the epoch: then every dispatch is projected. |
-| **Projection** | The admission check before every post-probe dispatch: `settled + remainingChildren × perChildEstimate` on each budgeted axis, read only from the existing `BudgetCapability.remaining()` headroom ADT. `remainingChildren` = width − successfully completed, so it includes in-flight slots and the slot about to start. Each headroom kind is handled differently: `available` axes are checked in their own unit; `unpriced` and `unknown-usage` are checked against the known lower bound (`lowerBound: true`); `unbudgeted` is never projected. The first breached axis in ceiling order is reported. Pure `project` in `dag-runtime/fan/projection.ts`. |
+| **Projection** | The admission check before every post-probe dispatch: `settled + remainingChildren × perChildEstimate` on each budgeted axis, read only from the existing `BudgetCapability.remaining()` headroom ADT. `remainingChildren` = width − successfully completed, so it includes in-flight slots and the slot about to start. Each headroom kind is handled differently: `available` axes are checked in their own unit; `unpriced` and `unknown-usage` are checked against the known lower bound (`lowerBound: true`); `unbudgeted` is never projected. The first breached axis in ceiling order is reported. Pure `project` in `packages/framework/src/dag-runtime/fan/projection.ts`. |
 | **Per-Child Estimate** | The predicted spend of one more child, per axis, from the fan's **estimator**: `largest-seen` (default), `p50`, `p90` or `p95`. Percentiles use nearest-rank and fall back to largest-seen below 5 samples; seeded samples count. Its inputs are **spend samples**: the run-wide `spent()` delta between a child's dispatch and its settle (the *lifetime window*). That window never under-counts the child's true cost, but it over-counts under overlap (accepted cost: up to about (2C−1)×). **M** is the largest such sample in the fan. Every refusal and projection records `estimatorApplied`. |
 | **Fan Budget Refusal** | The typed, distinct, non-retriable outcome `fan-budget-refused { nodeId; refusal: FanRefusal }`: Projection found that the remaining children cannot fit a ceiling. The `FanRefusal` record carries the axis and ceiling, per-child estimate, estimator applied, Effective Concurrency, completed (including drain completions) and remaining counts, `lowerBound`, the redeploy hint, and `scopePath` (`[]` until nested fans). It is constructed only by `frameworkError.fanBudgetRefused` (INV-2). When a Drain also observes child failures, the refusal is **attached** to `fan-child-failed { primary: lowest index, causes }`, never dropped. HTTP 429, same class as `llm-budget-exceeded`. Under largest-seen, post-refusal spend ≤ (C−1) × M. |
 | **Refusal Seed** | The `FanRefusalSeed` (version 1: estimator, samples, estimate, ceilings in force, refusal) persisted per execution epoch on any refusal, at `fan-seed@<mapNodeId>@0@<executionEpoch>`. It is written through the fan's existing `checkpointer`, in a namespace disjoint from `dag`, with no grammar change. On resume it is evaluated **before any dispatch**: unless a ceiling was raised (only a DAG redeploy can do that), the refusal is **sticky**, with the same kind and 0 dispatches. After a raise the fan projects every dispatch with no Probe Batch. A reroute (new epoch) ignores it; a failed seed save fails closed. |
@@ -271,41 +271,41 @@ The host is the **imperative shell** that wires the framework into a production 
 
 | Component | Responsibility |
 |-----------|---------------|
-| `domain/host-state.ts` | Pure state machine: booting → ready → syncing → degraded → draining → stopped |
-| `domain/registry.ts` | Immutable snapshot of loaded DAGs (frozen Map) |
-| `domain/concurrency.ts` | Pure acquire/release with branded tokens |
-| `domain/circuit-breaker.ts` | Pure closed/open/half-open state machine |
-| `domain/circuit-guard.ts` | Protocol-enforcing permit token (check→execute→mark) |
-| `domain/config.ts` | Zod-validated environment config with sensible defaults |
-| `domain/host-error.ts` | Discriminated union of host errors, exhaustively mapped to HTTP status via `httpStatusFor` |
-| `adapters/git-sync.ts` | Bun.spawn → git clone/pull/rev-parse with timeout |
-| `adapters/module-loader.ts` | Dynamic import + validation + prompt loading |
-| `adapters/node-context-factory.ts` | Constructs per-request NodeContext with DAG-namespaced keys |
-| `adapters/token-store.ts` | Redis-backed team token persistence |
-| `http/router.ts` | Hono app with route-level auth guards |
-| `sync/sync-loop.ts` | Timer-driven git poll + registry rebuild |
-| `lifecycle/startup.ts` | Boot sequence: Redis ping → clone → load |
-| `lifecycle/signals.ts` | SIGTERM/SIGINT → drain → stop |
-| `lifecycle/redis-probe.ts` | Post-boot Redis liveness probe → degraded/recovered transitions |
-| `host.ts` | Top-level imperative shell wiring all subsystems; shutdown attempts every owned teardown step, rejects with an `AggregateError` when any step fails, and memoizes that terminal outcome for idempotent callers |
-| `main.ts` | Binary entry point (process.exit, real Redis, real git) |
+| `packages/host/src/domain/host-state.ts` | Pure state machine: booting → ready → syncing → degraded → draining → stopped |
+| `packages/host/src/domain/registry.ts` | Immutable snapshot of loaded DAGs (frozen Map) |
+| `packages/host/src/domain/concurrency.ts` | Pure acquire/release with branded tokens |
+| `packages/host/src/domain/circuit-breaker.ts` | Pure closed/open/half-open state machine |
+| `packages/host/src/domain/circuit-guard.ts` | Protocol-enforcing permit token (check→execute→mark) |
+| `packages/host/src/domain/config.ts` | Zod-validated environment config with sensible defaults |
+| `packages/host/src/domain/host-error.ts` | Discriminated union of host errors, exhaustively mapped to HTTP status via `httpStatusFor` |
+| `packages/host/src/adapters/git-sync.ts` | Bun.spawn → git clone/pull/rev-parse with timeout |
+| `packages/host/src/adapters/module-loader.ts` | Dynamic import + validation + prompt loading |
+| `packages/host/src/adapters/node-context-factory.ts` | Constructs per-request NodeContext with DAG-namespaced keys |
+| `packages/host/src/adapters/token-store.ts` | Redis-backed team token persistence |
+| `packages/host/src/http/router.ts` | Hono app with route-level auth guards |
+| `packages/host/src/sync/sync-loop.ts` | Timer-driven git poll + registry rebuild |
+| `packages/host/src/lifecycle/startup.ts` | Boot sequence: Redis ping → clone → load |
+| `packages/host/src/lifecycle/signals.ts` | SIGTERM/SIGINT → drain → stop |
+| `packages/host/src/lifecycle/redis-probe.ts` | Post-boot Redis liveness probe → degraded/recovered transitions |
+| `packages/host/src/host.ts` | Top-level imperative shell wiring all subsystems; shutdown attempts every owned teardown step, rejects with an `AggregateError` when any step fails, and memoizes that terminal outcome for idempotent callers |
+| `packages/host/src/main.ts` | Binary entry point (process.exit, real Redis, real git) |
 
-**HITL subsystem (`hitl/`).** Durable human-review suspend/resume (ADR-0060).
-
-| Component | Responsibility |
-|-----------|---------------|
-| `hitl/service.ts` | Suspend/resume orchestration: park a run, resolve a decision, resume execution |
-| `hitl/human-review-hook.ts` | Bridges the framework's `onHumanReview` hook to the durable run store |
-| `hitl/run-store-job.ts` / `hitl/adapters/{run-queue,run-store,run-executor}.ts` | BullMQ-over-Redis durable run queue, store, and resume worker |
-| `hitl/identity.ts` | Binds the approving identity to the resolved decision |
-| `hitl/adapters/webhook-notifier.ts` / `bot/` | Teams approval transports — deep-link webhook and in-Teams Bot Framework cards |
-
-**Identity-scoped capabilities (`adapters/`).** Per-identity capability brokering (ADRs 0051–0059).
+**HITL subsystem (`packages/host/src/hitl/`).** Durable human-review suspend/resume (ADR-0060).
 
 | Component | Responsibility |
 |-----------|---------------|
-| `adapters/keycloak-broker.ts` / `keycloak-token-endpoint.ts` | Mint a downscoped per-identity token via Keycloak Standard Token Exchange |
-| `adapters/entra-wif.ts` | Entra workload-identity-federation exchange for MS Graph access |
-| `adapters/graph-capability.ts` | Identity-scoped MS Graph document capability |
-| `adapters/run-spend-authority.ts` / `metered-llm.ts` | One run-scoped spend authority shared by every marked LLM client; thin client decorators delegate to it |
-| `adapters/broker-audit.ts` | Audit trail for brokered capability grants |
+| `packages/host/src/hitl/service.ts` | Suspend/resume orchestration: park a run, resolve a decision, resume execution |
+| `packages/host/src/hitl/human-review-hook.ts` | Bridges the framework's `onHumanReview` hook to the durable run store |
+| `packages/host/src/hitl/run-store-job.ts` / `packages/host/src/hitl/adapters/{run-queue,run-store,run-executor}.ts` | BullMQ-over-Redis durable run queue, store, and resume worker |
+| `packages/host/src/hitl/identity.ts` | Binds the approving identity to the resolved decision |
+| `packages/host/src/hitl/adapters/webhook-notifier.ts` / `packages/host/src/hitl/adapters/bot/` | Teams approval transports — deep-link webhook and in-Teams Bot Framework cards |
+
+**Identity-scoped capabilities (`packages/host/src/adapters/`).** Per-identity capability brokering (ADRs 0051–0059).
+
+| Component | Responsibility |
+|-----------|---------------|
+| `packages/host/src/adapters/keycloak-broker.ts` / `keycloak-token-endpoint.ts` | Mint a downscoped per-identity token via Keycloak Standard Token Exchange |
+| `packages/host/src/adapters/entra-wif.ts` | Entra workload-identity-federation exchange for MS Graph access |
+| `packages/host/src/adapters/graph-capability.ts` | Identity-scoped MS Graph document capability |
+| `packages/host/src/adapters/run-spend-authority.ts` / `metered-llm.ts` | One run-scoped spend authority shared by every marked LLM client; thin client decorators delegate to it |
+| `packages/host/src/adapters/broker-audit.ts` | Audit trail for brokered capability grants |

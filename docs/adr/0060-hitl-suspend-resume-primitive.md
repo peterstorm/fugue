@@ -315,15 +315,15 @@ is a conscious decision, not an oversight.
   sub-second recoverable window. Deferred to a dedicated design cycle.
 
 - **Duplicate approval → redundant resume slice.** `recordDecision` is a
-  read-check-write (`isPending` → `putDecision` → `enqueue`) that is not a single
+  read-check-write (isPending → putDecision → `enqueue`) that is not a single
   atomic compare-and-set. Two valid approvals racing the *same* open gate (e.g. an
-  HTTP call and a Teams click landing together) can both pass `isPending` and both
+  HTTP call and a Teams click landing together) can both pass isPending and both
   `enqueue`. This does **not** double-execute the gated node nor emit a duplicate
   card for the resolved gate: the worker's single-flight Redis lock
   (`run-queue.ts`) serializes execution, and the second job hits the
   terminal/already-advanced guards in `processRun` (the first job consumed the
   decision and advanced past the gate before releasing the lock). The only cost is
-  one redundant worker slice. `putDecision` is last-writer-wins on the decision
+  one redundant worker slice. putDecision is last-writer-wins on the decision
   *value*, so two *different* actions (approve then reject) within the window
   resolve to whichever wrote last — acceptable for v1; a true CAS (`SET` with a
   pending-marker guard, or making the enqueue idempotent per `(runId, nodeId)`)

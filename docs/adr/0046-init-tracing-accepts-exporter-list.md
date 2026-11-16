@@ -21,7 +21,7 @@ The forces at play:
 
 ## Options Considered
 
-1. **New `initTracingMulti()` function alongside the existing `initTracing()`**
+1. **New initTracingMulti() function alongside the existing `initTracing()`**
    - Pros: Leaves the single-exporter signature completely untouched; the multi-backend path is opt-in and visually distinct.
    - Cons: Forks the public API into two entry points that must be kept in lockstep. Two functions means two flush lifecycles and two shutdown lifecycles to maintain and document. Callers must know which one to reach for, and a future third capability forks it again. The single/multi distinction leaks into every consumer rather than being absorbed at the boundary.
 

@@ -27,7 +27,7 @@
  * The baseline is excluded because it is not parse memory. `@fuguejs/xlsx`
  * imports `ok`/`err` from the `@fuguejs/framework` barrel, which pulls in about
  * 70 MB of module graph; a host has already paid that before any parse. The
- * JSON report keeps the absolute numbers (`baselineRssMb`, `processPeakRssMb`)
+ * JSON report keeps the absolute numbers (baselineRssMb, processPeakRssMb)
  * next to the budgeted one. The parse runs in its own process so that the
  * fixture generator (ExcelJS, JSZip) and the parent are never counted.
  *

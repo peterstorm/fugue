@@ -120,7 +120,7 @@ const scriptRedis = (methods: ScriptRedisMethods = {}): Redis =>
 
 /**
  * Poll `condition` until it holds or the timeout elapses, then return either
- * way — the caller's own `expect` decides whether the wait succeeded.
+ * way — the caller's own expect decides whether the wait succeeded.
  *
  * Seven hand-rolled scaffolds (five `setInterval`+`setTimeout` pairs and two
  * `while (Date.now() < deadline)` loops) all did exactly this, each carrying its

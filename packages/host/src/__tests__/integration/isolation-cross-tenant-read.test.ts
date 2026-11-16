@@ -123,7 +123,7 @@ const dataOk = <T>(value: T): DataOk<T> => ({ ok: true, value });
 
 /**
  * A parsed ACL, derived by walking the ordered SETUSER tokens. `keyPatterns` is
- * EVERY `~`-pattern seen (so `~*`/`allkeys` ⇒ all keys; >1 pattern ⇒ all of them;
+ * EVERY `~`-pattern seen (so `~*`/allkeys ⇒ all keys; >1 pattern ⇒ all of them;
  * 0 patterns ⇒ no key access). `commands` is the set of allowed command names,
  * built left-to-right so order is honoured.
  */

@@ -154,7 +154,7 @@ const fakeHitl = (overrides: Partial<HitlRunService> = {}): HitlRunService => ({
 });
 
 // ── Approver-authz fixtures (FR-041, US5, SC-006) ────────────────────────────
-// The `lead-desk` DAG (the default suspendedRecord) is owned by team "sales".
+// The lead-desk DAG (the default suspendedRecord) is owned by team "sales".
 // Alice (aadObjectId "aad-alice") is a member of "sales" → authorized. Mallory
 // ("aad-mallory") is a member of "marketing" only → a non-member, refused.
 const APPROVER_TEAMS = { "aad-alice": ["sales"], "aad-mallory": ["marketing"] };
@@ -430,7 +430,7 @@ describe("bot messages handler", () => {
 
 // ── Approver team-authz (FR-041, US5, SC-006) — PARITY with the HTTP path ─────
 // The Teams button path must authorize the clicking user against the run's
-// owning team exactly as `runs.ts#authorizeRunAccess` does: a member records, a
+// owning team exactly as `http/handlers/runs.ts#authorizeRunAccess` does: a member records, a
 // non-member / unknown user is refused WITHOUT recording.
 describe("bot messages handler — approver authorization (FR-041, SC-006)", () => {
   const approve = { verb: REVIEW_VERB, runId: "run-1", nodeId: "review", decision: "approve" };

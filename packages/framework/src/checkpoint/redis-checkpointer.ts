@@ -60,7 +60,7 @@ const serializeMeta = (meta: RunMeta, createdAtMs: number): string =>
   } satisfies StoredMeta);
 
 const deserializeMeta = (raw: string): { meta: RunMeta; createdAt: Date } => {
-  const stored: StoredMeta = JSON.parse(raw);
+  const stored: unknown = JSON.parse(raw);
   // ONE encoding with the file codec (round-23 atl-1): the record grammar
   // gates (type gates, canonical ISO dates, safe-integer nodeCount, ID
   // domains) live in the checkpoint core's `parseRunMetaRecord`. The brand
@@ -88,8 +88,13 @@ const serializeNode = (
   };
 };
 
+// `parseNodeStateRecord` has already proven `stored` is a JSON object; the
+// `output` field is adapter-side pass-through, so it stays `unknown`.
+const outputOf = (stored: unknown): unknown =>
+  typeof stored === "object" && stored !== null && "output" in stored ? stored.output : undefined;
+
 const deserializeNode = (raw: string): NodeState => {
-  const stored: StoredNodeState = JSON.parse(raw);
+  const stored: unknown = JSON.parse(raw);
   // ONE encoding with the file codec (round-23 atl-1): the record grammar
   // gates live in the checkpoint core's `parseNodeStateRecord` — a non-string
   // or `ID_PATTERN`-violating nodeId, or a non-canonical completedAt, from
@@ -102,7 +107,7 @@ const deserializeNode = (raw: string): NodeState => {
   }
   return {
     nodeId: parsedNode.value.nodeId,
-    output: stored.output,
+    output: outputOf(stored),
     completedAt: parsedNode.value.completedAt,
   };
 };
@@ -122,7 +127,7 @@ return 1
 /**
  * The driver seam this adapter actually needs, owned by this consumer rather
  * than by `ioredis` (architecture.md, "Ports at I/O Boundaries"; the shape is
- * `typescript-patterns.md`'s object type of call signatures, so a fake is a
+ * typescript-patterns.md's object type of call signatures, so a fake is a
  * plain object literal, not a mock).
  *
  * Every signature carries the EXACT arity of the call below it, not a
@@ -347,7 +352,7 @@ export class RedisCheckpointer implements Checkpointer {
         // port structurally with no cast. Narrowing it here with a runtime
         // check rather than an `as string` assertion keeps that property AND
         // fails closed — an assertion would let a driver returning a Buffer
-        // (e.g. under `returnBuffers`) thread a non-string into `evalsha` as
+        // (e.g. under returnBuffers) thread a non-string into `evalsha` as
         // if it were a validated SHA, and the failure would surface later, on
         // a different call, as an opaque driver error.
         const sha = await this.redis.script("LOAD", SAVE_NODE_SCRIPT);

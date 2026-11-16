@@ -52,6 +52,103 @@ export interface RouterDeps extends RunDagDeps, AuthMiddlewareDeps {
   readonly teamsBot?: (input: { authHeader: string | undefined; activity: unknown }) => Promise<{ status: number; body?: unknown }>;
 }
 
+type Router = Hono<HostEnv>;
+
+/**
+ * Bot Framework inbound endpoint (ADR-0060).
+ * Registered BEFORE the team-token auth middleware: Teams authenticates with
+ * a Bot Framework JWT (verified inside the handler), not a fugue team token.
+ */
+const registerTeamsBotRoute = (app: Router, teamsBot: NonNullable<RouterDeps["teamsBot"]>): void => {
+  app.post("/teams/messages", async (c) => {
+    let activity: unknown;
+    try {
+      activity = await c.req.json();
+    } catch {
+      return errorResponse(c, 400, "body-parse-failed", "Bot activity is not valid JSON");
+    }
+    const result = await teamsBot({ authHeader: c.req.header("authorization"), activity });
+    return result.body !== undefined ? c.json(result.body as object, result.status as 200) : c.body(null, result.status as 200);
+  });
+};
+
+/** Admin route guard (defense-in-depth at router level) + admin routes. */
+const registerAdminRoutes = (app: Router, deps: RouterDeps): void => {
+  app.use("/admin/*", async (c, next) => {
+    const identity = c.get("authIdentity");
+    if (!identity || identity.kind !== "admin") {
+      return errorResponse(c, 403, "forbidden", "Admin access required");
+    }
+    await next();
+    // Admin identity verified; the downstream handler owns the response.
+    return undefined;
+  });
+
+  const createTeam = createCreateTeamHandler(deps.adminHandlerDeps);
+  const listTeams = createListTeamsHandler(deps.adminHandlerDeps);
+  const revokeTeam = createRevokeTeamHandler(deps.adminHandlerDeps);
+
+  // Operator-driven dependency diagnostics (admin-gated — the report names every
+  // wired capability and echoes failure reasons; see the handler's module doc for
+  // why this is deliberately NOT on /health or /readiness).
+  app.get("/admin/capabilities/health", createCapabilityHealthHandler(deps.capabilityHealthDeps));
+
+  app.post("/admin/teams", createTeam);
+  app.get("/admin/teams", listTeams);
+  app.delete("/admin/teams/:team", revokeTeam);
+};
+
+/** DAG routes (authenticated — authorization checked per-DAG) + HITL run routes. */
+const registerDagRoutes = (app: Router, deps: RouterDeps): void => {
+  app.get("/dags", listDagsHandler);
+
+  // GET /dags/:id/manifest — registered before the param-less /run route so
+  // both bind cleanly; auth + team-isolation is enforced inside the handler.
+  app.get("/dags/:id/manifest", createManifestHandler({ logger: deps.logger }));
+
+  // POST /dags/:id/run
+  const runDagHandler = createRunDagHandler(deps);
+  app.post("/dags/:id/run", runDagHandler);
+
+  // ── HITL run routes (ADR-0060) — async status + approval ─────────────────
+  // Registered BEFORE the custom-route POST catch-all so the approval route
+  // binds rather than being swallowed as a custom DAG route.
+  app.get("/runs/:runId", createGetRunHandler(deps));
+  app.post("/runs/:runId/approve", createApproveRunHandler(deps));
+};
+
+/** Resolve the request path to the DAG id owning that custom route ("" when none). */
+const routeOf = (c: { get: (k: "hostState") => HostState; req: { path: string } }): string => {
+  const state = c.get("hostState");
+  const registry = "registry" in state ? state.registry : undefined;
+  if (!registry) return "";
+  for (const dag of registry.dags.values()) {
+    if (dag.route === c.req.path) return dag.id;
+  }
+  return "";
+};
+
+/**
+ * Custom route overrides (DagRegistration.route / fugue.yaml route).
+ * Registered as a POST fallback so hot-reloaded DAGs (whose routes change
+ * between syncs) resolve against the CURRENT registry on every request —
+ * static mounts would leak stale routes after a sync removes/renames a DAG.
+ * The resolver maps the request path back to the owning DAG id and reuses
+ * the same run handler (auth, team isolation, concurrency, circuit).
+ */
+const registerCustomRouteFallback = (app: Router, deps: RouterDeps): void => {
+  const runDagByRouteHandler = createRunDagHandler(deps, (c) => routeOf(c));
+  app.post("*", async (c) => {
+    const state = c.get("hostState");
+    const unavailable = hostUnavailableResponse(c, state);
+    if (unavailable) return unavailable;
+    if (routeOf(c) === "") {
+      return errorResponse(c, 404, "not-found", `No DAG is registered at route '${c.req.path}'`);
+    }
+    return runDagByRouteHandler(c);
+  });
+};
+
 /**
  * Creates the Hono app with all routes wired up.
  *
@@ -75,93 +172,15 @@ export const createRouter = (deps: RouterDeps): Hono<HostEnv> => {
   app.get("/health", healthHandler);
   app.get("/readiness", readinessHandler);
 
-  // ── Bot Framework inbound endpoint (ADR-0060) ────────────────────────────
-  // Registered BEFORE the team-token auth middleware: Teams authenticates with
-  // a Bot Framework JWT (verified inside the handler), not a fugue team token.
-  if (deps.teamsBot) {
-    const teamsBot = deps.teamsBot;
-    app.post("/teams/messages", async (c) => {
-      let activity: unknown;
-      try {
-        activity = await c.req.json();
-      } catch {
-        return errorResponse(c, 400, "body-parse-failed", "Bot activity is not valid JSON");
-      }
-      const result = await teamsBot({ authHeader: c.req.header("authorization"), activity });
-      return result.body !== undefined ? c.json(result.body as object, result.status as 200) : c.body(null, result.status as 200);
-    });
-  }
+  // ── Bot Framework inbound endpoint (ADR-0060) — BEFORE the auth middleware ──
+  if (deps.teamsBot) registerTeamsBotRoute(app, deps.teamsBot);
 
   // ── Auth middleware (applied to all routes below) ────────────────────────
   app.use("*", createAuthMiddleware(deps));
 
-  // ── Admin route guard (defense-in-depth at router level) ─────────────────
-  app.use("/admin/*", async (c, next) => {
-    const identity = c.get("authIdentity");
-    if (!identity || identity.kind !== "admin") {
-      return errorResponse(c, 403, "forbidden", "Admin access required");
-    }
-    await next();
-    // Admin identity verified; the downstream handler owns the response.
-    return undefined;
-  });
-
-  // ── Admin routes ─────────────────────────────────────────────────────────
-  const createTeam = createCreateTeamHandler(deps.adminHandlerDeps);
-  const listTeams = createListTeamsHandler(deps.adminHandlerDeps);
-  const revokeTeam = createRevokeTeamHandler(deps.adminHandlerDeps);
-
-  // Operator-driven dependency diagnostics (admin-gated — the report names every
-  // wired capability and echoes failure reasons; see the handler's module doc for
-  // why this is deliberately NOT on /health or /readiness).
-  app.get("/admin/capabilities/health", createCapabilityHealthHandler(deps.capabilityHealthDeps));
-
-  app.post("/admin/teams", createTeam);
-  app.get("/admin/teams", listTeams);
-  app.delete("/admin/teams/:team", revokeTeam);
-
-  // ── DAG routes (authenticated — authorization checked per-DAG) ───────────
-  app.get("/dags", listDagsHandler);
-
-  // GET /dags/:id/manifest — registered before the param-less /run route so
-  // both bind cleanly; auth + team-isolation is enforced inside the handler.
-  app.get("/dags/:id/manifest", createManifestHandler({ logger: deps.logger }));
-
-  // POST /dags/:id/run
-  const runDagHandler = createRunDagHandler(deps);
-  app.post("/dags/:id/run", runDagHandler);
-
-  // ── HITL run routes (ADR-0060) — async status + approval ─────────────────
-  // Registered BEFORE the custom-route POST catch-all so the approval route
-  // binds rather than being swallowed as a custom DAG route.
-  app.get("/runs/:runId", createGetRunHandler(deps));
-  app.post("/runs/:runId/approve", createApproveRunHandler(deps));
-
-  // ── Custom route overrides (DagRegistration.route / fugue.yaml route) ────
-  // Registered as a POST fallback so hot-reloaded DAGs (whose routes change
-  // between syncs) resolve against the CURRENT registry on every request —
-  // static mounts would leak stale routes after a sync removes/renames a DAG.
-  // The resolver maps the request path back to the owning DAG id and reuses
-  // the same run handler (auth, team isolation, concurrency, circuit).
-  const routeOf = (c: { get: (k: "hostState") => HostState; req: { path: string } }): string => {
-    const state = c.get("hostState");
-    const registry = "registry" in state ? state.registry : undefined;
-    if (!registry) return "";
-    for (const dag of registry.dags.values()) {
-      if (dag.route === c.req.path) return dag.id;
-    }
-    return "";
-  };
-  const runDagByRouteHandler = createRunDagHandler(deps, (c) => routeOf(c));
-  app.post("*", async (c) => {
-    const state = c.get("hostState");
-    const unavailable = hostUnavailableResponse(c, state);
-    if (unavailable) return unavailable;
-    if (routeOf(c) === "") {
-      return errorResponse(c, 404, "not-found", `No DAG is registered at route '${c.req.path}'`);
-    }
-    return runDagByRouteHandler(c);
-  });
+  registerAdminRoutes(app, deps);
+  registerDagRoutes(app, deps);
+  registerCustomRouteFallback(app, deps);
 
   return app;
 };

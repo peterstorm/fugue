@@ -105,7 +105,7 @@ export interface PgCapability {
    * Escape hatch: execute a query and return raw rows as `unknown[]` with NO
    * schema validation. This bypasses parse-don't-validate — every row must be
    * narrowed manually before use. Reach for `query` with a Zod schema first;
-   * use this only for genuinely dynamic schemas (e.g. `information_schema`
+   * use this only for genuinely dynamic schemas (e.g. information_schema
    * introspection) or pass-through tooling.
    */
   queryRaw(sql: string, params?: unknown[]): Promise<Result<unknown[], FrameworkError>>;

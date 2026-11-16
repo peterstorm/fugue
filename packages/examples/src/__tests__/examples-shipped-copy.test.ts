@@ -2,7 +2,7 @@
 //
 // `packages/examples` stays the lint-tested source of truth (private, never
 // published). `@fuguejs/framework` ships a byte-identical copy under
-// `docs/examples/` so a consumer who installs only the framework still gets the
+// `packages/framework/docs/examples/` so a consumer who installs only the framework still gets the
 // canonical, copy-paste examples (the examples package itself is private —
 // ADR-shipping plan E3). This suite fails the build if the two diverge, so the
 // copy can never silently rot out of sync with the source it was lint-tested as.

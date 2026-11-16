@@ -190,7 +190,7 @@ const writeRawNode = (directory: string, runId: string, fileName: string, conten
   writeFileSync(join(nodes, fileName), contents);
 };
 
-/** Build raw node bytes while leaving `outputJson` untouched, so adversarial
+/** Build raw node bytes while leaving outputJson untouched, so adversarial
  * serializer-tag and pollution-key payloads are not normalized by the test
  * fixture's own serializer before reaching the checkpointer. */
 const rawNodeWithOutput = (nodeKey: string, outputJson: string): string =>
@@ -200,7 +200,7 @@ const rawNodeWithOutput = (nodeKey: string, outputJson: string): string =>
 // SC-001 — the ENTIRE shared suite, zero carve-outs
 // ---------------------------------------------------------------------------
 
-// `factory` runs first in the suite's `beforeEach`, so every test gets a
+// `factory` runs first in the suite's beforeEach, so every test gets a
 // pristine directory and the raw callbacks below address that same directory.
 let suiteDirectory = "";
 

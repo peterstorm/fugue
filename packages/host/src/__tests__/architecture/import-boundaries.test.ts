@@ -33,7 +33,7 @@
  *      forbid runtime exports there outright.
  *
  *   D. REDIS ACL CREDENTIAL CHANNEL INTEGRITY (ADR-0067 / AD-6): the per-tenant
- *      ACL credential env-var NAMES (`FUGUE_REDIS_ACL_USERNAME/PASSWORD`) that the
+ *      ACL credential env-var NAMES (`FUGUE_REDIS_ACL_USERNAME`/`FUGUE_REDIS_ACL_PASSWORD`) that the
  *      supervisor injects and the worker reads MUST agree byte-for-byte. ONLY
  *      `redis-acl.ts` may name them as string literals (it owns the shared
  *      constants); every other module reaches them through the exported
@@ -129,7 +129,7 @@ describe("A. Supervisor zero-secrets boundary (SC-002 / NFR-011)", () => {
       // dereference authority); the violation is importing a CONCRETE source.
       // We forbid the concrete adapter (`env-file-secrets-source`) AND any future
       // `*-secrets-source` CONCRETE module by matching the `-secrets-source` infix
-      // — which the port path `secrets/secrets-source` (preceded by `/`, not `-`)
+      // — which the port path `supervisor/secrets/secrets-source` (preceded by `/`, not `-`)
       // deliberately does NOT match, so referencing the TYPE stays allowed.
       const text = readFileSync(file, "utf8");
       for (const { spec } of importSpecifiers(text)) {
@@ -138,7 +138,7 @@ describe("A. Supervisor zero-secrets boundary (SC-002 / NFR-011)", () => {
         }
       }
       // Defense-in-depth: catch a re-export/alias that names ANY concrete-source
-      // constructor (`createEnvFileSecretsSource`, a future `createVaultSecretsSource`,
+      // constructor (`createEnvFileSecretsSource`, a future createVaultSecretsSource,
       // …) even without importing the module path. Skip the adapter definitions.
       if (!isConcreteAdapterDef(file) && /\bcreate[A-Za-z0-9]*SecretsSource\b/.test(text)) {
         offenders.push(`${relative(SRC_ROOT, file)} names a concrete SecretsSource constructor`);

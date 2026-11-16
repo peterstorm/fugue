@@ -208,7 +208,7 @@ const dag = defineDag({
 
 ### Event sequence with freshness violation
 
-Another process writes `version=43` to the same order between `fetch-order` completing (version=42) and `execute-refund` starting.
+Another process writes `version=43` to the same order between `fetch-order` completing (version=42) and execute-refund starting.
 
 ```json
 [
@@ -270,7 +270,7 @@ Another process writes `version=43` to the same order between `fetch-order` comp
 ]
 ```
 
-**What an operator sees:** The `freshness-violation` event immediately shows that `execute-refund` acted on stale data (version 42, superseded by version 43 from `run-xyz`). The `human-intervention` event shows Alice approved despite the violation, seeing the stale witness in her `priorWitnesses` context.
+**What an operator sees:** The `freshness-violation` event immediately shows that execute-refund acted on stale data (version 42, superseded by version 43 from run-xyz). The `human-intervention` event shows Alice approved despite the violation, seeing the stale witness in her `priorWitnesses` context.
 
 ---
 
@@ -481,7 +481,7 @@ const guardrailNode = {
 };
 ```
 
-**Bucket thresholds:** the convention is `high ≥ 0.85`, `medium ≥ 0.6`, else `low` — inline the threshold check as above. (Reusable `bucketFromProbability`/`bucketFromEnsemble` helpers live in the internal `sugar/` module and are not on the public barrel.) Override the cutoffs per node by adjusting the literals:
+**Bucket thresholds:** the convention is `high ≥ 0.85`, `medium ≥ 0.6`, else `low` — inline the threshold check as above. (Reusable `bucketFromProbability`/`bucketFromEnsemble` helpers live in the internal `packages/framework/src/sugar/` module and are not on the public barrel.) Override the cutoffs per node by adjusting the literals:
 
 ```ts
 output.score >= 0.9 ? "high" : output.score >= 0.7 ? "medium" : "low"

@@ -925,7 +925,7 @@ describe("HostConfigSchema", () => {
   it("REJECTS at boot an AGENT_CLIENT_SCOPES with a typo'd/unrecognised scope name (fails at boot, never at runtime)", () => {
     const result = parseHostConfig({
       ...validEnv,
-      // `msgrpah` is a typo — caught at boot rather than fail-closing every mint.
+      // msgrpah is a typo — caught at boot rather than fail-closing every mint.
       AGENT_CLIENT_SCOPES: JSON.stringify({ "fugue-agent-mail": ["msgrpah:mail.send"] }),
     });
     expect(result.ok).toBe(false);

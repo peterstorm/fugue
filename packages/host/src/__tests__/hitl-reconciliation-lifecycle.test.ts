@@ -3,7 +3,7 @@ import { existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { err } from "@fuguejs/framework";
-import type { QueueBackend, WorkerHandle } from "@fuguejs/framework";
+import type { Capability, CapabilityHandle, QueueBackend, WorkerHandle } from "@fuguejs/framework";
 import { createHost, type HostInstance } from "../host.js";
 import {
   fakeGit,
@@ -256,6 +256,52 @@ describe("createHost — HITL reconciliation lifecycle", () => {
     expect(infrastructureClosed).toBe(1);
     expect(host.getState().phase).toBe("stopped");
     host = undefined;
+  });
+
+  it("boot-abort teardown records a throwing HITL worker close and still closes capabilities and infrastructure", async () => {
+    // The HITL engine is wired BEFORE the HTTP bind, so a bind failure must tear
+    // it down. A worker whose close() throws must be recorded in the boot-abort
+    // error, and must not stop the later capability close or onShutdown.
+    socketPath = join(tmpdir(), `fugue-hitl-abort-close-fails-${crypto.randomUUID()}.sock`);
+    // Occupy the socket path so the host's own bind fails.
+    const squatter = Bun.serve({ unix: socketPath, fetch: () => new Response("squatter") });
+    const base = fakeRedis();
+    const events: string[] = [];
+    let capabilityCloses = 0;
+    let infrastructureClosed = 0;
+    const capability: CapabilityHandle = {
+      name: "abort-probe" as Capability,
+      client: {},
+      connect: async () => {},
+      close: async () => { capabilityCloses += 1; },
+    };
+
+    try {
+      const booted = await createHost({
+        config: makeConfig({ TEAMS_WEBHOOK_URL: "https://teams.example.test/hook" }),
+        git: fakeGit(),
+        loader: fakeLoader(),
+        redis: base.port,
+        sharedInfra: { ...fakeInfra(base.redis), capabilities: [capability] },
+        logger: testLogger(),
+        tenant: mkTenant("acme"),
+        bind: { unix: socketPath },
+        queueBackend: lifecycleQueue(events, { failWorkerClose: true }),
+        onShutdown: async () => { infrastructureClosed += 1; },
+      });
+
+      expect(booted.ok).toBe(false);
+      if (booted.ok) return;
+      expect(booted.error.kind).toBe("internal-invariant-violated");
+      expect(booted.error.message).toContain(
+        "Failed to close HITL worker during boot abort after server bind failure: HITL worker refused to close",
+      );
+      expect(events).toContain("worker-closed");
+      expect(capabilityCloses).toBe(1);
+      expect(infrastructureClosed).toBe(1);
+    } finally {
+      squatter.stop(true);
+    }
   });
 
   it("reconciles after worker startup, repeats, and clears the interval on shutdown", async () => {

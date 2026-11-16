@@ -2,7 +2,7 @@
 
 Minimal, copy-paste-ready reference for generating Fugue DAGs. This file ships
 inside `@fuguejs/framework`; the relative links below resolve both in the
-monorepo and under `node_modules/@fuguejs/` (the packages are siblings either way).
+monorepo and under node_modules/@fuguejs/ (the packages are siblings either way).
 
 - Type-system deep dive: [`dag-type-system.md`](./dag-type-system.md).
 - The `DagRegistration` + `fugue.yaml` + discovery contract: [`writing-dags.md`](../../host/docs/writing-dags.md) (ships in `@fuguejs/host`).
@@ -322,7 +322,7 @@ input schema: linear positions, fan-out/diamond source or branch positions, and
 router case/default handlers. Collect-only v1 maps cannot be fan-in joins, any
 `sources` role, or a router classifier (routing requires a direct enum output field).
 It is not a `DAG_SHAPES` member and does not add `fugue new --shape map` or a
-`defineMap` helper.
+defineMap helper.
 
 ```json
 {
@@ -497,7 +497,7 @@ createEvalJudgeNode({
 client — the framework does not validate it (`fugue capabilities` lists
 *capabilities*, not models). Use a **current** id; ids carrying an explicit
 release date (e.g. `claude-sonnet-4-5`) are usually the stale form and get
-retired. As of this writing the current Claude ids are `claude-opus-4-8`
+retired. As of this writing the current Claude ids are claude-opus-4-8
 (most capable) and `claude-sonnet-4-6` (speed/intelligence balance); the
 authoritative list lives in the host's LLM-provider configuration, not in
 this doc.
@@ -632,7 +632,7 @@ the node closed if the closure throws** (no key ⇒ no safe write).
 
 The framework does **not** itself store or dedupe on the key — it computes and
 propagates it, and the **downstream sink must honor it**: Stripe/SendGrid
-`Idempotency-Key` headers, `INSERT … ON CONFLICT DO NOTHING`, an upsert keyed on
+Idempotency-Key headers, `INSERT … ON CONFLICT DO NOTHING`, an upsert keyed on
 the value, etc. The key is your contract with that sink, made deterministic and
 observable.
 
@@ -1103,7 +1103,7 @@ factory for the seams that remain capability-shaped (model, brand). Module-scope
 ### Sharing nodes across DAGs
 
 When several DAGs read the same sources, define the shared **source nodes**, row
-schemas, and the fan-in schema fragment ONCE in a shared module (e.g. `lib/`) and
+schemas, and the fan-in schema fragment ONCE in a shared module (e.g. lib/) and
 import them — don't duplicate per `dag.ts`. Source nodes (no `inputSchema`) are
 inherently reusable because they carry no per-DAG request shape. Export the
 fan-in fragment next to the nodes so each DAG's join schema spreads it:
@@ -1146,7 +1146,7 @@ object keys equal its incoming source ids (including `"$input"`).
 
 ## Prompt Templates
 
-Place `.txt` files alongside `dag.ts` in a `prompts/` directory:
+Place `.txt` files alongside `dag.ts` in a prompts/ directory:
 
 ```
 prompts/user-summary.txt
@@ -1173,7 +1173,7 @@ Three layers, two automatic and one opt-in:
    predecessor prompt.
 2. **Trace attribution (automatic).** LLM spans carry `ai.prompt_hash`, so a
    trace identifies exactly which prompt version produced an output.
-3. **Explicit versions (opt-in).** Add `prompts/registry.json` next to the
+3. **Explicit versions (opt-in).** Add prompts/registry.json next to the
    prompt files:
 
    ```json
@@ -1250,7 +1250,7 @@ return err({ kind: "validation", nodeId: nodeId("score"), message: "CVR not foun
 Capabilities (`ctx.documents.getContent`, `ctx.http.get`, …), `parseWorkbook`
 from `@fuguejs/xlsx`, and documented operational APIs that return `Result`
 signal expected failure with `err(...)` — including a missing file or worksheet.
-A defensive `try/catch` wrapped around one of those Result calls is a smell: it
+A defensive try/catch wrapped around one of those Result calls is a smell: it
 hides the real control flow. Branch on `.ok` instead:
 
 ```ts
@@ -1279,7 +1279,7 @@ fetch node should be caught there and converted straight into an
 - [ ] Roots are **source nodes** (`createSourceNode`, no `inputSchema`); the request is consumed only via `DAG_INPUT` edges (a single `$input` edge for a bare consumer, the `"$input"` key for a fan-in)
 - [ ] A fan-in node's `z.object` keys equal its incoming source ids (including `"$input"` when it has a `DAG_INPUT` edge)
 - [ ] Errors are built with `frameworkError.*`, not raw `err({ kind, … })` literals
-- [ ] No defensive `try/catch` around capabilities, `parseWorkbook`, or other documented operational `Result` APIs — branch on `.ok` (construction gateways may throw as documented above)
+- [ ] No defensive try/catch around capabilities, `parseWorkbook`, or other documented operational `Result` APIs — branch on `.ok` (construction gateways may throw as documented above)
 - [ ] Required env vars are listed in `fugue.yaml` `env:`; optional defaulted config is a factory option, not a hidden `process.env` read
 - [ ] `export default` a `DagRegistration` object
 
@@ -1299,7 +1299,7 @@ bare Mermaid text for piping into documentation.
 
 > Run `bunx fugue …` from a directory whose package depends on
 > `@fuguejs/framework` (bun links the bin per dependent). From an unrelated
-> directory `bunx` falls through to the npm registry — and rewrites the
+> directory bunx falls through to the npm registry — and rewrites the
 > lockfile while failing. Equivalent direct form:
 > `bun node_modules/@fuguejs/framework/bin/fugue.ts lint <path>`.
 
@@ -1334,15 +1334,15 @@ $ bunx fugue new leads/lead-opener --shape sources --llm
 
 Writes under `dags/<team>/<name>/` (relative to the cwd, or `--dir <root>`):
 `dag.ts`, `fugue.yaml` (team taken from the path), `README.md`, and — with
-`--llm` — a `prompts/<name>.txt` plus a synced `prompts/registry.json`.
+`--llm` — a `prompts/<name>.txt` plus a synced prompts/registry.json.
 
 | Flag | Effect |
 |---|---|
 | `--shape <shape>` | **Required.** One of `linear`, `fan-out`, `diamond`, `router`, `sources`. |
-| `--llm` | Add an LLM node (bucketed confidence) + `prompts/` + synced `registry.json`. The DAG becomes a factory (`create<Name>Dag({ model })`) so a test can pin the model seam. |
+| `--llm` | Add an LLM node (bucketed confidence) + prompts/ + synced `registry.json`. The DAG becomes a factory (`create<Name>Dag({ model })`) so a test can pin the model seam. |
 | `--review` | Add a human-review gate (ADR-0060) — a `createHumanReviewNode` that pauses the run for an approve/reject decision. **`--shape linear` only**; for other shapes, gate a node by hand with `withHumanReview`. |
 | `--owner <owner>` | Set `fugue.yaml`'s `owner`. |
-| `--dir <root>` | Root that contains `dags/`. Defaults to the current directory. |
+| `--dir <root>` | Root that contains dags/. Defaults to the current directory. |
 | `--force` | Overwrite a non-empty target directory. |
 
 `--shape sources` (and source nodes / `$input` edges generally) is the **0.2.0

@@ -33,7 +33,7 @@
 //      empty prefix = genesis) ⇒ benign lag — the kernel's
 //      append-before-checkpoint window (runner FR-005) — ⇒ resume from
 //      `replayed`. The single-pass formulation is semantically identical to
-//      Loom's proven `resumeProgram` (which re-replays prefixes — O(n²) on
+//      Loom's proven resumeProgram (which re-replays prefixes — O(n²) on
 //      the disagree path, i.e. on every crash-window resume) but runs the
 //      lag test once per transition, O(n). A checkpoint matching any strict
 //      prefix is by definition a state the run genuinely occupied —
@@ -55,7 +55,7 @@
 // digest), never the event payloads' shape or the checkpoint STATE's shape —
 // so a hostile or version-drifted payload/state can still make
 // `machine.transition` or `machine.stateKey` throw (a matched ts-pattern arm
-// derefs a missing field; `.exhaustive()` raises `NonExhaustiveError` on an
+// derefs a missing field; `.exhaustive()` raises NonExhaustiveError on an
 // unknown variant). The caller's strict `parseCheckpoint` is in the same
 // untrusted class: the envelope gates validate only `data`'s BAGINESS (the
 // key exists — `"data" in record` passes when the payload deserializes to
@@ -358,7 +358,7 @@ export const proveResumeAgreement = <S, E, C>(
   //    decoded checkpoint STATE is hostile/version-drifted
   //    input — the envelope gates above validated its JSON shape, never its
   //    machine semantics — and `machine.stateKey` can throw on it (an
-  //    `.exhaustive()` match raises `NonExhaustiveError` on an unknown
+  //    `.exhaustive()` match raises NonExhaustiveError on an unknown
   //    variant; a matched `failed` arm derefs `p.error.kind` on a missing
   //    field). ANY throw becomes `checkpoint-corrupt` naming
   //    `checkpoint.json` — never a raw untyped error.

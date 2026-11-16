@@ -20,7 +20,7 @@
  *     STATUS (a 4xx with an HTML error page is a denial, a 5xx a reach failure) —
  *     a parse hiccup never masquerades as a transport failure.
  *   - A TRANSPORT-LEVEL failure (DNS/socket/`fetch` reject) REJECTS, exactly as
- *     the `HttpPost` port documents: the caller's `try/catch` maps it to
+ *     the `HttpPost` port documents: the caller's try/catch maps it to
  *     `infra-unreachable`. This module deliberately does NOT translate to the
  *     framework error channel — the per-egress caller owns that mapping (it knows
  *     its own `hop`/`operation`), and re-throwing keeps this transport a single
@@ -77,7 +77,7 @@ export type FetchLike = (
  * The default request deadline (ms) for an OAuth form-POST egress. Bounds the
  * `await` so a black-holed Keycloak/Entra endpoint can never wedge the broker
  * indefinitely (and stall every single-flight waiter behind it). The resulting
- * `AbortError` rejection is mapped by the caller's `try/catch` to the retriable
+ * `AbortError` rejection is mapped by the caller's try/catch to the retriable
  * `infra-unreachable` — the same channel a DNS/socket fault uses (NFR-020).
  */
 const DEFAULT_HTTP_POST_TIMEOUT_MS = 30_000;
@@ -96,7 +96,7 @@ export const createFetchHttpPost = (
 ): HttpPost => ({
   post: async (url: string, body: string): Promise<HttpPostResponse> => {
     // A transport-level fault (DNS/socket/reject) OR a timeout abort propagates
-    // untouched — the caller's `try/catch` owns the `infra-unreachable` mapping
+    // untouched — the caller's try/catch owns the `infra-unreachable` mapping
     // (it knows its hop). Swallowing it here would erase the distinction (NFR-020).
     const res = await fetchImpl(url, {
       method: "POST",

@@ -2,7 +2,7 @@
  * Total diagnostics for values caught at an `unknown` boundary.
  *
  * JavaScript coercion is executable: a Proxy may throw from `get`,
- * `getPrototypeOf`, `ownKeys`, `toString`, or `Symbol.toPrimitive`; an Error
+ * `getPrototypeOf`, `ownKeys`, `toString`, or Symbol.toPrimitive; an Error
  * may expose a throwing `message` getter; and a revoked Proxy throws from
  * nearly every reflective operation. Diagnostics run while handling an
  * earlier failure, so they must never replace that failure with a second

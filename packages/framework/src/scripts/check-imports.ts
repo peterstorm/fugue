@@ -186,12 +186,12 @@ const RULES: BoundaryRule[] = [
       "types/** is the pure type layer — must not import runtime or utility modules. Move logic to dag-runtime/ or shared/ instead.",
   },
   // `shared/` must stay free of telemetry concerns: the modules that used to
-  // mint spans (`shared/run-node.ts`, `shared/node-span.ts`) moved into
+  // mint spans (shared/run-node.ts, shared/node-span.ts) moved into
   // `dag-runtime/` during pass 3. Anything in `shared/` is consumed by both
   // the executor and the dag-runtime — pulling OTel or observer/tracing
   // plumbing in here would re-introduce the cycle the move was meant to break.
   // (2026-08: `shared/make-node-context.ts` once needed an exclusion for its
-  // `./defaults.js` wiring; it now imports `../types/` only and triggers no
+  // ./defaults.js wiring; it now imports `../types/` only and triggers no
   // rule, so no scopeExcludes entry is required.)
   {
     scope: ["shared"],
@@ -242,7 +242,7 @@ const NODE_SCHEME = "node:";
  * Node exposes the authoritative built-in inventory through `node:module`.
  * Normalize that inventory to scheme-free names so canonical (`node:fs`) and
  * legacy bare (`fs`) spellings, including real subpaths such as
- * `fs/promises`, are classified as the same capability before policy is
+ * fs/promises, are classified as the same capability before policy is
  * applied. A `node:` spelling is still treated as a built-in namespace even
  * when the running Node/Bun version does not yet list that particular module,
  * so a newly added built-in cannot bypass the deny-by-default rule.
@@ -481,7 +481,7 @@ const isImportedFrameworkError = (
 // ---------------------------------------------------------------------------
 
 /**
- * The three zero-validation widening casts exported from `types/ids.js`.
+ * The three zero-validation widening casts exported from `types/ids.ts`.
  * They bypass `ID_PATTERN`, so the codebase's own hostile-caller doctrine
  * (ADR-0080) requires their import surface to be boundary-enforced rather
  * than convention-gated by the `__` naming prefix: only modules whose id
@@ -518,7 +518,7 @@ const UNCHECKED_BRAND_WHITELIST: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Flag named imports of the unchecked id casts from `types/ids.js` (any
+ * Flag named imports of the unchecked id casts from `types/ids.ts` (any
  * relative spelling, resolved against the importing file). Exported so the
  * gate's own behavior is unit-pinned: rule presence and positive/negative
  * classification are asserted directly in `boundary-imports.test.ts`, not
@@ -700,11 +700,11 @@ const findFileCacheErrorBypasses = (
  *
  * - Bare/absolute specifiers keep the legacy match: trailing-slash entries
  *   are namespace prefixes (`@opentelemetry/`), bare entries match exact +
- *   child (`bullmq`, `bullmq/whatever`).
+ *   child (`bullmq`, bullmq/whatever).
  * - RELATIVE specifiers (`./…`, `../…`) are RESOLVED against the importing
  *   file's directory, and the RESOLVED path's segments are tested for a
  *   forbidden module segment. Enumerating one-level prefixes (`"../bullmq"`)
- *   was a bypass: `file/sub/x.ts` importing `../../queue-bullmq/adapter.js`
+ *   was a bypass: file/sub/x.ts importing ../../queue-bullmq/adapter.js
  *   matched no literal prefix and slipped through with 0 violations. Resolution
  *   is depth-independent — any number of `../` hops collapses into the real
  *   target path, so a forbidden module can never be reached by adding hops.
@@ -740,63 +740,80 @@ function isForbiddenSpecifier(
 // Core check function
 // ---------------------------------------------------------------------------
 
-export function checkImports(srcDir: string): CheckResult {
-  const allFiles = walkTs(srcDir);
+// A file-backend import of a Node built-in outside the closed allow-list (INV-1).
+const nodeBuiltinViolation = (
+  specifier: string,
+  relPath: string,
+  line: number,
+): Violation | null => {
+  const nodeBuiltin = normalizeNodeBuiltin(specifier);
+  if (
+    nodeBuiltin === null ||
+    (nodeBuiltin.usesCanonicalSpelling &&
+      FILE_BACKEND_NODE_BUILTINS.includes(
+        nodeBuiltin.canonical as (typeof FILE_BACKEND_NODE_BUILTINS)[number],
+      ))
+  ) {
+    return null;
+  }
+  return {
+    file: relPath,
+    line,
+    importSpecifier: specifier,
+    reason: fileNodeBuiltinReason(specifier, nodeBuiltin),
+  };
+};
+
+// Every violation of one import specifier: the file-backend built-in gate, then
+// each applicable rule's forbidden-module list.
+const importViolations = (
+  specifier: string,
+  relPath: string,
+  line: number,
+  applicableRules: readonly BoundaryRule[],
+  isFileBackendSource: boolean,
+): Violation[] => {
   const violations: Violation[] = [];
+  const builtin = isFileBackendSource ? nodeBuiltinViolation(specifier, relPath, line) : null;
+  if (builtin !== null) violations.push(builtin);
 
-  for (const file of allFiles) {
-    const relPath = relative(srcDir, file);
-
-    // Determine which rules apply to this file (in-scope and not explicitly excluded)
-    const applicableRules = RULES.filter(
-      (rule) => inScope(relPath, rule.scope) && !isExcluded(relPath, rule.scopeExcludes),
-    );
-
-    const source = readFileSync(file, "utf-8");
-
-    if (applicableRules.length === 0) {
-      violations.push(...findUncheckedBrandImports(source, relPath));
-      continue;
-    }
-
-    const imports = extractImports(source);
-    const isFileBackendSource = inScope(relPath, FILE_BACKEND_SCOPE);
-
-    violations.push(...findFileCacheErrorBypasses(source, relPath));
-    violations.push(...findUncheckedBrandImports(source, relPath));
-
-    for (const { specifier, line } of imports) {
-      const nodeBuiltin = isFileBackendSource
-        ? normalizeNodeBuiltin(specifier)
-        : null;
-      if (
-        nodeBuiltin !== null &&
-        (!nodeBuiltin.usesCanonicalSpelling ||
-          !FILE_BACKEND_NODE_BUILTINS.includes(
-            nodeBuiltin.canonical as (typeof FILE_BACKEND_NODE_BUILTINS)[number],
-          ))
-      ) {
-        violations.push({
-          file: relPath,
-          line,
-          importSpecifier: specifier,
-          reason: fileNodeBuiltinReason(specifier, nodeBuiltin),
-        });
-      }
-
-      for (const rule of applicableRules) {
-        if (isForbiddenSpecifier(specifier, relPath, rule.forbiddenModules)) {
-          violations.push({
-            file: relPath,
-            line,
-            importSpecifier: specifier,
-            reason: rule.reason ?? `Import ${specifier} is forbidden by this module boundary.`,
-          });
-        }
-      }
+  for (const rule of applicableRules) {
+    if (isForbiddenSpecifier(specifier, relPath, rule.forbiddenModules)) {
+      violations.push({
+        file: relPath,
+        line,
+        importSpecifier: specifier,
+        reason: rule.reason ?? `Import ${specifier} is forbidden by this module boundary.`,
+      });
     }
   }
+  return violations;
+};
 
+const checkFile = (srcDir: string, file: string): readonly Violation[] => {
+  const relPath = relative(srcDir, file);
+
+  // Determine which rules apply to this file (in-scope and not explicitly excluded)
+  const applicableRules = RULES.filter(
+    (rule) => inScope(relPath, rule.scope) && !isExcluded(relPath, rule.scopeExcludes),
+  );
+
+  const source = readFileSync(file, "utf-8");
+
+  if (applicableRules.length === 0) return findUncheckedBrandImports(source, relPath);
+
+  const isFileBackendSource = inScope(relPath, FILE_BACKEND_SCOPE);
+  return [
+    ...findFileCacheErrorBypasses(source, relPath),
+    ...findUncheckedBrandImports(source, relPath),
+    ...extractImports(source).flatMap(({ specifier, line }) =>
+      importViolations(specifier, relPath, line, applicableRules, isFileBackendSource),
+    ),
+  ];
+};
+
+export function checkImports(srcDir: string): CheckResult {
+  const violations = walkTs(srcDir).flatMap((file) => checkFile(srcDir, file));
   return { violations };
 }
 

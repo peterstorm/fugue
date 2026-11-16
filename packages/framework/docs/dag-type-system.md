@@ -72,8 +72,8 @@ remain ordinary `NodeDef` producers; `withHumanReview` preserves the complete
 argument type, including a root-level map descriptor.
 
 The mutually dependent DAG/map/inference cluster is colocated in
-`types/dag.ts`. `NodeDef` stays in `types/node.ts`; there is no
-`types/dag-internals.ts` compatibility module. Internal `NodesRecord`,
+`src/types/dag.ts`. `NodeDef` stays in `src/types/node.ts`; there is no
+types/dag-internals.ts compatibility module. Internal `NodesRecord`,
 `ConsistentNodes`, `OutputOf` and `OutputsByNodeId` are not main-barrel exports.
 `OutputOf` infers from `outputSchema`, so mapped gathered outputs retain their
 types without inventing a callable map body.
@@ -462,7 +462,7 @@ tuple.
 
 You could fix this by making node helpers themselves aware of an id
 union, e.g. `createTransformNode<I, O, const Id, AllIds>(...)`. But
-then every helper invocation must explicitly thread the `AllIds` union
+then every helper invocation must explicitly thread the AllIds union
 in — back to the same ergonomic problem as Option A, plus repetition.
 
 #### Option C — Closure-scoped DSL
@@ -660,7 +660,7 @@ What this **buys**:
   human looking at `route-decided` events sees *why* a branch fired,
   not just `chosenTargets: ["yes-branch"]`.
 - **Statically typed against the upstream output schema.** With a bit
-  more work, `field-eq.path` could be typed as
+  more work, field-eq.path could be typed as
   `Path<UpstreamOutputType>` (a string literal union of valid paths)
   and `value` as the field's actual type. Schema-driven guards.
 
@@ -688,7 +688,7 @@ What this **costs**:
 
 - **Coverage gap.** Some real-world routing logic doesn't fit a fixed
   vocabulary: "if any element of `output.items` has `score > 0.8`."
-  You'd need to extend the DSL with `field-some` / `field-every`
+  You'd need to extend the DSL with field-some / field-every
   primitives. Eventually you're building a query language. There's a
   long tail of "weird routing logic that doesn't fit" — at some point
   authors will want to escape the DSL.
@@ -719,7 +719,7 @@ Not a real fix. Skip.
 
 #### Option C — AST inspection at construction time
 
-When `defineDag` sees a function guard, parse it (e.g. via `acorn`),
+When `defineDag` sees a function guard, parse it (e.g. via acorn),
 walk the AST, reject if it references anything outside its parameter:
 no globals, no closure variables, no `await`, no `Date.now`.
 
@@ -740,7 +740,7 @@ What this costs:
 - Function source isn't always available (minifiers, transpilers,
   inlined functions, anonymous arrow functions defined inline). The
   detection is unreliable.
-- False negatives are easy: `(o) => o[evilKey]` where `evilKey` is a
+- False negatives are easy: `(o) => o[evilKey]` where evilKey is a
   closed-over computed property name. AST inspection passes but the
   guard is impure.
 - "Pure" in JS isn't a clean category — `o.toString()` could be
@@ -836,14 +836,14 @@ would be a research project, not a feature.
 
 ### 6.5 Optional-deps partitioning
 
-**Status (2026-05-10): obsoleted by ADR 0017.** `optionalDeps` no longer
+**Status (2026-05-10): obsoleted by ADR 0017.** optionalDeps no longer
 exists on `NodeDef` — the runtime derives `{ required, optional }` from
 edges (unconditional-from-always-active source → required; everything
 else → optional). Authors cannot misclassify because they don't
 classify. The historical analysis below is preserved for context.
 
 **Original status:** caught at module load (a `deps` whose only incoming
-edge was conditional had to move to `optionalDeps`).
+edge was conditional had to move to optionalDeps).
 **Could we catch it earlier?** Yes — but only if 6.1 (deps cross-typing)
 and 6.2 (key/id consistency) are done first. With both in place:
 
@@ -916,11 +916,11 @@ What happens:
 | Inference | `tsc` | `<const Nodes>` infers `Nodes = { fetch, extract, synthesize }`. `keyof Nodes & string = "fetch" \| "extract" \| "synthesize"`. Edges and `outputNodeId` get squiggles on typos. |
 | Module load | Node import | `defineDag` executes. `validateDagShape` checks key/id consistency, edge endpoints, `$input`-edge well-formedness, edge uniqueness, conditional-predicate well-formedness, source/root invariant, else-totality, freshness-extractor consistency, and output reachability. On failure: throws `DagDefinitionError`. On success: returns an owned frozen DAG snapshot with the validation brand; map children are snapshotted and checked for supported eligibility. |
 | First `runDag` call | Runtime | `compileDagToMachine` calls `topoSort` for cycle detection and wave assignment. |
-| Per-wave execution | Runtime | `runWave` filters by `activeNodeIds`, executes nodes, fires guards (which may throw `guard-threw`). |
+| Per-wave execution | Runtime | `executeWave` filters by `activeNodeIds`, executes nodes, fires guards (which may throw guard-threw). |
 
 The brand carries the proof that `validateDagShape` succeeded: anywhere
 a `DagDef` is in scope, structural soundness has already been verified.
-`compileDagToMachine` and `runDagInner` no longer re-run `validateDagShape`
+`compileDagToMachine` and runDagInner no longer re-run `validateDagShape`
 internally — the type tells them they don't need to.
 
 ---
@@ -931,7 +931,7 @@ If you change any of these, you must update something in this doc:
 
 - `DagDef`'s shape — re-derive what `validateDagShape` brands.
 - `DagDefInput`'s generics — re-check that literal inference still flows
-  through `<const Nodes>` (write a `__brand-check.ts` and confirm `tsc`
+  through `<const Nodes>` (write a __brand-check.ts and confirm `tsc`
   fires on typos).
 - `EdgeDef` variants — update the narrowing helpers and the unit test
   that forbids ad-hoc `"when" in e`.

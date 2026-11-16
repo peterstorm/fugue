@@ -18,7 +18,7 @@ ADR-0081 ended that. A cache read bills at **0.1x** the base input rate and a ca
 | 95k cache-read + 5k uncached | **14_500** |
 | 100k cache-write at `1h` | **200_000** |
 
-The most expensive costs **13.8x** the cheapest while every one of them consumes exactly 110,000 units of the same ceiling. F4 did not merely leave the budget alone; it made the budget a worse proxy for spend than it had been. The figures needed to fix it — `cacheWriteTokens`, `cacheReadTokens` — were already on the meter, and the cost arithmetic was already in `llm/cost.ts`. Only the decision was still counting tokens.
+The most expensive costs **13.8x** the cheapest while every one of them consumes exactly 110,000 units of the same ceiling. F4 did not merely leave the budget alone; it made the budget a worse proxy for spend than it had been. The figures needed to fix it — `cacheWriteTokens`, `cacheReadTokens` — were already on the meter, and the cost arithmetic was already in `packages/framework/src/llm/cost.ts`. Only the decision was still counting tokens.
 
 A second problem sat inside the refusal itself. `llm-budget-exceeded` carried a `cumulative` field documented as the SETTLED figure, while the decision that produced it might have come from the PROJECTION including in-flight reservations. The two were reconciled by a comment, so an operator could legitimately read `cumulative 100 >= budget 250` and conclude the host had refused a call it had no reason to refuse.
 
@@ -48,7 +48,7 @@ A third: `PRICE_TABLE` is hand-maintained, and `computeCostUsd` returns **0** fo
 
 ## Decision
 
-**Spend, not tokens.** The meter accumulates a `Spend` — `{ tokens, calls, usd, usage }`, where `usage: UsageKnowledge` records whether the provider's reported usage was trustworthy (the axis the "Unknown cost is a union member" decision below rests on) — and `llm/cost.ts` gains `spendOfCall`, the single producer of *priced* budget-facing cost. It reuses the same cache-weighted arithmetic ADR-0081 established, so the multipliers reach the budget through exactly one path.
+**Spend, not tokens.** The meter accumulates a `Spend` — `{ tokens, calls, usd, usage }`, where `usage: UsageKnowledge` records whether the provider's reported usage was trustworthy (the axis the "Unknown cost is a union member" decision below rests on) — and `packages/framework/src/llm/cost.ts` gains `spendOfCall`, the single producer of *priced* budget-facing cost. It reuses the same cache-weighted arithmetic ADR-0081 established, so the multipliers reach the budget through exactly one path.
 
 **Money is a bounded exact integer.** `MicroUsd` (1e-6 USD, branded) is what ceilings compare against; the raw USD float stays display-only. Every in-memory value is a non-negative safe integer. Every positive per-call cost rounds upward at the float→integer boundary, so repeated sub-micro-dollar calls cannot disappear from the USD total. Positive overflow, including infinity, saturates at `Number.MAX_SAFE_INTEGER`, which is fail-closed because every valid monetary ceiling is then reached. Within that domain, settlement order cannot introduce float drift or operator disagreement.
 

@@ -12,6 +12,7 @@ import { describe, expect, it } from "bun:test";
 import { DAG_INPUT } from "../types/ids.js";
 import { z } from "zod";
 import type { NodeContext, NodeDef } from "../types/node.js";
+import type { ObserverEvent } from "../types/events.js";
 import { ok, err } from "../types/result.js";
 import { RecordingObserver } from "../observer/observer.js";
 import { defineDagFromArray } from "../executor/define-dag.js";
@@ -150,7 +151,7 @@ const runOnce = async (shape: Shape, seedTag: number): Promise<Recording> => {
 
   // Custom recording observer that increments the shared counter.
   class SeqObserver extends RecordingObserver {
-    observe(e: any) {
+    observe(e: ObserverEvent) {
       const tag = e.type === "run-end" ? `run-end:${e.status}` : e.type;
       entries.push({ kind: "observer", idx: seq++, tag });
       super.observe(e);

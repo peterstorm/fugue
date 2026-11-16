@@ -9,7 +9,7 @@
 // Augmenting from this side keeps every edge pointing the way it already
 // points — `checkpoint/` → `types/`, never back.
 //
-// It is a genuine capability by `architecture.md`'s test, not a seam invented
+// It is a genuine capability by architecture.md's test, not a seam invented
 // for symmetry: durable checkpoint storage is real I/O at a boundary, the port
 // already has three adapters (file, in-memory, Redis) plus a shared contract
 // suite, and a node holding it can be tested against the in-memory one with no

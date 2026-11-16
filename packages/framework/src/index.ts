@@ -48,7 +48,7 @@ export { toJson, fromJson, tryFromJson } from "./state-machine/serialize.js";
 // `runDagStateful` (the back-compat flat `Result<O>` entry for block-until-
 // decided callers, per ADR-0060 §4) is on NEITHER barrel — not this one and not
 // `advanced`. It is reachable only by direct file import
-// (`dag-runtime/run-dag-stateful.js`) and through the `executor/run-dag.ts`
+// (`dag-runtime/run-dag-stateful.ts`) and through the `executor/run-dag.ts`
 // wrapper; see `dag-runtime/index.ts` for why. Suspendable callers want
 // `runDagStatefulOutcome` / `runResumableDagJob` instead.
 // ---------------------------------------------------------------------------

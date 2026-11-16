@@ -1,6 +1,6 @@
 /**
  * createRealmJwtVerifier — the live, JWKS-backed implementation of the
- * `VerifyRealmJwt` port (`http/middleware/auth.ts`). It verifies a fugue-platform
+ * `VerifyRealmJwt` port (`domain/auth.ts`). It verifies a fugue-platform
  * realm JWT's SIGNATURE against the realm's published keys
  * (`jose.createRemoteJWKSet`, keys fetched from the realm, never hardcoded) and,
  * on success, brands the decoded claims with `markSignatureVerified` — the single
@@ -12,7 +12,7 @@
  * It receives NO `issuer`/`audience` option: realm-specific issuer/audience policy,
  * strict expiry/not-before checks against the injected application clock, and
  * defensive claim parsing remain in pure `validateRealmJwtClaims`
- * (`domain/jwt-validation.ts`). The asymmetric `alg` allowlist is defence in depth
+ * (`domain/jwt-validation.ts`). The asymmetric alg allowlist is defence in depth
  * against `alg:none`/HS256 confusion; the 60-second tolerance handles normal clock
  * skew at the jose boundary without replacing the stricter pure policy check.
  *
@@ -37,7 +37,7 @@
 import { lazyJwks, type JwksResolver } from "./lazy-jwks.js";
 import { ok, err } from "@fuguejs/framework";
 import { markSignatureVerified, type RealmJwtClaims } from "../domain/auth.js";
-import type { JwtVerifyError, VerifyRealmJwt } from "../http/middleware/auth.js";
+import type { JwtVerifyError, VerifyRealmJwt } from "../domain/auth.js";
 
 /**
  * The realm signs OIDC tokens with an asymmetric algorithm. Pinning an
@@ -100,7 +100,7 @@ export const classifyRealmJoseError = (e: unknown): JwtVerifyError["kind"] => {
     name === "JWKSInvalid";
   // When the JWKS endpoint is REACHABLE but does not return 200 (5xx /
   // maintenance HTML / 404 / redirect) OR returns an unparseable body,
-  // `createRemoteJWKSet`'s fetch throws a bare `JOSEError`
+  // `createRemoteJWKSet`'s fetch throws a bare JOSEError
   // (code "ERR_JOSE_GENERIC") whose ONLY signal is the English message. These
   // are infra faults — a realm outage must surface as a retriable 503, not a
   // 401 forged-token verdict (NFR-020). CAVEAT: matching jose's English message
@@ -136,7 +136,7 @@ export const realmJwksUri = (issuer: string): string =>
   `${issuer.replace(/\/+$/, "")}/protocol/openid-connect/certs`;
 
 /**
- * The shape `jose.JWTPayload` provides — the standard claims we re-narrow to
+ * The shape jose.JWTPayload provides — the standard claims we re-narrow to
  * `RealmJwtClaims` (after the SIGNATURE passed). `jose` types `payload` loosely
  * (claims are optional); the pure `validateRealmJwtClaims` re-parses every value
  * defensively, so this brand is a SIGNATURE attestation only, not a claim trust.
@@ -182,7 +182,7 @@ export const createRealmJwtVerifier = (config: RealmJwtVerifierConfig): VerifyRe
       // `validateRealmJwtClaims`. jose still enforces standard `exp`/`nbf` semantics
       // here with clock tolerance; the pure validator re-parses and checks them
       // again against its injected strict application clock. The `algorithms`
-      // allowlist is an asymmetric-`alg` anti-confusion gate.
+      // allowlist is an asymmetric-alg anti-confusion gate.
       const { payload } = await jose.jwtVerify(token, jwks as never, {
         algorithms: [...REALM_TOKEN_ALGS],
         clockTolerance: CLOCK_TOLERANCE,

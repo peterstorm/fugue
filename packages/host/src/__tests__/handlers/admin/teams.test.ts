@@ -93,6 +93,21 @@ describe("POST /admin/teams", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects an invalid JSON body with 400 body-parse-failed", async () => {
+    const { app } = createTestApp();
+
+    const res = await app.request("/admin/teams", {
+      method: "POST",
+      headers: { ...adminHeaders, "Content-Type": "application/json" },
+      body: "{ not valid json",
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe("body-parse-failed");
+  });
+
   it("rejects invalid team name format", async () => {
     const { app } = createTestApp();
 

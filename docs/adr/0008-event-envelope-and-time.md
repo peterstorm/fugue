@@ -13,7 +13,7 @@ The framework's event log is the audit trail and replay substrate (FR-048, SC-00
 - The `DagEvent` discriminated union has no `timestamp` field on any variant. Events are pure domain payloads.
 - The BullMQ `appendEvent` wrote `XADD events:{queueName}:{jobId} MAXLEN ~ N * type <type> payload <json>`. The `*` told Redis to assign a server-side stream entry ID of the form `{ms}-{seq}` — the only timestamp anywhere in the pipeline.
 - `EventLogReader.readEvents` discarded entry IDs and returned `readonly unknown[]` — by the time a caller saw the events, every per-event timestamp had been thrown away.
-- The in-memory `JobLike` (`state-machine/in-memory-job.ts`) stored events as a plain `unknown[]` — no entry ID exists at all. There was no fallback timestamp source for non-Redis backends.
+- The in-memory `JobLike` (`packages/framework/src/queue/in-memory-job.ts`) stored events as a plain `unknown[]` — no entry ID exists at all. There was no fallback timestamp source for non-Redis backends.
 
 Three concrete consequences pushed us to revisit:
 
@@ -29,7 +29,7 @@ The previous design was a corner-cutting hack: "the stream entry ID *is* the tim
    - Pros: zero schema change to events; backward compatible with existing streams.
    - Cons: ID format is Redis-Streams-specific (`1715200000000-0`). For other backends (in-memory, Postgres) we would have to *fake* an ID, which is semantically wrong — the entry ID belongs to the *transport*, not the event. Doesn't fix the in-memory case (no IDs to preserve).
 
-2. **Add an `XRANGE`-with-bounds reader variant** (`readEventsBetween`).
+2. **Add an XRANGE-with-bounds reader variant** (`readEventsBetween`).
    - Pros: pushes filtering server-side; cheap on Redis.
    - Cons: still backend-specific; doesn't help in-memory replays; only solves *server-side filtering*, not the underlying "events have no timestamp" problem.
 
@@ -91,7 +91,7 @@ No backfill of historical streams is required.
 
 ### 4. Replay helpers
 
-Two new pure helpers in `state-machine/replay.ts`:
+Two new pure helpers in `packages/framework/src/state-machine/replay.ts`:
 
 ```ts
 replayEventsUntil(events, machine, initial, untilMs)
@@ -112,7 +112,7 @@ Both validate `RangeError` on non-finite or inverted bounds. The existing `repla
 - **Replay-to-timestamp works.** Forensic queries ("what was the state at noon?") become a one-line call: `replayEventsUntil(events, machine, initial, noonMs)`. Server-side filtered variant: `reader.readEventsBetween(queueName, jobId, 0, noonMs)`.
 - **Transport-independent timestamps.** A Postgres outbox or Kafka backend implements the same `JobLike.appendEvent` envelope wrap; the reader returns the same `RecordedEvent<unknown>[]` shape. No backend-specific assumptions leak into the replay path.
 - **Time-traceable audit dumps.** `JSON.stringify(await reader.readEvents(...))` now produces a blob that includes per-event timestamps. Forensic exports survive transport and persistence.
-- **Server-side filtering scales.** For long event streams, `XRANGE` with ms-bounded entry IDs filters in O(log N + matches) instead of transferring the whole log. Important for admin endpoints scanning many jobs.
+- **Server-side filtering scales.** For long event streams, XRANGE with ms-bounded entry IDs filters in O(log N + matches) instead of transferring the whole log. Important for admin endpoints scanning many jobs.
 - **SC-004 unaffected.** The envelope is metadata; `transition` still consumes raw events. Replay equivalence (recorded-events fold == live envelope) holds because the runner persists the state envelope and the event log redundantly — both are derived from the same transitions.
 - **No backfill needed.** Legacy streams remain readable via the bare-payload fallback path. Rollout is safe across an in-flight production deploy.
 
@@ -134,14 +134,14 @@ Both validate `RangeError` on non-finite or inverted bounds. The existing `repla
 
 4. **Use the existing `TraceEvent.timestamp` for forensic time.** Rejected. `TraceEvent` is the *observation* surface (post-transition observer notification); the *event log* is the *recording* surface (durable XADD). They serve different purposes — observer events can be dropped, recorded events cannot. Conflating them would entangle observability with durability.
 
-5. **Add a `correlationId` / `workerId` to the envelope now.** Deferred. The envelope is forward-compatible (the reader's shape check ignores unknown fields), so we can extend it later without breaking the read path. v1 ships timestamp-only because that's what the immediate gap demands; further metadata can be added per use case.
+5. **Add a correlationId / workerId to the envelope now.** Deferred. The envelope is forward-compatible (the reader's shape check ignores unknown fields), so we can extend it later without breaking the read path. v1 ships timestamp-only because that's what the immediate gap demands; further metadata can be added per use case.
 
 ## Implementation references
 
 - `packages/framework/src/state-machine/types.ts` — `RecordedEvent<E>` definition.
-- `packages/framework/src/state-machine/in-memory-job.ts` — in-memory writer; envelope wrap on `appendEvent`; `now` injection.
+- `packages/framework/src/queue/in-memory-job.ts` — in-memory writer; envelope wrap on `appendEvent`; `now` injection.
 - `packages/framework/src/queue-bullmq/job.ts` — BullMQ writer; envelope wrap; entry-ID pinning to `recordedAtMs`; `now` injection via `EventLogOpts.now`.
 - `packages/framework/src/queue-bullmq/event-log.ts` — `EventLogReader.readEvents` returns envelopes; `readEventsBetween` for server-side filtering; legacy bare-payload fallback path.
-- `packages/framework/src/state-machine/replay.ts` — `replayEvents` widened to accept envelopes; `replayEventsUntil` and `replayEventsBetween` helpers.
+- `packages/framework/src/state-machine/replay.ts` — `replayEvents` widened to accept envelopes; `replayEventsUntil` and replayEventsBetween helpers.
 - `packages/framework/src/__tests__/state-machine-replay.test.ts` — unit + property tests.
 - `packages/framework/src/queue-bullmq/__tests__/queue-bullmq-adapter.test.ts` — Redis-backed integration tests including the "Forensic replay-to-timestamp" suite.

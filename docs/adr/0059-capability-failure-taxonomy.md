@@ -41,7 +41,7 @@ settled upstream by ADR-0051 and the broker-port ADRs).
 
 ## Options Considered
 
-1. **Single generic `capability-error` variant.**
+1. **Single generic capability-error variant.**
    - Pros: one case to add to `formatFrameworkError`; trivial to emit at every
      failure site; no decisions about where boundaries fall.
    - Cons: collapses retry, authorization, and budget into one undiscriminable
@@ -64,8 +64,8 @@ settled upstream by ADR-0051 and the broker-port ADRs).
      authorization-vs-reachability boundary must be drawn deliberately and held
      by every HTTP-status mapper.
 
-3. **Per-mechanism downstream variants (separate `fic-mismatch`,
-   `wif-rejected`, `resource-denied`).**
+3. **Per-mechanism downstream variants (separate fic-mismatch,
+   wif-rejected, resource-denied).**
    - Pros: maximally precise about *which* Entra mechanism refused.
    - Cons: the node's response to all three is identical — fail-closed, no retry,
      audit the denial. The extra discriminants buy no behavioural difference for
@@ -151,7 +151,7 @@ mapper. The invariant is: **transport rejection or an unhandled status →
 
 - **`packages/host/src/adapters/graph-capability.ts`** maps the Graph response the
   same way, with one deliberate divergence: a `404` is also `downstream-denied`,
-  because on a resource-scoped Graph path (e.g. `Sites.Selected`) Graph returns
+  because on a resource-scoped Graph path (e.g. Sites.Selected) Graph returns
   404 rather than 403 to avoid leaking existence — an authorization-shaped "no".
 
 ### Invariants
@@ -211,14 +211,14 @@ preserved in the type, not the message).
 
 ## Rejected Alternatives
 
-- **Single generic `capability-error` variant.** Rejected: it collapses the
+- **Single generic capability-error variant.** Rejected: it collapses the
   retry / authorization / budget distinction that SC-013 requires into one
   undiscriminable error, forcing consumers to string-match `message` to recover
   intent and erasing the fail-closed-before-Entra ordering from the type. A retry
   loop built on it would either hammer Entra on settled denials or fail-close on
   transient blips a retry would clear.
-- **Per-mechanism downstream variants** (`fic-mismatch` / `wif-rejected` /
-  `resource-denied`). Rejected for v1: all three drive identical node behaviour
+- **Per-mechanism downstream variants** (fic-mismatch / wif-rejected /
+  resource-denied). Rejected for v1: all three drive identical node behaviour
   (fail-closed, no retry), so the extra discriminants add no branching value
   while forcing every consumer to enumerate three equivalent cases. FR-X-002
   permits the collapse; the provider's stated cause is retained in `reason`.

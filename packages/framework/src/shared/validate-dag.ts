@@ -354,7 +354,7 @@ const bucketEdgesBy = (
  *
  * Topology rules (ADR 0015 + ADR 0017):
  *   - Edges are the single source of truth for wiring. `deps` /
- *     `optionalDeps` no longer exist on `NodeDef`; the runtime derives
+ *     optionalDeps no longer exist on `NodeDef`; the runtime derives
  *     `{ required, optional }` per node at compile time.
  *   - Every node with at least one conditional out-edge MUST have exactly
  *     one `kind: "default"` out-edge (else-totality).

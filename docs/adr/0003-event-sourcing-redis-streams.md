@@ -5,7 +5,7 @@
 **Spec ref:** OQ-1, FR-048, SC-003, SC-004 (`.claude/specs/2026-05-08-durable-state-machine-runtime/spec.md`)
 **Related:** ADR 0001 (boundary lint / single-package layout), ADR 0006 (`JobLike` shape), **ADR 0008** (event envelope + `recordedAtMs`; entry-ID pinning for time-bounded replay).
 
-> **Amendment (ADR 0008):** the original design relied on the Redis Stream entry ID (`{ms}-{seq}` assigned by `XADD *`) as the implicit timestamp source. The reader discarded those IDs and the in-memory backend had no equivalent, so per-event timestamps were unrecoverable from the event log. ADR 0008 replaces this with a `RecordedEvent<E> = { recordedAtMs, event }` envelope captured at the `appendEvent` boundary (transport-independent), and pins the Redis entry ID's ms portion to `recordedAtMs` (`XADD ... ${recordedAtMs}-* …`) so server-side `XRANGE` filtering aligns exactly with envelope time. The stream choice, key shape, `MAXLEN ~ N` trimming, and TTL discussion below remain authoritative; only the timestamp-source paragraph is superseded.
+> **Amendment (ADR 0008):** the original design relied on the Redis Stream entry ID (`{ms}-{seq}` assigned by `XADD *`) as the implicit timestamp source. The reader discarded those IDs and the in-memory backend had no equivalent, so per-event timestamps were unrecoverable from the event log. ADR 0008 replaces this with a `RecordedEvent<E> = { recordedAtMs, event }` envelope captured at the `appendEvent` boundary (transport-independent), and pins the Redis entry ID's ms portion to `recordedAtMs` (`XADD ... ${recordedAtMs}-* …`) so server-side XRANGE filtering aligns exactly with envelope time. The stream choice, key shape, `MAXLEN ~ N` trimming, and TTL discussion below remain authoritative; only the timestamp-source paragraph is superseded.
 
 ## Context
 
@@ -33,7 +33,7 @@ Forces at play:
 1. **Per-job Redis Stream keyed `events:{queueName}:{jobId}` (chosen).**
    - Pros:
      - `XADD` gives append-only ordering with server-assigned IDs.
-     - `XRANGE` gives ordered range scans for replay — exactly what `transition`-folding needs.
+     - XRANGE gives ordered range scans for replay — exactly what `transition`-folding needs.
      - `XADD MAXLEN ~ N` caps growth at insert time; no separate trim job.
      - Per-job key isolates blast radius: deleting a finished job's log is `DEL one-key`, scanning one job's history is `XRANGE one-key`, no contention with other jobs.
      - TTL is natural (`EXPIRE` on the per-job key when the job reaches a terminal state).
@@ -52,10 +52,10 @@ Forces at play:
      - A hot job becomes a hot key for *all* jobs in the queue.
      - `MAXLEN` is global, so a chatty job evicts a quiet job's history.
 
-3. **Redis Lists (`LPUSH` / `LRANGE`).**
+3. **Redis Lists (LPUSH / LRANGE).**
    - Pros:
      - Simpler primitive; no stream-entry encoding.
-     - `LTRIM` for bounded retention.
+     - LTRIM for bounded retention.
    - Cons:
      - No server-assigned ordered IDs — we'd have to invent them.
      - No consumer-group story if we ever want fan-out replay (e.g., a sidecar that tails events for observability).
@@ -75,11 +75,11 @@ Forces at play:
 
 ## Decision
 
-**`JobLike` exposes `appendEvent(event): Promise<void>`. The BullMQ adapter persists events to a per-job Redis Stream keyed `events:{queueName}:{jobId}`, capped via `XADD MAXLEN ~ 10000` (default; configurable through `EventLogOpts.maxLen`). Replay reads via `XRANGE` and folds events through the pure `transition`. The in-memory adapter keeps an array. Core and DAG modules see only the opaque `JobLike` handle.**
+**`JobLike` exposes `appendEvent(event): Promise<void>`. The BullMQ adapter persists events to a per-job Redis Stream keyed `events:{queueName}:{jobId}`, capped via `XADD MAXLEN ~ 10000` (default; configurable through `EventLogOpts.maxLen`). Replay reads via XRANGE and folds events through the pure `transition`. The in-memory adapter keeps an array. Core and DAG modules see only the opaque `JobLike` handle.**
 
 Concrete shape:
 
-- `JobLike` (in `packages/framework/src/types/job-like.ts`) declares ONLY `data`, `updateData`, `updateProgress`, and `appendEvent(event: TraceEvent): Promise<void>`. It deliberately does NOT expose any read API — replay reads come from a SEPARATE `EventLogReader` interface (see ADR 0006). No method's signature mentions Redis, streams, or `ioredis`.
+- `JobLike` (in `packages/framework/src/state-machine/types.ts`) declares ONLY `data`, `updateData`, `updateProgress`, and `appendEvent(event: TraceEvent): Promise<void>`. It deliberately does NOT expose any read API — replay reads come from a SEPARATE `EventLogReader` interface (see ADR 0006). No method's signature mentions Redis, streams, or `ioredis`.
 - Replay path: `replayEvents()` in `packages/framework/src/state-machine/replay.ts` consumes an `EventLogReader` (the BullMQ implementation lives in `packages/framework/src/queue-bullmq/event-log.ts`; the in-memory equivalent lives alongside the in-memory adapter) and folds events through the pure `transition`. Splitting append from read keeps `JobLike` minimal and lets the imperative shell wire whichever reader matches the adapter at hand.
 - BullMQ adapter (`packages/framework/src/queue-bullmq/job.ts`, `adaptBullMQJob`):
   - `appendEvent` serializes the FULL event with `JSON.stringify(event)` into the `payload` field and derives `type` as `typeof eventObj?.type === "string" ? eventObj.type : "event"`. Only two fields are written; there is no separate `ts` field (the timestamp lives inside the serialized payload).
@@ -87,7 +87,7 @@ Concrete shape:
   - When `approximate=false`: `XADD events:{queueName}:{jobId} MAXLEN {maxLen} * type <type> payload <payload>`.
   - The `EventLogReader` in `packages/framework/src/queue-bullmq/event-log.ts` issues `XRANGE events:{queueName}:{jobId} - +` and yields parsed `TraceEvent`s in order.
   - On terminal phase (`completed` / `failed`), the adapter `EXPIRE`s the key with a configurable TTL (default 7 days) so successful jobs don't accumulate indefinitely.
-- In-memory adapter (`packages/framework/src/state-machine/in-memory-job.ts`, `createInMemoryJob`): pushes to an in-memory array; the matching in-memory `EventLogReader` yields a snapshot of that array. Used by unit tests and the back-compat `runDag` path.
+- In-memory adapter (`packages/framework/src/queue/in-memory-job.ts`, `createInMemoryJob`): pushes to an in-memory array; the matching in-memory `EventLogReader` yields a snapshot of that array. Used by unit tests and the back-compat `runDag` path.
 - `EventLogOpts` (exported from the BullMQ adapter package only):
   - `maxLen: number` — default `10000`.
   - `terminalTtlSeconds: number` — default `604800` (7 days).

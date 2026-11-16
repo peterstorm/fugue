@@ -70,6 +70,36 @@ const isFullPredicateCase = (
   return wp !== undefined && wp !== null && typeof wp === "object";
 };
 
+// Conditional edge: classifier → the case's target, guarded by its predicate.
+const caseToConditionalEdge = (
+  dagId: string,
+  classifierId: string,
+  caseKey: string,
+  c: RouterCase,
+): { readonly from: string; readonly to: string; readonly when: Predicate<unknown> } => {
+  let predicate: Predicate<unknown>;
+  if (isErgonomicCase(c)) {
+    const check = c.when;
+    predicate = { label: caseKey, version: 1, check: (value) => check(value) };
+  } else if (isFullPredicateCase(c)) {
+    predicate = c.whenPredicate;
+  } else {
+    // The `?: never` mutual-exclusion guard makes this unreachable at the
+    // type level, but cast-based escape hatches could still land a case
+    // with neither field set. Refuse to silently emit a malformed edge.
+    throw new DagDefinitionError(dagId, {
+      kind: "validation",
+      nodeId: nodeId(classifierId),
+      message: `defineRouter case '${caseKey}' has neither 'when' nor 'whenPredicate'`,
+    });
+  }
+  return {
+    from: classifierId,
+    to: c.to.id as string,
+    when: predicate,
+  };
+};
+
 /**
  * Define a router DAG: a classifier node whose output is routed to one of
  * several case branches via predicates, with a required default fallback.
@@ -119,29 +149,9 @@ export const defineRouter = (config: RouterDagConfig): DagDef => {
   const defaultId = config.default.id as string;
 
   // Conditional edges: classifier → each case's target with its predicate.
-  const conditionalEdges = caseEntries.map(([caseKey, c]) => {
-    let predicate: Predicate<unknown>;
-    if (isErgonomicCase(c)) {
-      const check = c.when;
-      predicate = { label: caseKey, version: 1, check: (value) => check(value) };
-    } else if (isFullPredicateCase(c)) {
-      predicate = c.whenPredicate;
-    } else {
-      // The `?: never` mutual-exclusion guard makes this unreachable at the
-      // type level, but cast-based escape hatches could still land a case
-      // with neither field set. Refuse to silently emit a malformed edge.
-      throw new DagDefinitionError(config.id, {
-        kind: "validation",
-        nodeId: nodeId(classifierId),
-        message: `defineRouter case '${caseKey}' has neither 'when' nor 'whenPredicate'`,
-      });
-    }
-    return {
-      from: classifierId,
-      to: c.to.id as string,
-      when: predicate,
-    };
-  });
+  const conditionalEdges = caseEntries.map(([caseKey, c]) =>
+    caseToConditionalEdge(config.id, classifierId, caseKey, c),
+  );
 
   // The required else-totality edge.
   const defaultEdge = {

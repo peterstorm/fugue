@@ -124,7 +124,7 @@ export interface ResumeFileJobArgs<S, E, C> {
    * `checkpoint-corrupt` include it as a field; the disagreement message
    * names it too). */
   readonly runId: RunId;
-  /** Run directory — the journal (`events/`, `checkpoint.json`) lives under
+  /** Run directory — the journal (events/, `checkpoint.json`) lives under
    * it (see the ADR-0078 single-writer contract on `createFileJob`).
    *
    * Domain (re-validated at the boundary, step 0, like `runId`): a non-empty
@@ -195,7 +195,7 @@ const resumeFileJobUnchecked = async <S, E, C>(
   //    — non-empty, NUL-free string). Re-validate at THIS boundary, before
   //    `readFileEvents` runs any I/O: a bypassed brand (or a raw `""` /
   //    NUL-bearing string) would otherwise reach `join`/fs first — `""` reads
-  //    a CWD-relative `events/` directory as if it were the caller's run. Same
+  //    a CWD-relative events/ directory as if it were the caller's run. Same
   //    `cache-error` honesty as the `runId` gate above (SC-006 vocabulary).
   if (!isFileBackendPathString(directory)) {
     return err(

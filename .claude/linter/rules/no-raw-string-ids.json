@@ -1,10 +1,21 @@
 {
   "kind": "regex",
   "name": "no-raw-string-ids",
-  "description": "Disallow passing raw string literals where branded IDs (RunId/NodeId/DagId) are expected",
-  "extensions": [".ts"],
-  "pattern": "(?:runId|nodeId|dagId):\\s*[\"']",
+  "description": "Disallow an un-branded string literal where a branded ID (RunId/NodeId/DagId) is expected, in either quote style. A literal followed by `as RunId` is branded on purpose and is not reported; one assigned straight into an ID field is the argument-swap bug the brand exists to catch. Scoped to the library and the demo app: operator scripts and fixtures pass raw strings by design.",
+  "extensions": [
+    ".ts"
+  ],
+  "pattern": "\\b(runId|nodeId|dagId):\\s*['\"][^'\"]*['\"](?!\\s*as\\s)",
   "flags": "",
   "fixHint": "Use the smart constructor: runId('...'), nodeId('...'), or dagId('...') to produce branded IDs. Raw strings do not satisfy the brand at compile time.",
-  "enabled": false
+  "enabled": true,
+  "excludePatterns": [
+    "scripts/",
+    "bench/",
+    "examples/",
+    ".claude/",
+    ".test.ts",
+    ".spec.ts",
+    ".property.test.ts"
+  ]
 }

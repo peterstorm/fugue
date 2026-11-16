@@ -230,34 +230,30 @@ export const installProcessLifetimeReaper = (
 
 // ── Imperative shell: the binary ────────────────────────────────────────────────
 
-const main = async (): Promise<void> => {
-  const logger = createJsonConsoleLogger();
-
+const installLastResortErrorNets = (logger: LogPort): void => {
   // LAST-RESORT nets for PID 1 (see `createGlobalErrorHandlers`): a stray throw in a
   // signal handler / timer callback — OUTSIDE the awaited startup chain that
   // `main().catch` already covers — must NOT crash PID 1 and take the whole pod down.
   const errorHandlers = createGlobalErrorHandlers(logger);
   process.on("uncaughtException", errorHandlers.onUncaughtException);
   process.on("unhandledRejection", errorHandlers.onUnhandledRejection);
+};
 
+const readThinInitConfig = (logger: LogPort): ThinInitEnvConfig => {
   const cfg = parseThinInitEnv(process.env);
   for (const warning of cfg.warnings) {
     logger.warn("[thin-init] invalid environment value — using safe default", {
       ...warning,
     });
   }
-  // The supervisor binary is a sibling of this file (src/ in dev, dist/ in build),
-  // mirroring how main-supervisor resolves the worker entrypoint.
-  const supervisorEntry = path.join(path.dirname(process.argv[1] ?? ""), "main-supervisor.ts");
+  return cfg;
+};
 
-  const adapter = createBunInitProcessAdapter({ supervisorEntry }, logger);
-
-  // Install the always-on PID-1 zombie reaper for the PROCESS lifetime (never
-  // uninstalled) BEFORE the supervise loop. It must keep reaping re-parented workers
-  // that exit while the loop is parked on shutdown OR during the post-give-up grace
-  // window — see `installProcessLifetimeReaper`. `runThinInit` itself only boundary-reaps.
-  installProcessLifetimeReaper(adapter);
-
+const installShutdownSignals = (
+  adapter: ReturnType<typeof createBunInitProcessAdapter>,
+  cfg: ThinInitEnvConfig,
+  logger: LogPort,
+): ShutdownHandler => {
   // PID 1 does NOT receive default signal dispositions — without an explicit
   // handler, SIGTERM is IGNORED and the pod never terminates gracefully (k8s then
   // SIGKILLs after the grace period). Forward shutdown to the supervisor + workers
@@ -278,6 +274,47 @@ const main = async (): Promise<void> => {
   });
   process.on("SIGTERM", () => shutdown.onSignal("SIGTERM"));
   process.on("SIGINT", () => shutdown.onSignal("SIGINT"));
+  return shutdown;
+};
+
+const exitAfterSuperviseLoop = (
+  shutdown: ShutdownHandler,
+  stoppedReason: string,
+  logger: LogPort,
+): void => {
+  if (decidePostLoopExit(shutdown.isTerminated()) === "defer-to-grace-timer") {
+    // Shutdown already armed the (non-unref'd) grace timer AND broadcast SIGTERM to
+    // the workers; the loop also returning here (give-up driven by the shutdown
+    // signal) must NOT short-circuit that. Return and let the grace timer's exit(0)
+    // end the pod after the worker-drain window — exiting now would SIGKILL the
+    // workers we just signalled, mid-drain.
+    logger.info("[thin-init] supervise loop ended during shutdown — deferring to the grace timer for a clean drain+exit");
+    return;
+  }
+
+  // The loop returned because the crash-loop budget was exhausted (give-up). Exit
+  // non-zero so the orchestrator (k8s) recreates the pod with backoff.
+  logger.error("[thin-init] exiting after supervisor crash-loop budget exhausted", { stoppedReason });
+  process.exit(1);
+};
+
+const main = async (): Promise<void> => {
+  const logger = createJsonConsoleLogger();
+  installLastResortErrorNets(logger);
+  const cfg = readThinInitConfig(logger);
+  // The supervisor binary is a sibling of this file (src/ in dev, dist/ in build),
+  // mirroring how main-supervisor resolves the worker entrypoint.
+  const supervisorEntry = path.join(path.dirname(process.argv[1] ?? ""), "main-supervisor.ts");
+
+  const adapter = createBunInitProcessAdapter({ supervisorEntry }, logger);
+
+  // Install the always-on PID-1 zombie reaper for the PROCESS lifetime (never
+  // uninstalled) BEFORE the supervise loop. It must keep reaping re-parented workers
+  // that exit while the loop is parked on shutdown OR during the post-give-up grace
+  // window — see `installProcessLifetimeReaper`. `runThinInit` itself only boundary-reaps.
+  installProcessLifetimeReaper(adapter);
+
+  const shutdown = installShutdownSignals(adapter, cfg, logger);
 
   logger.info("[thin-init] starting (PID 1)", {
     pid: process.pid,
@@ -293,20 +330,7 @@ const main = async (): Promise<void> => {
     logger,
   );
 
-  if (decidePostLoopExit(shutdown.isTerminated()) === "defer-to-grace-timer") {
-    // Shutdown already armed the (non-unref'd) grace timer AND broadcast SIGTERM to
-    // the workers; the loop also returning here (give-up driven by the shutdown
-    // signal) must NOT short-circuit that. Return and let the grace timer's exit(0)
-    // end the pod after the worker-drain window — exiting now would SIGKILL the
-    // workers we just signalled, mid-drain.
-    logger.info("[thin-init] supervise loop ended during shutdown — deferring to the grace timer for a clean drain+exit");
-    return;
-  }
-
-  // The loop returned because the crash-loop budget was exhausted (give-up). Exit
-  // non-zero so the orchestrator (k8s) recreates the pod with backoff.
-  logger.error("[thin-init] exiting after supervisor crash-loop budget exhausted", { stoppedReason: result.stoppedReason });
-  process.exit(1);
+  exitAfterSuperviseLoop(shutdown, result.stoppedReason, logger);
 };
 
 // Execute main only when this file is the process entrypoint (mirrors

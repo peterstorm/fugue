@@ -25,7 +25,7 @@ The monorepo is private — published to no external registry, consumed by no ex
    - Cons: Name is misleading — "ai-summary" implies a specific use case, not a DAG platform. Confusing for new team members and AI agents authoring DAGs. Product identity mismatch.
 
 3. **Big-bang rename in one PR**
-   - Pros: Clean break, no transition period, single PR to review, no alias complexity, one `find-and-replace` operation
+   - Pros: Clean break, no transition period, single PR to review, no alias complexity, one find-and-replace operation
    - Cons: Large diff in one PR, must verify all imports resolve post-rename
 
 ## Decision

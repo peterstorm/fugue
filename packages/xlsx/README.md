@@ -81,11 +81,11 @@ implementation, and a differential test suite holds the reader to them:
 
 - **Formulas** → their cached result; formulas are never evaluated.
 - **Strings**: shared, inline and formula strings; rich-text runs concatenated,
-  phonetic runs dropped, `_xHHHH_` escapes decoded. Hyperlink cells → their text.
+  phonetic runs dropped, _xHHHH_ escapes decoded. Hyperlink cells → their text.
 - **Dates** are detected by number format (built-in ids and custom format codes,
   as SheetJS does) and become `Date`. Like SheetJS, the conversion uses the
-  process's local time zone and honours `date1904`, so the same bytes read
-  under a different `TZ` give `Date`s at different instants.
+  process's local time zone and honours date1904, so the same bytes read
+  under a different TZ give `Date`s at different instants.
 - **Booleans** → `boolean`; **error cells** (`#N/A`, `#REF!`, …) → `null`.
 - **Row range** follows the sheet's `<dimension>` merged with the observed
   cells; rows and cells without an `r` attribute advance implicitly.
@@ -147,7 +147,7 @@ Unit tests build `.xlsx` fixtures in memory (no committed binaries):
   property tests for the cell-value semantics and the ZIP reader.
 - `parity.test.ts`: a differential against SheetJS on deterministic synthetic
   workbooks (the Brancheliste shape, nine other source shapes and an edge-case
-  cell matrix), with `TZ` pinned.
+  cell matrix), with TZ pinned.
 - `real-data.local.test.ts`: the same differential on the real source workbooks.
   It runs only when `FUGUE_REAL_DATA_DIR` is set and is skipped in CI.
 - `memory-budget.test.ts`: the 100 MB parse budget (peak above the

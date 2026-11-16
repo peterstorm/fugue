@@ -29,7 +29,7 @@ So if an example compiles and the suite is green, you can paste it and it works.
 
 ## See also
 
-- `docs/llm-dag-authoring.md` — the full authoring reference (cross-links here).
-- `docs/llm-document-source.md` — reading files via the `documents` capability.
-- `docs/adapter-authoring.md` — writing your own capability adapter.
+- `framework/docs/llm-dag-authoring.md` — the full authoring reference (cross-links here).
+- `document-source/docs/llm-document-source.md` — reading files via the `documents` capability.
+- `framework/docs/adapter-authoring.md` — writing your own capability adapter.
 - Run `fugue capabilities` for the live list of built-in capability names.

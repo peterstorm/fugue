@@ -3,7 +3,7 @@
 This guide explains how to create a DAG that the Fugue Host will discover, validate, and serve via HTTP.
 
 > **Quick reference:** For a copy-paste-ready skeleton and all node factory signatures,
-> see [`docs/llm-dag-authoring.md`](../../framework/docs/llm-dag-authoring.md).
+> see [`framework/docs/llm-dag-authoring.md`](../../framework/docs/llm-dag-authoring.md).
 
 ## Directory Convention
 
@@ -99,7 +99,7 @@ build it with `createSourceNode` (it sets `isSource`) instead of wiring a
 edges: [{ from: DAG_INPUT, to: "fetch-data" }, /* ... */]
 ```
 
-See [`docs/llm-dag-authoring.md`](../../framework/docs/llm-dag-authoring.md) for
+See [`framework/docs/llm-dag-authoring.md`](../../framework/docs/llm-dag-authoring.md) for
 the canonical authoring guide.
 
 ### Required Fields
@@ -143,9 +143,9 @@ The host has two distinct checkpoint record spaces. Let
 |---|---|---|
 | Root node output | `P<nodeId>` (STRING) | Canonical write-only output; unchanged bytes. |
 | Mapped child node output | `P<mapNodeId>@<childNodeId>@<index>@<executionEpoch>` (STRING) | Actual child writer output; sibling maps, indices and generations are distinct. |
-| Fan completions | `P$nodes` (HASH), field `dag@<mapNodeId>@<index>@<executionEpoch>` | Readable `Checkpointer` state used to resume a partial fan. |
-| Fan checkpoint metadata | `P$meta` (STRING) | Run-bound Checkpointer metadata, separate from output records. |
-| Run spend | `P$spend` (HASH) | Shared run spend ledger, not a node checkpoint. |
+| Fan completions | P$nodes (HASH), field `dag@<mapNodeId>@<index>@<executionEpoch>` | Readable `Checkpointer` state used to resume a partial fan. |
+| Fan checkpoint metadata | P$meta (STRING) | Run-bound Checkpointer metadata, separate from output records. |
+| Run spend | P$spend (HASH) | Shared run spend ledger, not a node checkpoint. |
 
 `CheckpointWriter` is a framework write-only port:
 `write(runId, nodeId, value, scope?: MappedChildScope): Promise<void>`, where
@@ -196,7 +196,7 @@ or root child-quality-summary aggregation is promised.
 
 ## Prompt Templates
 
-If your DAG uses `createLlmNode` with `promptName`, place prompt files in a `prompts/` directory alongside `dag.ts`:
+If your DAG uses `createLlmNode` with `promptName`, place prompt files in a prompts/ directory alongside `dag.ts`:
 
 ```
 customer-summary/

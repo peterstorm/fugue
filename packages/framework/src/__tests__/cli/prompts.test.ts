@@ -60,7 +60,7 @@ describe("fugue prompts sync", () => {
 
 // ---------------------------------------------------------------------------
 // Prototype-key robustness: prompt names come from the filesystem, so
-// `__proto__.txt` must not vanish through the object-literal prototype setter
+// __proto__.txt must not vanish through the object-literal prototype setter
 // and Object.prototype property names (`constructor`, `toString`) must not
 // read truthy non-entries through the prototype chain.
 // ---------------------------------------------------------------------------

@@ -95,7 +95,7 @@ export type LintAdvisory =
        * SAME reference (a pass-through / identity-shaped transform) AND whose
        * sole incoming source is `DAG_INPUT` — the legacy request-carrier
        * idiom. Both conjuncts are required: a legitimate A→A transform fed by
-       * another node does not fire. Pre-0.2.0 this was the `read-request`
+       * another node does not fire. Pre-0.2.0 this was the read-request
        * idiom — a node existing only to carry the DAG request past wave 1.
        * The fix is a `DAG_INPUT` edge straight to the consumer; the
        * pass-through node can then be deleted.
@@ -249,7 +249,7 @@ export type NewResult =
       readonly llm: boolean;
       /** Whether a human-review gate (ADR-0060) was scaffolded. */
       readonly review: boolean;
-      /** Files written, relative to the root that contains `dags/`. */
+      /** Files written, relative to the root that contains dags/. */
       readonly files: readonly string[];
       /** Ordered, copy-pasteable follow-up commands for the author. */
       readonly nextSteps: readonly string[];

@@ -10,7 +10,7 @@ import { isConditionalEdge, isDefaultEdge } from "../types/dag.js";
  * how cached node outputs are interpreted.
  *
  * - "1" — initial.
- * - "2" — ADR 0017: `deps`/`optionalDeps` removed from NodeDef; per-node
+ * - "2" — ADR 0017: `deps`/optionalDeps removed from NodeDef; per-node
  *   input shape derived from edges. Fingerprint payload no longer includes
  *   deps. Old checkpoints reference fields that no longer exist on
  *   reconstructed NodeDefs and can't be safely resumed.

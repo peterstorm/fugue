@@ -52,7 +52,7 @@ across separate event types. Phase 4 unifies it at the moment a human acts.
 3. **Separate context-lookup at query time (no colocated context)**
    - Pros: No denormalization; event payloads stay small; context is always
      "fresh" at query time.
-   - Cons: Requires joining across `ConfidenceEvent`, `WitnessCapturedEvent`,
+   - Cons: Requires joining across ConfidenceEvent, `WitnessCapturedEvent`,
      and `NodeStartEvent` to reconstruct what the human saw. Joins are fragile
      to event ordering, especially under concurrent waves. Loses atomicity —
      the context at query time may not match the context at decision time if
@@ -129,7 +129,7 @@ The executor emits `HumanInterventionEvent` in the `awaiting-human` and
 `retrying-hook` branches, immediately after `callHumanReviewHook` returns the
 human's action. At this point all context fields are in scope:
 
-- `nodeConfidence` from the node's `ConfidenceResult` (Phase 2).
+- `nodeConfidence` from the node's ConfidenceResult (Phase 2).
 - `nodeSideEffects` from `NodeDef.sideEffects` (Phase 1).
 - `priorWitnesses` from the run's `WitnessCapturedEvent` history (Phase 3).
 
@@ -139,7 +139,7 @@ Each `HumanInterventionEvent` maps to four MLflow tags:
 
 | Tag | Value |
 |---|---|
-| `mlflow.human.action` | `HumanActionKind` string |
+| `mlflow.human.action` | HumanActionKind string |
 | `mlflow.human.actor` | `actor` string |
 | `mlflow.human.confidence_bucket_at_intervention` | `high \| medium \| low \| unknown \| null` |
 | `mlflow.human.confidence_source_at_intervention` | confidence source string or `null` |
@@ -152,7 +152,7 @@ reported high confidence" — the core offline calibration workflow.
 | Concern | Owner |
 |---|---|
 | Returning `HumanAction` (with optional `actor`) | Hook author |
-| Assembling `HumanInterventionContext` from Phases 1–3 data | Framework |
+| Assembling HumanInterventionContext from Phases 1–3 data | Framework |
 | Emitting `HumanInterventionEvent` | Framework |
 | Computing `elapsedMsSinceAwait` | Framework |
 | Computing shallow JSON Patch for `approve-with-edit` | Framework |

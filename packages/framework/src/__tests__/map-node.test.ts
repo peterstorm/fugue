@@ -400,7 +400,7 @@ describe("createMapNode — the checkpointer capability is not optional", () => 
   it("declares checkpointer in requires, so a run without one fails at the gate", async () => {
     // Round-23 pr-test-analyzer-3. Plan §12 states the fail-closed guarantee:
     // "A run without one fails at the capability gate before any node runs."
-    // `MAP_REQUIRES` is that guarantee's whole enforcement mechanism, and
+    // MAP_REQUIRES is that guarantee's whole enforcement mechanism, and
     // nothing asserted it. A map node wired without a Checkpointer would
     // otherwise silently re-run every completed index after a crash.
     const calls: unknown[] = [];

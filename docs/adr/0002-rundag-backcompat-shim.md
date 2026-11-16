@@ -25,7 +25,7 @@ The forces:
 
 ## Options Considered
 
-1. **Dual-path shim (chosen).** `runDag` keeps its exported signature. Internally it routes: legacy callers hit `runDagInner` (the existing body, untouched); new-feature callers hit `runDagStateful`, which builds an in-memory `JobLike`, compiles `DagDef` into a `Machine`, and drives it via `runStateMachine`.
+1. **Dual-path shim (chosen).** `runDag` keeps its exported signature. Internally it routes: legacy callers hit runDagInner (the existing body, untouched); new-feature callers hit `runDagStateful`, which builds an in-memory `JobLike`, compiles `DagDef` into a `Machine`, and drives it via `runStateMachine`.
    - Pros:
      - Legacy path is the *same code path* it always was — bit-identical semantics, no oracle problem.
      - New path is reached only when caller opts in via `opts.jobLike`, `opts.onHumanReview`, or `opts.retryLimits`. Adoption is incremental.
@@ -36,7 +36,7 @@ The forces:
      - Routing rule is implicit; a reader has to grep `runDag` to find it.
      - Some features (e.g. retry limits) are not available on the legacy path; mixing them with `resume` requires explicit guards.
 
-2. **Parallel `runDagDurable` export.** Add a new entry point alongside `runDag`. Leave `runDag` untouched.
+2. **Parallel runDagDurable export.** Add a new entry point alongside `runDag`. Leave `runDag` untouched.
    - Pros: Cleanest separation. No routing logic. Legacy path is provably untouched.
    - Cons: Existing call sites never get the new behavior unless they migrate. Bloats the public surface with two near-identical functions. Defeats the "drop-in upgrade" goal — you'd have to change every call site to opt in to durability.
 
@@ -46,16 +46,16 @@ The forces:
 
 ## Decision
 
-**`runDag` stays a back-compat shim that routes to `runDagInner` (legacy) or `runDagStateful` (new) based on opts; legacy observable behavior is preserved bit-for-bit.**
+**`runDag` stays a back-compat shim that routes to runDagInner (legacy) or `runDagStateful` (new) based on opts; legacy observable behavior is preserved bit-for-bit.**
 
-Concretely, in `packages/framework/src/executor/executor.ts`:
+Concretely, in `packages/framework/src/executor/run-dag.ts`:
 
 - `runDag(def, opts)` keeps its exported signature and return type.
 - Routing rule, evaluated at the top of `runDag`:
   - If `opts.jobLike` is unset **and** `opts.onHumanReview` is unset **and** `opts.retryLimits` is unset → call `runDagInner(def, opts)` — the legacy fast path, unchanged.
   - Otherwise → call `runDagStateful(def, opts)`, which constructs an in-memory `JobLike`, compiles the DAG into a `Machine<DagPhase, DagEvent, DagMachineContext>`, and drives it via `runStateMachine`.
 - Mixing `opts.resume` with `opts.jobLike` is rejected at the boundary with an explicit error. Resume on the legacy path uses the existing checkpoint format; resume on the stateful path uses the job's persisted phase state. Bridging the two is out of scope.
-- The legacy path's OTel root span, observer event ordering, eval-judge background scheduling, and `onBackground` semantics are guaranteed by *not modifying `runDagInner`*. There is no re-implementation to drift.
+- The legacy path's OTel root span, observer event ordering, eval-judge background scheduling, and `onBackground` semantics are guaranteed by *not modifying runDagInner*. There is no re-implementation to drift.
 - The new path emits the same observer event vocabulary (`run-start`, `run-end`, `node-start`, etc.) by translating `DagEvent` transitions in `runDagStateful`. Tests that subscribe to the observer surface work on both paths.
 
 This shim was introduced in T6 of the implementation plan. AD-7 covers the `JobLike` boundary that the stateful path depends on.
@@ -73,12 +73,12 @@ This shim was introduced in T6 of the implementation plan. AD-7 covers the `JobL
 
 - Two execution paths. A bug that exists on both must be fixed twice; a bug that exists on only one must be diagnosed against the routing rule first.
 - The routing predicate is implicit knowledge — a reader debugging "why didn't my retry limit apply?" needs to know that omitting `retryLimits` keeps them on the legacy path.
-- `runDagInner` accumulates the label "legacy" but is still load-bearing. We accept that it will outlive the migration and may need a deprecation plan if/when the stateful path reaches feature parity.
+- runDagInner accumulates the label "legacy" but is still load-bearing. We accept that it will outlive the migration and may need a deprecation plan if/when the stateful path reaches feature parity.
 - Resume + jobLike rejection is a sharp edge. Callers who want durable resume on a job-backed run get an error, not silent fallback. We prefer the loud failure.
 - ~~`onBackground` is rejected on the state-machine path (eval-judge background scheduling is Phase 5 work). Callers that supply both `onBackground` and any state-machine opt receive an explicit error.~~ **Superseded by ADR 0018:** `onBackground` is now supported on both paths.
 
 ## Rejected alternatives
 
-1. **Parallel `runDagDurable` export.** Rejected — bloats the public surface and prevents existing call sites from picking up new behavior without migration. Defeats the drop-in goal.
+1. **Parallel runDagDurable export.** Rejected — bloats the public surface and prevents existing call sites from picking up new behavior without migration. Defeats the drop-in goal.
 
 2. **Big-bang rewrite of `runDag` body.** Rejected — turns SC-001 into a re-implementation correctness proof. Span attributes, observer ordering, and eval-judge background semantics are subtle enough that we do not trust a rewrite to preserve them silently. The dual-path shim is the cheaper oracle.

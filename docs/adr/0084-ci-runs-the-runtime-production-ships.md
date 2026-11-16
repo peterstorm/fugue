@@ -8,16 +8,16 @@ Accepted
 
 ## Context
 
-`packages/host/Dockerfile` ran `FROM oven/bun:1.2-alpine` (Bun 1.2.23). `ci.yml`'s `check` job — the merge gate that typechecks and runs every package's suite — ran `oven-sh/setup-bun@v2` with `bun-version: latest`, which by 2026-09-06 resolved to Bun 1.4.2. The two drifted apart silently, because nothing tied them together and `latest` moves on its own.
+`packages/host/Dockerfile` ran `FROM oven/bun:1.2-alpine` (Bun 1.2.23). `ci.yml`'s `check` job — the merge gate that typechecks and runs every package's suite — ran oven-sh/setup-bun@v2 with `bun-version: latest`, which by 2026-09-06 resolved to Bun 1.4.2. The two drifted apart silently, because nothing tied them together and `latest` moves on its own.
 
 That made the merge gate evidence about a runtime we do not ship. The gap was found while fixing an unrelated `--frozen-lockfile` failure, by running the suite inside `oven/bun:1.2-alpine` and diffing against the same suite on `oven/bun:alpine`, holding the environment (git present, non-root user, live Redis) constant. Four tests **fail on 1.2.23 and pass on 1.4.2**:
 
 - `host-uds-bind.test.ts` — *"a bind failure is a fail-closed boot ABORT (internal-invariant-violated)"*. A second `createHost` bound to an already-bound UDS path **succeeds** on 1.2.23 (`expect(second.ok).toBe(false)` got `true`). FR-007's fail-closed boot abort did not hold on the runtime in production: two host instances could each believe they owned the same socket.
-- `cli/new.test.ts` ×2 and the `fugue prompts sync/check` environment-failure test — a thrown `fs` error folded into the CLI problems envelope arrives **without its stack** on 1.2.23. The tests assert the envelope keeps the stack (`expect(problems[0]).toContain("at ")`); on 1.2 the message is present and the frames are not.
+- `packages/framework/src/__tests__/cli/new.test.ts` ×2 and the `fugue prompts sync/check` environment-failure test — a thrown `fs` error folded into the CLI problems envelope arrives **without its stack** on 1.2.23. The tests assert the envelope keeps the stack (`expect(problems[0]).toContain("at ")`); on 1.2 the message is present and the frames are not.
 
 These are all fail-closed / diagnosability paths — precisely the invariants this codebase spends the most effort asserting. Every one of them was green in CI while being broken in production.
 
-Two failures reproduce on **both** versions and are container artifacts rather than skew: the BullMQ queue construction test and the `BunGitAdapter` git-integration test. They pass on GitHub's `ubuntu-latest` runner.
+Two failures reproduce on **both** versions and are container artifacts rather than skew: the BullMQ queue construction test and the BunGitAdapter git-integration test. They pass on GitHub's `ubuntu-latest` runner.
 
 ## Decision
 

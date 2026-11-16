@@ -16,7 +16,7 @@ const recordingLogger = () => {
 };
 
 // Build handles whose steps each push their name into `order` when invoked, so
-// we can assert WHICH steps ran and in what sequence. `throwAt` makes the named
+// we can assert WHICH steps ran and in what sequence. throwAt makes the named
 // step reject; the orchestration must still run the remaining steps.
 const handlesRecording = (order: string[], throwAt?: string): ShutdownHandles => {
   const step = (name: string) => async () => {

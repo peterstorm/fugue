@@ -43,13 +43,13 @@ import {
  * (e.g. the worker's `AclCredential`, minted from the supervisor's spawn-env
  * handoff) satisfies it, so this adapter need not depend on the worker bootstrap.
  */
-interface RedisAclCredential {
+export interface RedisAclCredential {
   readonly username: string;
   readonly password: string;
 }
 
 /** The wired connectivity bundle: a startup probe port, the data port, and teardown. */
-interface RedisConnectivityBundle {
+export interface RedisConnectivityBundle {
   readonly port: RedisConnectivityPort;
   readonly redis: RedisPort;
   /** Teardown — resolves once the client has quit; the result is not meant to be consumed. */
@@ -392,7 +392,7 @@ export const requireHitlRedisPort = (redis: RedisPort): HitlRedisPort => {
 /**
  * Attach the `error` listener every ioredis client MUST have.
  *
- * `Redis` is an `EventEmitter`, and Node's contract for an `error` event with
+ * `Redis` is an EventEmitter, and Node's contract for an `error` event with
  * NO listener is to throw it. So a connection reset, a failed reconnect, or an
  * ACL disconnect does not degrade this host — it kills the process. That is not
  * a hypothetical: nothing in `packages/host/src` attached one before, on any of

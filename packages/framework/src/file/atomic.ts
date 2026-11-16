@@ -61,7 +61,7 @@ import { isFrameworkError } from "../types/errors.js";
  *
  * `releaseFileLock(lockPath, ownershipToken)` takes two adjacent `string`
  * parameters drawn from different domains — the classic argument-swap shape
- * `typescript-patterns.md` calls out by name — and `withFileLock` threads both
+ * typescript-patterns.md calls out by name — and `withFileLock` threads both
  * through matching-shaped calls, so the swap is reachable, not hypothetical.
  * A swapped call would look up ownership under a token-shaped path and compare
  * it against a path-shaped token: both reads fail, the lock is never released,

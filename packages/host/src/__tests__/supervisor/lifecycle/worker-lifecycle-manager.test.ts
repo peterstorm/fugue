@@ -1061,7 +1061,7 @@ describe("createWorkerLifecycle: failed kills surface via the logger (T9 Fix 1)"
 // — but if it EVER rejects (a true ADT invariant violation) it must surface loudly
 // and distinguishably, not collapse into the legitimate "nothing live" ok(undefined)
 // no-op. We force the rejection by INJECTING an ADT whose beginDrain rejects — NOT
-// by `mock.module`: bun 1.3.x module mocks are not reliably restorable and leak
+// by mock.module: bun 1.3.x module mocks are not reliably restorable and leak
 // into other test files sharing the worker process (the pure-ADT suite
 // worker-lifecycle.test.ts would intermittently import the mocked beginDrain and
 // fail its deterministic tests with this fixture's "EPERM: kill denied").

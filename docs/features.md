@@ -807,7 +807,7 @@ Production LLM pipelines need observability for debugging, cost tracking, and co
 
 ### What It Does
 
-The `QueueBackend` port has two adapters: `InMemoryBackend` (for tests/dev) and `BullMQBackend` (for production). The BullMQ adapter provides: durable job persistence, configurable retry attempts, dead-letter handling, event log via Redis Streams, and `FrameworkAugmentedError` for structured error propagation.
+The `QueueBackend` port has two adapters: `InMemoryBackend` (for tests/dev) and `createBullMQBackend` (for production). The BullMQ adapter provides: durable job persistence, configurable retry attempts, dead-letter handling, event log via Redis Streams, and `FrameworkAugmentedError` for structured error propagation.
 
 ### What It Catches
 
@@ -888,11 +888,11 @@ Periodic LLM pipelines (daily summaries, weekly reports) need reliable schedulin
 
 `check-imports.ts` is a programmatic boundary checker that runs as a test. It enforces strict import layering:
 
-- `types/` imports nothing (pure domain types)
-- `shared/` imports only `types/`
-- `dag-runtime/` imports `types/` + `shared/` (never `executor/`)
-- `state-machine/` never imports `bullmq`/`ioredis`
-- Only `queue-bullmq/` may import `bullmq`/`ioredis`
+- `packages/framework/src/types/` imports nothing (pure domain types)
+- `packages/framework/src/shared/` imports only `packages/framework/src/types/`
+- `packages/framework/src/dag-runtime/` imports `packages/framework/src/types/` + `packages/framework/src/shared/` (never `packages/framework/src/executor/`)
+- `packages/framework/src/state-machine/` never imports `bullmq`/`ioredis`
+- Only `packages/framework/src/queue-bullmq/` may import `bullmq`/`ioredis`
 - The main barrel never pulls `ioredis` into the default bundle
 
 ### What It Catches

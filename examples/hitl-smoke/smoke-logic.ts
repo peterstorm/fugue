@@ -9,7 +9,7 @@ export type Decision = "approve" | "reject";
  * Outcome of parsing `SMOKE_DECISION`: either a recognised decision, or an
  * explicit rejection of an unrecognised value. An unset/empty value is NOT an
  * error — it means "use the default (approve)". Any other value is a typo
- * (`Reject`, `approev`, …) and is surfaced as `{ ok: false }` so the harness can
+ * (`Reject`, approev, …) and is surfaced as `{ ok: false }` so the harness can
  * fail loudly at the boundary instead of silently coercing it to the happy path.
  */
 export type ParsedDecision =

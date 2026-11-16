@@ -14,14 +14,28 @@ Run the frozen install before the gate. `bun run verify` verifies the checkout; 
 The gate runs these phases in fail-fast order:
 
 1. verify the exact production Bun runtime and the Redis prerequisites;
-2. run every one of the 12 workspace `typecheck` scripts, then the root script compiler tier;
-3. check relative links in shipped package documentation;
-4. run the root script tests;
-5. run every one of the 12 workspace `test` scripts.
+2. lint the whole repository against the architecture rules in `.claude/linter/rules/` (see [Static enforcement](#static-enforcement));
+3. run every one of the 12 workspace `typecheck` scripts, then the root script compiler tier;
+4. check relative links in shipped package documentation;
+5. run the root script tests;
+6. run every one of the 12 workspace `test` scripts.
 
 Workspace package scripts remain the authority for package-specific behavior. In particular, the framework `typecheck` script checks both `src` and the published `bin/fugue.ts` CLI through `tsconfig.bin.json`.
 
 The root `tsconfig.scripts.json` is deliberately narrower than every file under `scripts/`. It covers the verification implementation, all root script tests, and the existing shipped-doc checker. It does not claim to typecheck the unrelated deployment smoke scripts, which have pre-existing type errors outside this verification change.
+
+## Static enforcement
+
+`bun run lint` runs [Loom's](https://github.com/peterstorm/loom) project linter, pinned in `devDependencies` and configured in `.claude/linter/rules/config.json`. Everything is linted; each exclusion in `exclude` states why. It enforces:
+
+- **Import direction** (`no-cross-boundary-imports`): 21 `boundaries`, one owner per edge, and `requireGovernance` so a file under `packages/` that no boundary names is a violation. Loom's boundary map owns the package-to-package edges; `packages/framework/src/scripts/check-imports.ts` additionally owns the intra-package subsystem rules inside `packages/framework/src` — one tool owns each edge, never both.
+- **Functional-core purity** (`no-io-in-pure-modules`): `pureModules` lists the core roots; each shell inside them is declared in `impureModules` with the I/O it does.
+- **Code shape**: functions of 50 lines or fewer, no `as any` casts (annotations like `z.ZodType<any>` are not flagged), no non-null assertions (the gate catches the word-bang-dot-word shape — `value!.length` — not every `!`), no wire casts (`JSON.parse(...) as T`), exhaustive `match(...)`/`never`-bound switches, no nested ternaries, no raw-string IDs, no library `console.log`.
+- **Duplicate blocks**: production code has none. `duplicateBlockBaseline` grandfathers the existing test-side blocks; that list only shrinks — never add to it to land a change.
+
+Two declarative rules are disabled in the rule files with the measurement that justifies it (`no-bare-throw`, `no-unhandled-result`); re-enable them per layer when the Result-signature refactor is scheduled.
+
+Note the linter measures a function only when its signature opens on one line, so `createRedisRunStore` and `createRedisTenantRegistry` (multi-line signatures, 300+ lines) are over the limit without being flagged.
 
 ## Prerequisites
 

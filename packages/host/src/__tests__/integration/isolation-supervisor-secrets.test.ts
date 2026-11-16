@@ -156,7 +156,7 @@ describe("Supervisor-secrets-absence: handles refs only, never secret material (
   it("a SecretsRef alone yields ZERO secret bytes — the supervisor cannot dereference it", () => {
     // The supervisor holds a `SecretsRef` (a pointer). It does NOT construct a
     // SecretsSource (that requires filesystem/Vault authority it structurally
-    // lacks). A ref by itself is inert: there is no `ref.deref()` — the only way to
+    // lacks). A ref by itself is inert: there is no ref.deref() — the only way to
     // get bytes is via a concrete source, which is the WORKER's job.
     const ref = markSecretsRef("vault://acme/env");
     // The ref string carries no secret bytes (it is a pointer).

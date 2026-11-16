@@ -11,9 +11,9 @@ describe("createTransformNode", () => {
       id: N("t1"),
       inputSchema: z.object({ x: z.number() }),
       outputSchema: z.object({ y: z.number() }),
-      transform: (...args: any[]) => {
+      transform: (...args: [input: { x: number }]) => {
         receivedArgs = args;
-        return ok({ y: (args[0] as any).x * 2 });
+        return ok({ y: args[0].x * 2 });
       },
     });
 

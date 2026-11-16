@@ -9,7 +9,7 @@
  * independent of the configured logger so the failure is not simply lost.
  *
  * This was reimplemented three more times before round 13 (`host.ts`'s
- * `logSafely`, `capability-manager.ts`'s `logLifecycleWithoutThrowing`,
+ * logSafely, `capability-manager.ts`'s `logLifecycleWithoutThrowing`,
  * `error-handler.ts`'s `logErrorWithoutThrowing`), where a change to the rule
  * would have had to be remembered in each — and where only some had a fallback
  * channel at all.

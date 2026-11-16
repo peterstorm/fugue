@@ -4,11 +4,11 @@
  * The OTel JS SDK (@opentelemetry/sdk-trace-base 1.x / 2.x) silently drops
  * non-primitive attribute values (objects, nested arrays). The accepted
  * shapes are `string | number | boolean | string[] | number[] | boolean[]`
- * — see the `AttributeValue` type and `_isAttributeValueValid()` validation
+ * — see the AttributeValue type and _isAttributeValueValid() validation
  * inside the SDK. MLflow's server, in contrast, expects several attributes
  * as structured objects (e.g. `mlflow.llm.cost` as a dict,
  * `mlflow.spanInputs` as a record of input fields) — round-tripped via
- * protobuf `kvlist_value`.
+ * protobuf kvlist_value.
  *
  * The SDK's behavior is intentional — the OTel semconv treats attributes as
  * a flat primitive bag — so this registry is a sanctioned side-channel, not
@@ -18,7 +18,7 @@
  * This registry stores object-valued attributes keyed by spanId. Our custom
  * OTLP exporter reads from here and injects them onto `ReadableSpan.attributes`
  * before serialization, bypassing the SDK's validation. The otlp-transformer
- * then serializes objects as protobuf `kvlist_value`, which MLflow's server
+ * then serializes objects as protobuf kvlist_value, which MLflow's server
  * decodes correctly.
  *
  * Lifecycle: entries are cleaned up when the exporter processes them (or on

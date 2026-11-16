@@ -139,12 +139,12 @@ const checkpointRunAddress = (runIdRaw: unknown): CheckpointWriteRunAddress =>
  */
 const checkpointNodeAddress = (
   nodeIdRaw: unknown | undefined,
-): CheckpointWriteNodeAddress =>
-  nodeIdRaw === undefined
-    ? { nodeId: META_RECORD_NODE_ID }
-    : typeof nodeIdRaw === "string" && ID_PATTERN.test(nodeIdRaw)
-      ? { nodeId: __brandNodeId(nodeIdRaw) }
-      : { nodeId: CHECKPOINT_INVALID_NODE_ID, invalidNodeId: stringOf(nodeIdRaw) };
+): CheckpointWriteNodeAddress => {
+  if (nodeIdRaw === undefined) return { nodeId: META_RECORD_NODE_ID };
+  return typeof nodeIdRaw === "string" && ID_PATTERN.test(nodeIdRaw)
+    ? { nodeId: __brandNodeId(nodeIdRaw) }
+    : { nodeId: CHECKPOINT_INVALID_NODE_ID, invalidNodeId: stringOf(nodeIdRaw) };
+};
 
 /**
  * THE ONE `checkpoint-write-failed` construction path (the consolidation of the

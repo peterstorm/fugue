@@ -30,6 +30,16 @@ type UnknownUsdHeadroom = Extract<CeilingHeadroom, {
 const isUnknownUsdHeadroom = (headroom: CeilingHeadroom): headroom is UnknownUsdHeadroom =>
   headroom.kind === "unknown-usage" && headroom.ceiling.kind === "usd";
 
+type AvailableHeadroom = Extract<CeilingHeadroom, { readonly kind: "available" }>;
+
+// The three `available` arms differ only in their literal `unit`, which a
+// spread carries through unchanged; the generic parameter keeps `unit`,
+// `ceiling` and `amount` correlated, so no per-unit arm is needed.
+const snapshotAvailable = <H extends AvailableHeadroom>(headroom: H): H => {
+  const copy: H = { ...headroom, ceiling: Object.freeze({ ...headroom.ceiling }) };
+  return Object.freeze(copy);
+};
+
 const snapshotHeadroom = (headroom: CeilingHeadroom): CeilingHeadroom => {
   if (headroom.kind === "unpriced") {
     return Object.freeze({
@@ -52,29 +62,7 @@ const snapshotHeadroom = (headroom: CeilingHeadroom): CeilingHeadroom => {
       observedAtLeast: headroom.observedAtLeast,
     });
   }
-  switch (headroom.unit) {
-    case "tokens":
-      return Object.freeze({
-        kind: "available",
-        unit: "tokens",
-        ceiling: Object.freeze({ ...headroom.ceiling }),
-        amount: headroom.amount,
-      });
-    case "calls":
-      return Object.freeze({
-        kind: "available",
-        unit: "calls",
-        ceiling: Object.freeze({ ...headroom.ceiling }),
-        amount: headroom.amount,
-      });
-    case "usd":
-      return Object.freeze({
-        kind: "available",
-        unit: "usd",
-        ceiling: Object.freeze({ ...headroom.ceiling }),
-        amount: headroom.amount,
-      });
-  }
+  return snapshotAvailable(headroom);
 };
 
 const snapshotRemaining = (remaining: Remaining): Remaining =>

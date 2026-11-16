@@ -10,7 +10,7 @@ The `wave-done` DagEvent previously carried `routingDecisions` as an optional fi
 When absent, the pure transition layer fell back to calling `decideRoute` inline —
 which evaluates predicate functions (closures). This made the transition layer
 impure on the fallback path and required `outgoingByNode` (containing predicate
-closures) to live on an intermediate `DagTransitionContext` type between the
+closures) to live on an intermediate DagTransitionContext type between the
 serializable `DagMachineContextPersisted` and the full `DagMachineContext`.
 
 The three-layer context hierarchy (`Persisted → TransitionContext → MachineContext`)
@@ -31,7 +31,7 @@ for prior waves to reconstruct the active-node set after a backward reroute.
    event carries a precomputed `rerouteActiveSet` for reroute actions, computed by
    the executor which has access to the live DAG (with predicate closures).
 
-3. **`DagTransitionContext` is eliminated.** The transition function operates directly
+3. **DagTransitionContext is eliminated.** The transition function operates directly
    on `DagMachineContextPersisted`. A new `unconditionalAdj` field (closure-free,
    serializable) provides the forward-reachability information that `expandActive`
    needs without carrying predicate closures.

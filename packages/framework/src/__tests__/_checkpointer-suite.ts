@@ -40,7 +40,7 @@ import { D, N, R } from "./_id-helpers.js";
  * Backends reach their durable state by different means — Redis metadata
  * bypasses use `redis.set` while corrupt node entries use `redis.hset`,
  * in-memory writes records into its test-owned store (the constructor-adopted
- * seam that replaced `__testRawMetas`), and the file backend writes
+ * seam that replaced __testRawMetas), and the file backend writes
  * checkpoint files directly — so the suite is parametric over the bypass and
  * the CONTRACT assertions stay byte-identical for all of them.
  *

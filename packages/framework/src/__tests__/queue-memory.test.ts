@@ -13,6 +13,7 @@ import {
   createInMemoryMarkerStore,
 } from "../queue/index.js";
 import type { JobLike } from "../state-machine/types.js";
+import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 
 // Helper to wait for setTimeout callbacks to fire in real-timer tests.
 const tick = (ms = 5): Promise<void> =>
@@ -130,6 +131,48 @@ describe("createInMemoryBackend", () => {
     // Mid-retry failures route to onFailed; the final exhausted attempt to onExhausted.
     expect(failures).toEqual([1, 2]);
     expect(exhausted).toEqual([3]);
+  });
+
+  it("logs a throwing onFailed/onExhausted handler when no onError handler is registered, and keeps draining", async () => {
+    const errors: string[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: (msg) => { errors.push(msg); },
+    });
+    try {
+      const backend = createInMemoryBackend();
+      const processed: string[] = [];
+      const queue = backend.createQueue<string, undefined>("throwing-handler-queue");
+      const worker = backend.createWorker<string, undefined>(
+        "throwing-handler-queue",
+        async (job) => {
+          processed.push(job.data.state);
+          if (job.data.state === "bad") throw new Error("worker boom");
+        },
+      );
+      worker.onFailed(() => {
+        throw new Error("onFailed handler boom");
+      });
+      worker.onExhausted(() => {
+        throw new Error("onExhausted handler boom");
+      });
+
+      await queue.enqueue("j-bad", { state: "bad", context: undefined }, { attempts: 2 });
+      await queue.enqueue("j-good", { state: "good", context: undefined });
+      // Neither throwing handler may escape drain().
+      await queue.drain();
+
+      // Both attempts of j-bad ran, and the queue carried on to j-good.
+      expect(processed).toEqual(["bad", "bad", "good"]);
+      // One log line per throwing handler, naming the handler and the job.
+      expect(errors).toHaveLength(2);
+      expect(errors[0]).toContain("onFailed handler for job \"j-bad\" threw (attempt 1/2)");
+      expect(errors[1]).toContain("onExhausted handler for job \"j-bad\" threw (attempt 2/2)");
+    } finally {
+      __resetFrameworkLogger();
+    }
   });
 
   it("_events exposes enqueued entries per queue name", async () => {
@@ -346,6 +389,15 @@ describe("createQueue validation", () => {
     ).toThrow(RangeError);
   });
 
+  // Integer, not merely finite: matches the BullMQ adapter's QueueOpts check,
+  // so the in-memory fake cannot accept a value the real backend refuses.
+  it("throws RangeError when defaultAttempts is fractional", () => {
+    const backend = createInMemoryBackend();
+    expect(() =>
+      backend.createQueue("q", { defaultAttempts: 1.5 }),
+    ).toThrow(RangeError);
+  });
+
   it("accepts defaultAttempts: 1 without throwing", () => {
     const backend = createInMemoryBackend();
     expect(() =>
@@ -387,6 +439,15 @@ describe("createWorker validation", () => {
     const backend = createInMemoryBackend();
     expect(() =>
       backend.createWorker("q", async () => {}, { concurrency: -Infinity }),
+    ).toThrow(RangeError);
+  });
+
+  // A fractional pool size would make the drain pool silently truncate it;
+  // reject it like the BullMQ adapter does.
+  it("throws RangeError when concurrency is fractional", () => {
+    const backend = createInMemoryBackend();
+    expect(() =>
+      backend.createWorker("q", async () => {}, { concurrency: 2.5 }),
     ).toThrow(RangeError);
   });
 

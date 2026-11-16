@@ -11,15 +11,15 @@
 
 The duplication produced three concrete pains:
 
-1. **`deps` typos.** `deps: ["fech"]` is a `string[]` — the type system can't tell the literal `"fech"` from a known node id. Edit-time cross-typing would have required a builder DSL (forced topo order) or a closure-scoped DSL (full API redesign); see `docs/dag-type-system.md` §6.1.
-2. **`optionalDeps` mechanical rule.** Authors had to partition incoming sources by edge variant (conditional incoming → optionalDep; unconditional/default → dep) and keep the partition in sync with edge edits. The validator caught mistakes, but the rule was mechanical and authors kept forgetting it.
+1. **`deps` typos.** `deps: ["fech"]` is a `string[]` — the type system can't tell the literal `"fech"` from a known node id. Edit-time cross-typing would have required a builder DSL (forced topo order) or a closure-scoped DSL (full API redesign); see `packages/framework/docs/dag-type-system.md` §6.1.
+2. **optionalDeps mechanical rule.** Authors had to partition incoming sources by edge variant (conditional incoming → optionalDep; unconditional/default → dep) and keep the partition in sync with edge edits. The validator caught mistakes, but the rule was mechanical and authors kept forgetting it.
 3. **Node anti-reusability.** `deps: ["fetch"]` anchored a node to a specific upstream id. Reusing a node across DAGs whose upstream had a different name required renaming or wrapping; in practice, nobody did.
 
-Edges already express the topology. The `deps`/`optionalDeps` fields are read-only mirrors that the framework needs at runtime to build node input. The framework can compute that mirror from edges instead of asking the author to maintain it.
+Edges already express the topology. The `deps`/optionalDeps fields are read-only mirrors that the framework needs at runtime to build node input. The framework can compute that mirror from edges instead of asking the author to maintain it.
 
 ## Decision
 
-Remove `deps` and `optionalDeps` from `NodeDef`. Edges become the single topological source of truth. The framework derives per-node input wiring at compile time via `incomingSources(dag, nodeId)`:
+Remove `deps` and optionalDeps from `NodeDef`. Edges become the single topological source of truth. The framework derives per-node input wiring at compile time via `incomingSources(dag, nodeId)`:
 
 ```ts
 interface IncomingSources {
@@ -30,7 +30,7 @@ interface IncomingSources {
 
 "Always-active" means the source is in `seedInitialActiveSet(dag)` — reachable from a wave-0 entry along unconditional edges only. The same input-shape rule applies as before (0 → DAG input; 1 required, 0 optional → bare; ≥2 required or any optional → object keyed by `required ∪ optional`).
 
-Per-node `IncomingSources` is precomputed once per `compileDagToMachine` (and once per `runDagInner` for the legacy fast path) and stashed on `DagMachineContext.incomingByNode` so wave dispatch is O(1) per node.
+Per-node `IncomingSources` is precomputed once per `compileDagToMachine` (and once per runDagInner for the legacy fast path) and stashed on `DagMachineContext.incomingByNode` so wave dispatch is O(1) per node.
 
 Validator surface shrinks accordingly: deps↔edges symmetry checks are gone (nothing to check), as is the "deps wired only by conditional → use optionalDeps" error. The validator keeps the edge-only rules: endpoint references, uniqueness, else-totality, predicate shape, output reachability, and record-key consistency.
 
@@ -43,7 +43,7 @@ Every node-creator helper (`createTransformNode`, `createFetchNode`, `createLlmN
 **Wins**
 
 - **Zero `deps` typos possible.** No field to typo.
-- **Mechanical-classification mistake removed.** No `optionalDeps` partition for the author to keep in sync.
+- **Mechanical-classification mistake removed.** No optionalDeps partition for the author to keep in sync.
 - **Nodes become genuinely reusable.** Their contract is `I → O`, not "wired to specific upstream ids" — the same `synthesize` node can be dropped into any DAG whose edges feed it the expected input.
 - **Validator surface shrinks** by ~80 lines (one whole rule class gone).
 - **Edges are the only topology authoring surface.** One place to look when reasoning about wiring; one place to edit when refactoring.

@@ -96,8 +96,9 @@ export interface ResponsesApiResponse {
   readonly id?: string;
   readonly model?: string;
   readonly status?: string;
-  readonly output?: readonly ResponsesOutputItem[];
-  readonly usage?: ResponsesUsage;
+  /** Absent OR `null` both mean "no output items" — the API sends either for empty turns. */
+  readonly output?: readonly ResponsesOutputItem[] | null;
+  readonly usage?: ResponsesUsage | null;
   /** Populated when `status === "failed"` — the API's stated failure reason. */
   readonly error?: ResponsesApiError | null;
   /** Populated when `status === "incomplete"` — e.g. `{ reason: "max_output_tokens" }`. */

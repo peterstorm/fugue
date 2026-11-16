@@ -333,45 +333,55 @@ const createFileCheckpointerUnchecked = (
         `${operation} clock failed for run ${render(runId)} under ${render(directory)}: ${messageOf(error)}`,
     });
 
+  // Everything `setMeta` can reject BEFORE touching the filesystem: snapshot the
+  // caller-owned metadata, gate the runId, stamp `createdAt` from the injected
+  // clock, and serialize. Resolves to the exact bytes to commit.
+  const prepareMetaWrite = (runId: RunId, meta: RunMeta): Result<string, FrameworkError> => {
+    let rawMeta: RawMetaSnapshot;
+    try {
+      rawMeta = snapshotMeta(meta);
+    } catch (error) {
+      return err(
+        writeFailed(
+          runId,
+          undefined,
+          `setMeta rejected unreadable metadata for run ${render(runId)}: ${messageOf(error)}`,
+        ),
+      );
+    }
+    if (!isBoundaryId(runId)) {
+      return err(
+        writeFailed(
+          runId,
+          undefined,
+          `setMeta rejected: runId ${render(runId)} does not match ${ID_PATTERN.source} — refusing to address a path outside ${render(directory)}`,
+        ),
+      );
+    }
+    const createdAtClock = readClock("setMeta", runId);
+    if (!createdAtClock.ok) return err(createdAtClock.error);
+    const createdAtMs = createdAtClock.value;
+
+    let json: string;
+    try {
+      json = serializeMeta(rawMeta, createdAtMs);
+    } catch (error) {
+      return err(
+        writeFailed(
+          runId,
+          undefined,
+          `setMeta rejected invalid metadata for run ${render(runId)}: ${messageOf(error)}`,
+        ),
+      );
+    }
+    return ok(json);
+  };
+
   return {
     async setMeta(runId: RunId, meta: RunMeta): Promise<Result<void, FrameworkError>> {
-      let rawMeta: RawMetaSnapshot;
-      try {
-        rawMeta = snapshotMeta(meta);
-      } catch (error) {
-        return err(
-          writeFailed(
-            runId,
-            undefined,
-            `setMeta rejected unreadable metadata for run ${render(runId)}: ${messageOf(error)}`,
-          ),
-        );
-      }
-      if (!isBoundaryId(runId)) {
-        return err(
-          writeFailed(
-            runId,
-            undefined,
-            `setMeta rejected: runId ${render(runId)} does not match ${ID_PATTERN.source} — refusing to address a path outside ${render(directory)}`,
-          ),
-        );
-      }
-      const createdAtClock = readClock("setMeta", runId);
-      if (!createdAtClock.ok) return err(createdAtClock.error);
-      const createdAtMs = createdAtClock.value;
-
-      let json: string;
-      try {
-        json = serializeMeta(rawMeta, createdAtMs);
-      } catch (error) {
-        return err(
-          writeFailed(
-            runId,
-            undefined,
-            `setMeta rejected invalid metadata for run ${render(runId)}: ${messageOf(error)}`,
-          ),
-        );
-      }
+      const prepared = prepareMetaWrite(runId, meta);
+      if (!prepared.ok) return prepared;
+      const json = prepared.value;
 
       try {
         const runDirectory = runDirectoryOf(runId, true);

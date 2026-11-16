@@ -7,7 +7,7 @@
 
 ## Context
 
-A DAG node may declare `humanReview` config. When such a node finishes, the runtime transitions to `awaiting-human` and calls the caller-supplied `onHumanReview` hook (UI prompt, Slack, webhook, etc.). The hook resolves to a `HumanAction` (`approve` / `approve-with-edit` / `reject` / `reroute-back`), which the runtime applies via `human-responded`.
+A DAG node may declare `humanReview` config. When such a node finishes, the runtime transitions to `awaiting-human` and calls the caller-supplied `onHumanReview` hook (UI prompt, Slack, webhook, etc.). The hook resolves to a `HumanAction` (`approve` / `approve-with-edit` / `reject` / reroute-back), which the runtime applies via `human-responded`.
 
 What happens if the hook itself **throws** (network failure to the review surface, transient backend error, hook-implementation bug)?
 
@@ -74,7 +74,7 @@ The hook retry budget is shared with the node retry budget (one counter per `nod
 
 1. **Treat hook crashes as node failures (option 1 above).** Rejected: re-runs the node, discarding validated output and risking non-deterministic divergence.
 
-2. **Add a `pendingHookRetry` counter to `awaiting-human` itself; no new phase.** Rejected: `awaiting-human` would then need to encode "currently waiting for input" vs. "scheduled to re-call hook in N ms" — overloading the same kind. A separate variant cleanly carries `nextDelayMs`.
+2. **Add a pendingHookRetry counter to `awaiting-human` itself; no new phase.** Rejected: `awaiting-human` would then need to encode "currently waiting for input" vs. "scheduled to re-call hook in N ms" — overloading the same kind. A separate variant cleanly carries `nextDelayMs`.
 
 3. **Separate hook retry budget.** Rejected for now (explicit shared-budget call in FR-029a). Easy to extend later if needed.
 

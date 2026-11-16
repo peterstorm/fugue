@@ -9,7 +9,7 @@
 
 The original `QueueBackend` API exposed two overlapping retry knobs:
 
-- `QueueOpts.defaultAttempts` — declared but never wired through to BullMQ. The `_opts` parameter on `createQueue` was prefixed with `_` (ignored).
+- `QueueOpts.defaultAttempts` — declared but never wired through to BullMQ. The _opts parameter on `createQueue` was prefixed with `_` (ignored).
 - `WorkerOpts.maxAttempts` — read by `createWorker`, stored on the worker, and passed verbatim to the dead-letter `onFailed` callback as the `max` argument. **It did not configure BullMQ's retry behavior.** A caller writing `createWorker(..., { maxAttempts: 3 })` against the BullMQ backend got: BullMQ retried once (its default), then `onFailed` reported `(attempts=1, max=3)` to the dead-letter handler — implying two more retries that never happened.
 
 So three problems compounded:
@@ -26,7 +26,7 @@ BullMQ's native retry model is per-job: each `Job.opts.attempts` is the cap for 
    - Pros: surfaces the duplication as a runtime check.
    - Cons: still two fields, still two knobs to remember. The "they must agree" rule is itself a workaround for "they shouldn't both exist."
 
-2. **Lenient: keep `WorkerOpts.maxAttempts` purely as a dead-letter signal, rename to `dlqMaxAttempts`.** Document that it does not configure BullMQ retries.
+2. **Lenient: keep `WorkerOpts.maxAttempts` purely as a dead-letter signal, rename to dlqMaxAttempts.** Document that it does not configure BullMQ retries.
    - Pros: minimal API churn.
    - Cons: still requires callers to set the same number twice (once on the queue, once on the worker, even if the worker version is just informational). "Why are there two?" remains a real question.
 
@@ -61,7 +61,7 @@ export interface WorkerOpts {
 }
 ```
 
-In the BullMQ adapter (`queue-bullmq/adapter.ts`):
+In the BullMQ adapter (`packages/framework/src/queue-bullmq/adapter.ts`):
 
 ```ts
 const queue = new Queue(name, {

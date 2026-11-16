@@ -121,6 +121,23 @@ export interface CapturedRequest {
   readonly body: Record<string, unknown>;
 }
 
+// A captured request body is JSON-object wire data: parsed, not cast.
+// An ABSENT body must throw, never degrade to "{}": a capture that silently
+// fabricated an empty object could pass a test against a request the client
+// never populated.
+const parseRequestBody = (body: unknown): Record<string, unknown> => {
+  if (body === undefined || body === null) {
+    throw new Error(
+      "captured fetch call has no request body — the client never populated it",
+    );
+  }
+  const parsed: unknown = JSON.parse(String(body));
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`captured request body is not a JSON object: ${String(body)}`);
+  }
+  return Object.fromEntries(Object.entries(parsed));
+};
+
 /**
  * Run `fn` with `globalThis.fetch` stubbed to return `bodies` in order (the
  * last repeating), capturing every outgoing request.
@@ -140,7 +157,7 @@ export const withStubbedFetch = async <T>(
   globalThis.fetch = (async (input: unknown, init?: { body?: unknown }) => {
     captured.push({
       url: String(input),
-      body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+      body: parseRequestBody(init?.body),
     });
     const body = bodies[Math.min(call, bodies.length - 1)];
     call += 1;

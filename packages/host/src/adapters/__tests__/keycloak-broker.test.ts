@@ -409,7 +409,7 @@ describe("keycloak-broker — token cache TTL dedup (US4/SC-008)", () => {
 
   it("dedups the SECOND egress too: ≤ 1 WIF exchange per (identity,audience,scope) within TTL (SC-008)", async () => {
     // The WIF exchange IS a token request — caching only the SA token would leak a
-    // fresh WIF egress on every resolution. Mirror the Keycloak `egressCount()` TTL
+    // fresh WIF egress on every resolution. Mirror the Keycloak egressCount() TTL
     // test for the app-only/WIF hop: three resolutions, one WIF exchange.
     const { endpoint, egressCount } = recordingEndpoint({ ttlSec: 3600 });
     const { wif, wifCount } = recordingWif({ ttlSec: 3600 });

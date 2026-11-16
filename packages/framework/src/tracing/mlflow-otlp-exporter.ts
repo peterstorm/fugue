@@ -222,6 +222,128 @@ const withMergedAttrs = (span: ReadableSpan, extra: SpanAttributes): ReadableSpa
     },
   });
 
+type RawSpanAttrs = Readonly<Record<string, unknown>>;
+type DerivedAttrs = Record<string, unknown>;
+
+// ai.span.type → mlflow.spanType — enum re-mapping (not a straight copy),
+// SPAN_TYPE_TO_MLFLOW normalises our casing to MLflow's uppercase constants.
+// Surface unknown values via fwLogger so silently coercing to CHAIN doesn't
+// mask a producer typo.
+const spanTypeAttrs = (attrs: RawSpanAttrs): DerivedAttrs => {
+  const spanType = attrs[AI_SPAN_TYPE] as string | undefined;
+  if (!spanType) return {};
+  const mlflowType = SPAN_TYPE_TO_MLFLOW[spanType];
+  if (!mlflowType) {
+    fwLogger().warn(
+      `[MlflowOtlpExporter] Unknown spanType="${spanType}" → defaulting to CHAIN`,
+    );
+  }
+  return { "mlflow.spanType": mlflowType ?? "CHAIN" };
+};
+
+const renamedAttrs = (attrs: RawSpanAttrs): DerivedAttrs => {
+  const out: DerivedAttrs = {};
+  for (const { from, to } of ATTR_MAP) {
+    const value = attrs[from];
+    if (value !== undefined) out[to] = value;
+  }
+  return out;
+};
+
+// Walk the span's events through the per-event handlers, then promote the
+// accumulated inputs / outputs / cost to MLflow's object-valued attributes.
+const eventDerivedAttrs = (events: readonly TimedEvent[] | undefined, ctx: EventHandlerCtx): DerivedAttrs => {
+  const acc: MlflowAccumulator = { spanInputs: {}, spanOutputs: {}, llmCost: null };
+  if (events) {
+    for (const event of events) {
+      const handler = EVENT_HANDLERS_BY_NAME.get(event.name);
+      if (handler) handler(event.attributes ?? {}, acc, ctx);
+    }
+  }
+  const out: DerivedAttrs = {};
+  if (Object.keys(acc.spanInputs).length > 0) out["mlflow.spanInputs"] = acc.spanInputs;
+  if (Object.keys(acc.spanOutputs).length > 0) out["mlflow.spanOutputs"] = acc.spanOutputs;
+  if (acc.llmCost) out["mlflow.llm.cost"] = acc.llmCost;
+  return out;
+};
+
+const tokenUsageAttrs = (attrs: RawSpanAttrs): DerivedAttrs => {
+  const tokensIn = attrs[GEN_AI_USAGE_INPUT_TOKENS] as number | undefined;
+  const tokensOut = attrs[GEN_AI_USAGE_OUTPUT_TOKENS] as number | undefined;
+  // The provider-side cache split rides alongside the three original figures —
+  // the same figures the span carries as `gen_ai.usage.cache_*` attributes.
+  // Absent defaults to 0, which is exactly what absence means: the enrichment
+  // layer writes the cache attributes unconditionally (zeroes included), so a
+  // pre-caching span and a cache-inert span produce the identical tokenUsage.
+  const cacheWriteTokens = attrs[GEN_AI_USAGE_CACHE_WRITE_TOKENS] as number | undefined;
+  const cacheReadTokens = attrs[GEN_AI_USAGE_CACHE_READ_TOKENS] as number | undefined;
+  if (tokensIn === undefined && tokensOut === undefined) return {};
+  return {
+    "mlflow.chat.tokenUsage": {
+      input_tokens: tokensIn ?? 0,
+      output_tokens: tokensOut ?? 0,
+      cache_write_tokens: cacheWriteTokens ?? 0,
+      cache_read_tokens: cacheReadTokens ?? 0,
+      total_tokens: (tokensIn ?? 0) + (tokensOut ?? 0),
+    },
+  };
+};
+
+// Emit provider only when a model is present — keeps non-LLM spans from
+// getting a misleading provider stamp.
+const providerAttrs = (attrs: RawSpanAttrs): DerivedAttrs =>
+  attrs[GEN_AI_REQUEST_MODEL] !== undefined
+    ? { "mlflow.llm.provider": attrs[GEN_AI_SYSTEM] ?? "unknown" }
+    : {};
+
+// Phase 1: Promote side-effects kind to a top-level MLflow tag for
+// run-level filterability. Only set for writes/external-call nodes so
+// pure-transform spans don't get a misleading tag.
+const sideEffectAttrs = (attrs: RawSpanAttrs): DerivedAttrs => {
+  const seKind = attrs[AI_NODE_SIDE_EFFECTS_KIND] as string | undefined;
+  return seKind === "writes" || seKind === "external-call" ? { "mlflow.side_effects": seKind } : {};
+};
+
+// Phase 2: Promote route confidence attributes to MLflow tags.
+// Enables segmentation of routing decisions by confidence bucket and source.
+const routeConfidenceAttrs = (attrs: RawSpanAttrs): DerivedAttrs => {
+  const out: DerivedAttrs = {};
+  const bucket = attrs[AI_ROUTE_CONFIDENCE_BUCKET] as string | undefined;
+  if (bucket) out["mlflow.route.confidence_bucket"] = bucket;
+  const source = attrs[AI_ROUTE_CONFIDENCE_SOURCE] as string | undefined;
+  if (source) out["mlflow.route.confidence_source"] = source;
+  return out;
+};
+
+// Phase 3: Promote freshness signals to MLflow tags.
+// Enables queries like "find runs with freshness violations" and
+// "find all writes to a specific resource".
+const freshnessAttrs = (attrs: RawSpanAttrs): DerivedAttrs => {
+  const out: DerivedAttrs = {};
+  const violation = attrs[AI_FRESHNESS_VIOLATION] as string | boolean | undefined;
+  if (violation) out["mlflow.freshness.violation"] = true;
+  const resource = attrs[AI_FRESHNESS_WITNESS_RESOURCE] as string | undefined;
+  if (resource) out["mlflow.freshness.resource"] = resource;
+  return out;
+};
+
+// Phase 4: Promote human intervention attributes to MLflow tags.
+// Enables queries like "show me all runs a human edited" and
+// "show me runs where humans intervened at confidence_bucket = 'low'
+// grouped by confidence_source".
+const humanInterventionAttrs = (attrs: RawSpanAttrs): DerivedAttrs => {
+  const action = attrs[AI_HUMAN_ACTION] as string | undefined;
+  if (!action) return {};
+  const out: DerivedAttrs = { "mlflow.human.action": action };
+  const actor = attrs[AI_HUMAN_ACTOR] as string | undefined;
+  if (actor) out["mlflow.human.actor"] = actor;
+  const confBucket = attrs[AI_HUMAN_CONFIDENCE_BUCKET] as string | undefined;
+  if (confBucket) out["mlflow.human.confidence_bucket_at_intervention"] = confBucket;
+  const confSource = attrs[AI_HUMAN_CONFIDENCE_SOURCE] as string | undefined;
+  if (confSource) out["mlflow.human.confidence_source_at_intervention"] = confSource;
+  return out;
+};
+
 export class MlflowOtlpExporter implements SpanExporter {
   private innerPromise: Promise<SpanExporter> | null = null;
   private failedPermanently: Error | null = null;
@@ -349,104 +471,24 @@ export class MlflowOtlpExporter implements SpanExporter {
 
   /** Compute MLflow-shape attributes from a span. Returns the extra attrs or undefined. */
   private computeDerivedAttrs(span: ReadableSpan): SpanAttributes | undefined {
-    const attrs = span.attributes as Record<string, unknown>;
+    const attrs = span.attributes as RawSpanAttrs;
     const events = (span as { events?: TimedEvent[] }).events;
-    const traceId = span.spanContext().traceId;
-    const out: Record<string, unknown> = {};
+    const ctx: EventHandlerCtx = {
+      traceId: span.spanContext().traceId,
+      parseFailureCounter: this.parseFailureCounter,
+    };
 
-    // ai.span.type → mlflow.spanType — enum re-mapping (not a straight copy),
-    // SPAN_TYPE_TO_MLFLOW normalises our casing to MLflow's uppercase constants.
-    // Surface unknown values via fwLogger so silently coercing to CHAIN doesn't
-    // mask a producer typo.
-    const spanType = attrs[AI_SPAN_TYPE] as string | undefined;
-    if (spanType) {
-      const mlflowType = SPAN_TYPE_TO_MLFLOW[spanType];
-      if (!mlflowType) {
-        fwLogger().warn(
-          `[MlflowOtlpExporter] Unknown spanType="${spanType}" → defaulting to CHAIN`,
-        );
-      }
-      out["mlflow.spanType"] = mlflowType ?? "CHAIN";
-    }
-
-    for (const { from, to } of ATTR_MAP) {
-      const value = attrs[from];
-      if (value !== undefined) out[to] = value;
-    }
-
-    const acc: MlflowAccumulator = { spanInputs: {}, spanOutputs: {}, llmCost: null };
-    if (events) {
-      for (const event of events) {
-        const handler = EVENT_HANDLERS_BY_NAME.get(event.name);
-        if (handler) handler(event.attributes ?? {}, acc, { traceId, parseFailureCounter: this.parseFailureCounter });
-      }
-    }
-    if (Object.keys(acc.spanInputs).length > 0) out["mlflow.spanInputs"] = acc.spanInputs;
-    if (Object.keys(acc.spanOutputs).length > 0) out["mlflow.spanOutputs"] = acc.spanOutputs;
-    if (acc.llmCost) out["mlflow.llm.cost"] = acc.llmCost;
-
-    const tokensIn = attrs[GEN_AI_USAGE_INPUT_TOKENS] as number | undefined;
-    const tokensOut = attrs[GEN_AI_USAGE_OUTPUT_TOKENS] as number | undefined;
-    // The provider-side cache split rides alongside the three original figures —
-    // the same figures the span carries as `gen_ai.usage.cache_*` attributes.
-    // Absent defaults to 0, which is exactly what absence means: the enrichment
-    // layer writes the cache attributes unconditionally (zeroes included), so a
-    // pre-caching span and a cache-inert span produce the identical tokenUsage.
-    const cacheWriteTokens = attrs[GEN_AI_USAGE_CACHE_WRITE_TOKENS] as number | undefined;
-    const cacheReadTokens = attrs[GEN_AI_USAGE_CACHE_READ_TOKENS] as number | undefined;
-    if (tokensIn !== undefined || tokensOut !== undefined) {
-      out["mlflow.chat.tokenUsage"] = {
-        input_tokens: tokensIn ?? 0,
-        output_tokens: tokensOut ?? 0,
-        cache_write_tokens: cacheWriteTokens ?? 0,
-        cache_read_tokens: cacheReadTokens ?? 0,
-        total_tokens: (tokensIn ?? 0) + (tokensOut ?? 0),
-      };
-    }
-
-    // Emit provider only when a model is present — keeps non-LLM spans from
-    // getting a misleading provider stamp.
-    if (attrs[GEN_AI_REQUEST_MODEL] !== undefined) {
-      out["mlflow.llm.provider"] = attrs[GEN_AI_SYSTEM] ?? "unknown";
-    }
-
-    // Phase 1: Promote side-effects kind to a top-level MLflow tag for
-    // run-level filterability. Only set for writes/external-call nodes so
-    // pure-transform spans don't get a misleading tag.
-    const seKind = attrs[AI_NODE_SIDE_EFFECTS_KIND] as string | undefined;
-    if (seKind === "writes" || seKind === "external-call") {
-      out["mlflow.side_effects"] = seKind;
-    }
-
-    // Phase 2: Promote route confidence attributes to MLflow tags.
-    // Enables segmentation of routing decisions by confidence bucket and source.
-    const routeConfBucket = attrs[AI_ROUTE_CONFIDENCE_BUCKET] as string | undefined;
-    if (routeConfBucket) out["mlflow.route.confidence_bucket"] = routeConfBucket;
-    const routeConfSource = attrs[AI_ROUTE_CONFIDENCE_SOURCE] as string | undefined;
-    if (routeConfSource) out["mlflow.route.confidence_source"] = routeConfSource;
-
-    // Phase 3: Promote freshness signals to MLflow tags.
-    // Enables queries like "find runs with freshness violations" and
-    // "find all writes to a specific resource".
-    const freshnessViolation = attrs[AI_FRESHNESS_VIOLATION] as string | boolean | undefined;
-    if (freshnessViolation) out["mlflow.freshness.violation"] = true;
-    const freshnessResource = attrs[AI_FRESHNESS_WITNESS_RESOURCE] as string | undefined;
-    if (freshnessResource) out["mlflow.freshness.resource"] = freshnessResource;
-
-    // Phase 4: Promote human intervention attributes to MLflow tags.
-    // Enables queries like "show me all runs a human edited" and
-    // "show me runs where humans intervened at confidence_bucket = 'low'
-    // grouped by confidence_source".
-    const humanAction = attrs[AI_HUMAN_ACTION] as string | undefined;
-    if (humanAction) {
-      out["mlflow.human.action"] = humanAction;
-      const humanActor = attrs[AI_HUMAN_ACTOR] as string | undefined;
-      if (humanActor) out["mlflow.human.actor"] = humanActor;
-      const humanConfBucket = attrs[AI_HUMAN_CONFIDENCE_BUCKET] as string | undefined;
-      if (humanConfBucket) out["mlflow.human.confidence_bucket_at_intervention"] = humanConfBucket;
-      const humanConfSource = attrs[AI_HUMAN_CONFIDENCE_SOURCE] as string | undefined;
-      if (humanConfSource) out["mlflow.human.confidence_source_at_intervention"] = humanConfSource;
-    }
+    const out: DerivedAttrs = {
+      ...spanTypeAttrs(attrs),
+      ...renamedAttrs(attrs),
+      ...eventDerivedAttrs(events, ctx),
+      ...tokenUsageAttrs(attrs),
+      ...providerAttrs(attrs),
+      ...sideEffectAttrs(attrs),
+      ...routeConfidenceAttrs(attrs),
+      ...freshnessAttrs(attrs),
+      ...humanInterventionAttrs(attrs),
+    };
 
     return Object.keys(out).length > 0 ? out : undefined;
   }

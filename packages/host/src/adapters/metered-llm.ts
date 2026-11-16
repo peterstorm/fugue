@@ -43,7 +43,7 @@ const requestBoundaryError = (message: string): FrameworkError => ({
   message: `LLM request boundary: ${message}`,
 });
 
-// The descriptor walk itself is `types/own-data.ts` (shared with the framework's
+// The descriptor walk itself is `framework/src/types/own-data.ts` (shared with the framework's
 // spend/origin/binding boundaries). These wrap it in this module's wording and
 // error type — the mechanism is shared, the diagnostics stay local.
 const snapshotDataObject = (

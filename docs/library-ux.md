@@ -75,7 +75,7 @@ Calling `defineDag` does three things:
    nodes, edge uniqueness per `(from, to)`, else-totality for conditional
    edges, predicate shape, output reachability under unconditional +
    default edges, record-key-vs-`node.id` consistency. Cycles are caught
-   later by `topoSort`. (Per-node `deps`/`optionalDeps` no longer exist —
+   later by `topoSort`. (Per-node `deps`/optionalDeps no longer exist —
    ADR 0017 — so there is no deps↔edges symmetry to check.)
 2. **Throws `DagDefinitionError`** on invalid input — like `zod.parse`. The
    error stack points at the DAG file, surfacing the problem at *module
@@ -151,7 +151,7 @@ class of structural error.
 
 ## 2. The two paths — and the routing rule
 
-`runDag` (`packages/framework/src/executor/executor.ts:66`) inspects the DAG
+`runDag` (`packages/framework/src/executor/run-dag.ts`) inspects the DAG
 and the opts to decide:
 
 ```text
@@ -178,7 +178,10 @@ This is what runs for the simple summarize-a-customer DAG with no retries and
 no human review (e.g. the current `apps/customer-summary` HTTP handler).
 
 ### Loop
-`runDagInner` (`executor.ts:223`):
+Historically this loop lived in runDagInner in the old executor module.
+ADR-0021 removed it: every run now goes through `runDag`
+(`packages/framework/src/executor/run-dag.ts`) into the state-machine kernel.
+The legacy loop was:
 
 1. **Validate DAG shape** (cycles, dup ids, edge endpoints resolve to known
    nodes, every non-source root has a `$input` edge, output node exists).
@@ -190,7 +193,7 @@ no human review (e.g. the current `apps/customer-summary` HTTP handler).
      multi-dep → `{ depId: out }` object).
    - `validateInput` (Zod) → `node.run(input, ctx)` → `validateOutput` (Zod)
      → store output in an in-memory `Map<nodeId, unknown>`.
-   - Wrap each node call in an OTel span via `withNodeSpan`.
+   - Wrap each node call in an OTel span via `withTracedNodeSpan`.
    - Optionally write a checkpoint via `ctx.cache.writeCheckpoint(runId,
      nodeId, value)` — a **hint**, used only for resume, not for retry.
 4. Emit observer events: `run-start`, `node-start`, `node-end`, `node-error`,
@@ -243,7 +246,7 @@ Triggered by retries, HITL, or a durable `JobLike`. The behavior is
 fundamentally different: the run becomes a *typed finite-state machine*
 whose only side effects are mediated through a `JobLike` checkpoint surface.
 
-### The kernel (`state-machine/runner.ts`)
+### The kernel (`packages/framework/src/state-machine/runner.ts`)
 
 A pure machine `Machine<S, E, C>`:
 
@@ -278,12 +281,12 @@ stateProgress(state) => 0..100
 retry never inherits stale counts from a prior worker attempt. The machine
 itself enforces the retry cap; the runner just tracks for trace emission.
 
-### The DAG machine (`dag-runtime/`)
+### The DAG machine (`packages/framework/src/dag-runtime/`)
 
 `compileDagToMachine(dag, input)` produces `{ machine, initialContext,
 initialState: {kind: "pending"} }`.
 
-`DagPhase` is a discriminated union (`dag-runtime/types.ts`):
+`DagPhase` is a discriminated union (`packages/framework/src/dag-runtime/types.ts`):
 
 - `pending` → `running { wave }` → `running { wave: n+1 }` → … →
   `succeeded { output }`
@@ -323,7 +326,7 @@ in the run. Two persistence rules apply on top of the enumeration:
 **`context`** — the `DagMachineContext`. The *accumulated work*:
 - `outputs: Map<nodeId, unknown>` — the bag of intermediate node results.
   This is the "data the graph has gathered so far": the CRM payload from
-  `fetch-customer`, the deal list from `fetch-deals`, the cleaned record
+  `fetch-customer`, the deal list from fetch-deals, the cleaned record
   from `transform`, etc. Keyed by node id.
 - `retries: Map<nodeId, number>` — per-node attempt counter at the
   machine level. Distinct from BullMQ's `attemptsMade` — that's the
@@ -388,7 +391,7 @@ picks it up. That worker:
 1. Reads `data` from the BullMQ job hash → gets the envelope above.
 2. `runStateMachine` re-enters the loop with
    `state = running { wave: 2 }`, `context.outputs` pre-populated with
-   `fetch-customer` and `fetch-deals` results.
+   `fetch-customer` and fetch-deals results.
 3. The executor's `running` branch starts wave 2 (`["transform"]`), runs
    `transform` with its input materialized from
    `context.outputs.get("fetch-customer")`.
@@ -468,7 +471,7 @@ event log are redundant by design:
 
 #### What replay actually does (and doesn't)
 
-The replay function (`state-machine/replay.ts`) is the entire mechanism,
+The replay function (`packages/framework/src/state-machine/replay.ts`) is the entire mechanism,
 and it's deliberately tiny:
 
 ```ts
@@ -491,7 +494,7 @@ re-run any node. It does no I/O. It touches no database, no LLM, no API.
 
 It can do this because each event already carries the data the
 executor produced. Look at `DagEvent`
-(`dag-runtime/types.ts`):
+(`packages/framework/src/dag-runtime/types.ts`):
 
 ```ts
 type DagEvent =
@@ -586,7 +589,7 @@ the right state:
      machine, initial, untilMs)` answers "what was the state just before
      `untilMs`?". Server-side variant: `reader.readEventsBetween(
      queueName, jobId, fromMs, toMs)` pushes the filter into Redis
-     (`XRANGE` with ms-prefixed bounds) so large logs don't transit the
+     (XRANGE with ms-prefixed bounds) so large logs don't transit the
      wire just to be discarded.
 
    ##### How to address a stream
@@ -692,8 +695,8 @@ failed jobs.
 ## 5. Redis — exactly where and how
 
 The framework has a hard architectural rule (FR-082): **only files under
-`queue-bullmq/**`, `cache/redis-cache.ts`, and
-`checkpoint/redis-checkpointer.ts` may import `bullmq` or `ioredis`.**
+`queue-bullmq/**`, `packages/framework/src/cache/redis-cache.ts`, and
+`packages/framework/src/checkpoint/redis-checkpointer.ts` may import `bullmq` or `ioredis`.**
 Everything else — the executor, the state machine, the DAG runtime, the
 queue interfaces — talks to opaque structural interfaces (`JobLike`,
 `MarkerStore`, `EventLogReader`, `Cache`, `Checkpointer`). Whether Redis
@@ -723,7 +726,7 @@ something else is an adapter change, not a core rewrite.
 |---|---|---|---|
 | Job queue | `bull:{queueName}:*` | Lists, ZSets, Hashes (BullMQ-managed) | BullMQ |
 | Job state checkpoint | inside the BullMQ job hash | `HSET` (via `Job.updateData`) | BullMQ |
-| Per-job event log | `events:{queueName}:{jobId}` | **Stream** (`XADD`/`XRANGE`) | `adaptBullMQJob` |
+| Per-job event log | `events:{queueName}:{jobId}` | **Stream** (`XADD`/XRANGE) | `adaptBullMQJob` |
 | Idempotency markers | `scheduler:{taskId}:fired` etc. | String w/ TTL (`SET EX`) | `createRedisMarkerStore` |
 | App-level cache | caller-defined | String w/ TTL | `RedisCache` |
 | Resume checkpoints | `chkpt:{runId}`, `chkpt:{runId}:meta` | Hash + String, TTL 24h | `RedisCheckpointer` |
@@ -741,13 +744,13 @@ adapters that the framework consumes through structural interfaces.
 opens **two** logical Redis usages:
 
 1. **A shared `ioredis` client** — used directly by `adaptBullMQJob` for
-   `XADD`/`XRANGE` against the per-job event log. Configured with
+   `XADD`/XRANGE against the per-job event log. Configured with
    `maxRetriesPerRequest: null`, `enableReadyCheck: false`,
    `lazyConnect: false` (BullMQ's recommended settings for a long-lived
    client used inside workers).
 2. **BullMQ's internal connection pool** — created when you instantiate
    `new Queue` and `new Worker`. BullMQ manages this internally; it uses
-   blocking commands (`BRPOPLPUSH`, `BZPOPMIN`) which is why it needs its
+   blocking commands (BRPOPLPUSH, BZPOPMIN) which is why it needs its
    own pool.
 
 #### Producer side
@@ -778,7 +781,7 @@ backend.createWorker("summarize", async (jobLike) => {
 |---|---|
 | `data` (getter) | `deserializeValue(job.data)` — no Redis hit; the worker already fetched the job's hash into memory when it picked the job up. Returns the `{state, context}` envelope (see §4 "checkpoint envelope") |
 | `updateData(d)` | `job.updateData(serializeValue(d))` → `HSET bull:{queueName}:{jobId} data <json>` — overwrites the `data` field on the per-job hash with the new envelope |
-| `updateProgress(pct)` | `job.updateProgress(pct)` → `HSET bull:{queueName}:{jobId} progress <pct>` — surfaces in BullMQ Board and `QueueEvents` listeners |
+| `updateProgress(pct)` | `job.updateProgress(pct)` → `HSET bull:{queueName}:{jobId} progress <pct>` — surfaces in BullMQ Board and QueueEvents listeners |
 | `appendEvent(e)` | direct `redis.xadd` against the shared connection: `XADD events:{queueName}:{jobId} MAXLEN ~ N * type <t> payload <json>` (see §5.2) |
 
 A real BullMQ job hash mid-run might look like:
@@ -797,7 +800,7 @@ HGETALL bull:summarize:run-abc-123
 The `data` field is the entire checkpoint envelope. `updateData` is a
 single-field overwrite — BullMQ doesn't merge, the runner sends the full
 new envelope every transition. That's why the envelope must be
-self-contained and why `serialize/deserialize` has to round-trip every
+self-contained and why `serializeValue`/`deserializeValue` has to round-trip every
 field type the context can carry.
 
 #### Failure path
@@ -870,7 +873,7 @@ XADD events:{queueName}:{jobId} MAXLEN ~ 10000 ${recordedAtMs}-* type <type> pay
   exact `MAXLEN 10000` (slower; rarely needed).
 - **`${recordedAtMs}-*`** — entry ID. The millisecond portion is **pinned
   to the envelope's `recordedAtMs`**; Redis auto-assigns the seq portion
-  (`-0`, `-1`, …) on collision. This ensures `XRANGE` bounds (used by
+  (`-0`, `-1`, …) on collision. This ensures XRANGE bounds (used by
   `readEventsBetween`, see below) align exactly with `recordedAtMs` —
   filtering by entry ID *is* filtering by `recordedAtMs`.
 - **Two fields**: `type` (string, derived from `event.type` for cheap
@@ -963,7 +966,7 @@ the state at `fromMs`." Useful for diff-style queries paired with two
   rotation or a manual `DEL`.
 
 #### Why Streams (not Lists, not Pub/Sub)
-- `LPUSH`/`LRANGE` doesn't give server-assigned ordered IDs — we'd have to
+- LPUSH/LRANGE doesn't give server-assigned ordered IDs — we'd have to
   invent them and risk clock skew.
 - Pub/Sub is fire-and-forget — no replay possible for a worker that just
   came online.
@@ -985,7 +988,7 @@ exists(key):           Promise<boolean>  // EXISTS key
 delete(key):           Promise<void>     // DEL key
 ```
 
-Used by `CronScheduler` (`scheduler/scheduler.ts`) for two key families:
+Used by `CronScheduler` (`packages/framework/src/scheduler/scheduler.ts`) for two key families:
 
 - **`scheduler:{taskId}:fired`** — set when the scheduler enqueues a task.
   Prevents duplicate enqueue when timers race after worker restarts or
@@ -1470,7 +1473,7 @@ compile time to every node forward-reachable from a wave-0 entry along
 decisions expand the active set along the chosen branch (transitively,
 through unconditional descendants).
 
-`runWave` filters to the active subset before dispatching. Pruned nodes:
+runWave filters to the active subset before dispatching. Pruned nodes:
 
 - never execute,
 - never appear in `outputs`,
@@ -1490,7 +1493,7 @@ The framework emits two new observer events for routing visibility:
 
 ### 8.3 Derived per-node input shape
 
-Per ADR 0017, nodes carry no `deps`/`optionalDeps` fields — the framework
+Per ADR 0017, nodes carry no `deps`/optionalDeps fields — the framework
 derives each node's incoming wiring from the edges at compile time. For
 every node, edges resolve into two buckets:
 

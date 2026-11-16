@@ -10,7 +10,7 @@ Accepted — Implemented
 
 The customer-summary application has a single evaluation harness that scores a fixed
 set of cases (currently 25) with LLM-judge scorers and records results through
-`mlflow.evaluate()`. As Azure AI Foundry becomes a first-class observability
+mlflow.evaluate(). As Azure AI Foundry becomes a first-class observability
 destination for traces (recorded separately in the trace-export decision), engineers
 need their *evaluation* scores to land in the Foundry Evaluations view too — otherwise
 quality assessment lives in a different tool than the trace view it should sit beside.
@@ -18,7 +18,7 @@ quality assessment lives in a different tool than the trace view it should sit b
 The forces at play:
 
 - **Two scoring backends, one notion of "the cases."** Foundry-native scoring uses the
-  `azure-ai-evaluation` SDK; MLflow scoring uses `mlflow.evaluate()`. Both must score the
+  azure-ai-evaluation SDK; MLflow scoring uses mlflow.evaluate(). Both must score the
   *same* cases with the *same* judge so a backend switch never silently changes what is
   being measured or what "good" means.
 - **MLflow must not regress.** MLflow stays the default and its output must remain
@@ -38,7 +38,7 @@ parity-checking are wired so the backends cannot drift on case selection or aggr
 
 ## Options Considered
 
-1. **Separate `run_foundry.py` script duplicating the harness**
+1. **Separate run_foundry.py script duplicating the harness**
    - Pros: Foundry path fully isolated from MLflow path; no risk of touching the existing
      entrypoint; conceptually simple to start.
    - Cons: Duplicates case loading, result collection, and aggregation across two scripts.
@@ -59,7 +59,7 @@ parity-checking are wired so the backends cannot drift on case selection or aggr
    - Pros: The pure logic — case parsing, eval-data assembly, aggregate computation, and
      results-table formatting — is written once and shared by both backends. Only the scoring
      call and the result-shape adapter differ. Because both backends consume the identical
-     list of `EvalResult` cases and the identical aggregation, they cannot diverge on *what*
+     list of EvalResult cases and the identical aggregation, they cannot diverge on *what*
      is scored or *how* scores are aggregated — only on the scoring itself, which is exactly
      what the parity check is meant to compare. MLflow stays byte-for-byte unchanged because
      the MLflow branch is the pre-existing code path, untouched.
@@ -69,7 +69,7 @@ parity-checking are wired so the backends cannot drift on case selection or aggr
 
 ## Decision
 
-**Add a `backend` selector that branches `run_evaluation()` at the single scoring I/O seam
+**Add a `backend` selector that branches run_evaluation() at the single scoring I/O seam
 between the existing MLflow path and a new Foundry-native path, with both paths consuming
 the same cases and reusing the same functional core and judge credentials.**
 
@@ -80,39 +80,39 @@ Selection and dispatch:
 - The allowed set is fixed as `mlflow | foundry | both`
   (`ALLOWED_BACKENDS = ("mlflow", "foundry", "both")`). The selector is validated against
   this set **before any dispatch**. An unknown value — including an `EVAL_BACKEND` typo such
-  as `foundryy` that bypasses argparse's `choices` because it arrives as the flag's default —
+  as foundryy that bypasses argparse's `choices` because it arrives as the flag's default —
   **fails loud** with a clear error and a non-zero exit. There is no silent fallback to
   MLflow on an unrecognized value.
 
 Shared functional core vs. divergent seam:
 
-- Shared (pure, written once): case parsing (`parse_cases`), eval-data assembly
-  (`build_eval_data`), and results-table formatting (`format_results_table`).
+- Shared (pure, written once): case parsing (parse_cases), eval-data assembly
+  (build_eval_data), and results-table formatting (format_results_table).
 - Shared *semantics*, per-backend implementation: aggregate computation produces the same
-  `AggregateResult`, applies the same ≥4.0 threshold, and is fail-closed on missing scorers —
-  but is written once per backend (`compute_aggregate` for MLflow, `compute_aggregate_foundry`
+  AggregateResult, applies the same ≥4.0 threshold, and is fail-closed on missing scorers —
+  but is written once per backend (compute_aggregate for MLflow, compute_aggregate_foundry
   in `foundry_eval.py`) because the two SDKs emit different metric-key shapes
   (`<name>/score/mean` vs. `<name>.<name>`). The divergence is a key-shape adapter, not a
   difference in scoring policy.
 - Divergent (the only difference in *behavior* between backends): the scoring call and the
   adapter that reshapes the SDK's per-case result into the harness's common result shape. The
-  MLflow branch is the unchanged `mlflow.evaluate()` path; the Foundry branch is
-  `run_evaluation_foundry()`, built on `azure-ai-evaluation`. Both reuse the existing Azure
+  MLflow branch is the unchanged mlflow.evaluate() path; the Foundry branch is
+  run_evaluation_foundry(), built on azure-ai-evaluation. Both reuse the existing Azure
   OpenAI judge-model credentials.
 
 Files:
 
 - `apps/customer-summary/eval/run.py` — selector, validation, and dispatch
   (including the `both` mode below).
-- `apps/customer-summary/eval/foundry_eval.py` — `run_evaluation_foundry()` and the
-  result-shape adapter over `azure-ai-evaluation`.
-- `apps/customer-summary/eval/parity.py` — `compute_parity`, `parity_within_tolerance`,
-  and `format_parity_table`, with `PARITY_TOLERANCE = 0.5`.
+- `apps/customer-summary/eval/foundry_eval.py` — run_evaluation_foundry() and the
+  result-shape adapter over azure-ai-evaluation.
+- `apps/customer-summary/eval/parity.py` — compute_parity, parity_within_tolerance,
+  and format_parity_table, with `PARITY_TOLERANCE = 0.5`.
 
 As-built additions beyond the original plan (making parity enforceable end-to-end):
 
 - **A third `--backend=both` mode.** Beyond `mlflow` and `foundry`, `both` runs *both*
-  backends over the same cases, computes per-scorer deltas (`compute_parity`), prints a
+  backends over the same cases, computes per-scorer deltas (compute_parity), prints a
   parity table, and decides a verdict via `parity_within_tolerance(deltas, tol=0.5)`. This is
   what turns the ±0.5 tolerance from a unit-tested function into an enforced, end-to-end
   property: a single command actually exercises both scorers against the same input and
@@ -123,7 +123,7 @@ As-built additions beyond the original plan (making parity enforceable end-to-en
   comparable scorer, `both` refuses to report a vacuous "parity passed" over an empty set and
   exits non-zero. Parity over zero scorers is meaningless and is treated as a failure.
 - **The Foundry adapter fails loud on unexpected SDK result shapes.** When the
-  `azure-ai-evaluation` result does not match the expected shape — e.g., requested scorers
+  azure-ai-evaluation result does not match the expected shape — e.g., requested scorers
   are missing, or zero expected scorers matched while metrics were non-empty — the adapter
   fails closed: it surfaces both the requested-but-missing scorers and the actual keys on
   stderr and returns a FAILED aggregate (`overall_mean=0.0, passed=False`), rather than
@@ -132,9 +132,9 @@ As-built additions beyond the original plan (making parity enforceable end-to-en
 Invariants:
 
 - Both backends score the identical `list[EvalResult]` (the same cases) and run through
-  equivalent aggregation semantics (same `AggregateResult`, same ≥4.0 threshold, same
-  fail-closed-on-missing-scorer policy) — the per-backend `compute_aggregate` /
-  `compute_aggregate_foundry` differ only in the SDK metric-key shape they parse, never in
+  equivalent aggregation semantics (same AggregateResult, same ≥4.0 threshold, same
+  fail-closed-on-missing-scorer policy) — the per-backend compute_aggregate /
+  compute_aggregate_foundry differ only in the SDK metric-key shape they parse, never in
   scoring policy or case selection.
 - The MLflow path is the pre-existing code path, unmodified.
 - An unrecognized backend value never reaches dispatch; it fails loud first.
@@ -167,7 +167,7 @@ Invariants:
 - Running `--backend=both` doubles judge-model invocations for a given run (each case is
   scored twice), with the associated cost and time. Accepted: `both` is a deliberate
   parity-verification / migration mode, not the default run mode.
-- The Foundry path depends on the shape of `azure-ai-evaluation` results; an SDK upgrade that
+- The Foundry path depends on the shape of azure-ai-evaluation results; an SDK upgrade that
   changes that shape will trip the fail-loud adapter and require an adapter update. Accepted
   as the correct failure mode — a loud break is preferable to silently emitting empty,
   passing-shaped results.

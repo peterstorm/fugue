@@ -214,8 +214,8 @@ const purposeComment = (node: AuthoredNode): string => `// ${node.id} — ${comm
  * registration) but NOT the body you are instructed to implement — resolving
  * the "DO NOT EDIT" ⇄ "implement the placeholders" contradiction.
  *
- * CROSS-REPO COUPLING SURFACE — loom's `fugue-generated-integrity` engine rule
- * (loom/engine `src/linter/programmatic/fugue-generated-integrity.ts`) is a
+ * CROSS-REPO COUPLING SURFACE — loom's fugue-generated-integrity engine rule
+ * (loom/engine src/linter/programmatic/fugue-generated-integrity.ts) is a
  * consumer of, and depends byte-for-byte on, all four of:
  *   1. the banner line format `// @fugue-integrity sha256:<64-hex>` (lowercase
  *      hex, on its own line — stamped by `stampGenerated` below);

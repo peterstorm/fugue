@@ -5,7 +5,7 @@
  * Uses vendor-neutral OTel primitives: flat attributes + span events.
  * Backend-specific exporters (e.g., MLflow) transform these into their format.
  */
-import { trace } from "@opentelemetry/api";
+import { trace, type Span } from "@opentelemetry/api";
 import { costBreakdownUsd, costRatesFor, isPricedModel } from "../llm/cost.js";
 import type { CacheTtl, ConversationCachePolicy } from "../types/llm.js";
 import type { TokenUsage } from "../types/token-usage.js";
@@ -57,6 +57,91 @@ export interface EnrichLlmSpanOpts {
   readonly contentFilter?: ContentFilter | null;
 }
 
+type CostBreakdown = ReturnType<typeof costBreakdownUsd>;
+
+// Flat attributes — OTel GenAI semconv for model/provider/usage, framework-owned
+// ai.llm.cost_usd for cost (not covered by the spec).
+const setRequestAttributes = (span: Span, opts: EnrichLlmSpanOpts, costUsd: number): void => {
+  span.setAttribute(GEN_AI_REQUEST_MODEL, opts.model);
+  span.setAttribute(GEN_AI_SYSTEM, opts.provider ?? "unknown");
+  span.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, opts.usage.tokensIn);
+  span.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, opts.usage.tokensOut);
+  span.setAttribute(GEN_AI_USAGE_CACHE_WRITE_TOKENS, opts.usage.cacheWriteTokens);
+  span.setAttribute(GEN_AI_USAGE_CACHE_READ_TOKENS, opts.usage.cacheReadTokens);
+  span.setAttribute(AI_LLM_COST_USD, costUsd);
+  span.setAttribute(AI_LLM_COST_PRICED, isPricedModel(opts.model));
+  if (opts.cachePolicy !== undefined) {
+    span.setAttribute(AI_PROMPT_CACHE_POLICY, opts.cachePolicy);
+    // Only meaningful for a call that ASKED for caching: for `none` there is
+    // nothing to be effective or ineffective about.
+    if (opts.cachePolicy !== "none") {
+      span.setAttribute(AI_PROMPT_CACHE_EFFECTIVE, !isCacheInert(opts.usage));
+    }
+  }
+  if (opts.promptHash !== undefined) span.setAttribute("ai.prompt_hash", opts.promptHash);
+};
+
+/**
+ * One encoding of the filter-or-redact rule the three GenAI message events
+ * share: when a content filter is wired the (filtered) text is emitted under
+ * `<field>`; when it is not, the text NEVER leaves the process and the event
+ * carries `<field>_redacted` plus the original length instead.
+ *
+ * `field` varies (`content` for system/user, `reasoning_content` for the
+ * assistant message) which is why this takes it as a parameter rather than
+ * hardcoding `content` — three copies of the ternary is how the redaction
+ * rule and the length disclosure drift apart on the field that gets missed.
+ */
+const contentAttrs = (
+  filter: ContentFilter | null,
+  field: "content" | "reasoning_content",
+  text: string,
+): Record<string, string | number> =>
+  filter
+    ? { [field]: filter(text) }
+    : { [`${field}_redacted`]: "true", [`${field}_chars`]: text.length };
+
+// OTel GenAI semconv: emit prompts as `gen_ai.system.message` and
+// `gen_ai.user.message` events. Content gated by content filter (PII).
+// The `prompt_name` framework field rides along as an extra attribute on
+// the system message — not part of the spec, but harmless and useful.
+const addPromptEvents = (span: Span, opts: EnrichLlmSpanOpts, filter: ContentFilter | null): void => {
+  span.addEvent(EVENT_GEN_AI_SYSTEM_MESSAGE, {
+    role: "system",
+    ...contentAttrs(filter, "content", opts.system),
+    "ai.prompt_name": opts.promptName ?? "",
+  });
+  span.addEvent(EVENT_GEN_AI_USER_MESSAGE, {
+    role: "user",
+    ...contentAttrs(filter, "content", opts.user),
+  });
+};
+
+// Structured event: cost breakdown (framework-specific — not in GenAI spec).
+// `input_cost` stays the whole prompt side so existing consumers are
+// unaffected; the two cache components refine it.
+const addCostEvent = (span: Span, cost: CostBreakdown): void => {
+  span.addEvent(EVENT_LLM_COST, {
+    input_cost: cost.uncachedInput + cost.cacheWrite + cost.cacheRead,
+    output_cost: cost.output,
+    cache_write_cost: cost.cacheWrite,
+    cache_read_cost: cost.cacheRead,
+    total_cost: cost.total,
+  });
+};
+
+// Thinking/reasoning — emit as a `gen_ai.assistant.message` event with a
+// `reasoning_content` body field. The OTel spec doesn't yet standardize the
+// reasoning field, so this is the framework's convention; consumers that
+// know GenAI semconv will still see the event and the role.
+const addThinkingEvent = (span: Span, thinking: string, filter: ContentFilter | null): void => {
+  span.setAttribute(AI_LLM_HAS_THINKING, true);
+  span.addEvent(EVENT_GEN_AI_ASSISTANT_MESSAGE, {
+    role: "assistant",
+    ...contentAttrs(filter, "reasoning_content", thinking),
+  });
+};
+
 /** Enrich the currently-active OTel span with LLM request/response details. */
 export const enrichLlmSpan = (opts: EnrichLlmSpanOpts): void => {
   const otelSpan = trace.getActiveSpan();
@@ -67,81 +152,9 @@ export const enrichLlmSpan = (opts: EnrichLlmSpanOpts): void => {
   // learned the multipliers, and no test would have caught the divergence.
   const cost = costBreakdownUsd(costRatesFor(opts.model), opts.usage, opts.cacheWriteTtl);
 
-  // Flat attributes — OTel GenAI semconv for model/provider/usage, framework-owned
-  // ai.llm.cost_usd for cost (not covered by the spec).
-  otelSpan.setAttribute(GEN_AI_REQUEST_MODEL, opts.model);
-  otelSpan.setAttribute(GEN_AI_SYSTEM, opts.provider ?? "unknown");
-  otelSpan.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, opts.usage.tokensIn);
-  otelSpan.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, opts.usage.tokensOut);
-  otelSpan.setAttribute(GEN_AI_USAGE_CACHE_WRITE_TOKENS, opts.usage.cacheWriteTokens);
-  otelSpan.setAttribute(GEN_AI_USAGE_CACHE_READ_TOKENS, opts.usage.cacheReadTokens);
-  otelSpan.setAttribute(AI_LLM_COST_USD, cost.total);
-  otelSpan.setAttribute(AI_LLM_COST_PRICED, isPricedModel(opts.model));
-  if (opts.cachePolicy !== undefined) {
-    otelSpan.setAttribute(AI_PROMPT_CACHE_POLICY, opts.cachePolicy);
-    // Only meaningful for a call that ASKED for caching: for `none` there is
-    // nothing to be effective or ineffective about.
-    if (opts.cachePolicy !== "none") {
-      otelSpan.setAttribute(AI_PROMPT_CACHE_EFFECTIVE, !isCacheInert(opts.usage));
-    }
-  }
-  if (opts.promptHash !== undefined) otelSpan.setAttribute("ai.prompt_hash", opts.promptHash);
-
+  setRequestAttributes(otelSpan, opts, cost.total);
   const filter = resolveContentFilter(opts);
-
-  /**
-   * One encoding of the filter-or-redact rule the three GenAI message events
-   * share: when a content filter is wired the (filtered) text is emitted under
-   * `<field>`; when it is not, the text NEVER leaves the process and the event
-   * carries `<field>_redacted` plus the original length instead.
-   *
-   * `field` varies (`content` for system/user, `reasoning_content` for the
-   * assistant message) which is why this takes it as a parameter rather than
-   * hardcoding `content` — three copies of the ternary is how the redaction
-   * rule and the length disclosure drift apart on the field that gets missed.
-   */
-  const contentAttrs = (
-    field: "content" | "reasoning_content",
-    text: string,
-  ): Record<string, string | number> =>
-    filter
-      ? { [field]: filter(text) }
-      : { [`${field}_redacted`]: "true", [`${field}_chars`]: text.length };
-
-  // OTel GenAI semconv: emit prompts as `gen_ai.system.message` and
-  // `gen_ai.user.message` events. Content gated by content filter (PII).
-  // The `prompt_name` framework field rides along as an extra attribute on
-  // the system message — not part of the spec, but harmless and useful.
-  otelSpan.addEvent(EVENT_GEN_AI_SYSTEM_MESSAGE, {
-    role: "system",
-    ...contentAttrs("content", opts.system),
-    "ai.prompt_name": opts.promptName ?? "",
-  });
-  otelSpan.addEvent(EVENT_GEN_AI_USER_MESSAGE, {
-    role: "user",
-    ...contentAttrs("content", opts.user),
-  });
-
-  // Structured event: cost breakdown (framework-specific — not in GenAI spec).
-  // `input_cost` stays the whole prompt side so existing consumers are
-  // unaffected; the two cache components refine it.
-  otelSpan.addEvent(EVENT_LLM_COST, {
-    input_cost: cost.uncachedInput + cost.cacheWrite + cost.cacheRead,
-    output_cost: cost.output,
-    cache_write_cost: cost.cacheWrite,
-    cache_read_cost: cost.cacheRead,
-    total_cost: cost.total,
-  });
-
-  // Thinking/reasoning — emit as a `gen_ai.assistant.message` event with a
-  // `reasoning_content` body field. The OTel spec doesn't yet standardize the
-  // reasoning field, so this is the framework's convention; consumers that
-  // know GenAI semconv will still see the event and the role.
-  if (opts.thinking) {
-    otelSpan.setAttribute(AI_LLM_HAS_THINKING, true);
-    otelSpan.addEvent(EVENT_GEN_AI_ASSISTANT_MESSAGE, {
-      role: "assistant",
-      ...contentAttrs("reasoning_content", opts.thinking),
-    });
-  }
+  addPromptEvents(otelSpan, opts, filter);
+  addCostEvent(otelSpan, cost);
+  if (opts.thinking) addThinkingEvent(otelSpan, opts.thinking, filter);
 };

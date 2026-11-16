@@ -12,7 +12,7 @@ Two `QueueBackend` implementations live side by side — `createInMemoryBackend`
 Despite that shared contract, the two backends disagreed on what producers must enqueue:
 
 - **BullMQ** (`adaptBullMQJob`) expected `bullJob.data: { state, context }` — i.e. the producer enqueued the envelope, the worker saw the envelope.
-- **In-memory** (`queue/in-memory.ts` drain loop) wrapped whatever was enqueued *into* a synthetic envelope: `createInMemoryJob({ state: entry.data, context: undefined })`. So the producer enqueued raw state, the worker saw `{ state: rawState, context: undefined }`.
+- **In-memory** (`packages/framework/src/queue/in-memory.ts` drain loop) wrapped whatever was enqueued *into* a synthetic envelope: `createInMemoryJob({ state: entry.data, context: undefined })`. So the producer enqueued raw state, the worker saw `{ state: rawState, context: undefined }`.
 
 Concretely: a producer calling `queue.enqueue("j1", { state: "x", context: { y: 1 } })` against the in-memory backend got delivered to the worker as `{ state: { state: "x", context: { y: 1 } }, context: undefined }` — double-wrapped. Against BullMQ the same call delivered `{ state: "x", context: { y: 1 } }` — correct.
 
@@ -82,8 +82,8 @@ A typed contract means the call site `queue.enqueue("j1", "hello")` does not com
 
 ## Migration
 
-- `queue/types.ts` — `QueueHandle<J>` → `QueueHandle<S, C>`; `createQueue<J>` → `createQueue<S, C>`.
-- `queue/in-memory.ts` — drain loop passes `entry.data` directly; `QueueEntry` typed as `{ state: S; context: C }`.
-- `queue-bullmq/adapter.ts` — `createQueue<J>` → `createQueue<S, C>`; enqueue parameter typed as `{state: S; context: C}` (BullMQ's actual shape).
+- `packages/framework/src/queue/types.ts` — `QueueHandle<J>` → `QueueHandle<S, C>`; `createQueue<J>` → `createQueue<S, C>`.
+- `packages/framework/src/queue/in-memory.ts` — drain loop passes `entry.data` directly; `QueueEntry` typed as `{ state: S; context: C }`.
+- `packages/framework/src/queue-bullmq/adapter.ts` — `createQueue<J>` → `createQueue<S, C>`; enqueue parameter typed as `{state: S; context: C}` (BullMQ's actual shape).
 - All in-memory queue tests rewritten to enqueue envelopes (e.g. `enqueue("j1", { state: "hello", context: undefined })`).
 - BullMQ adapter tests updated to use the two-generic form `createQueue<S, C>` instead of `createQueue<{state: S; context: C}>`.
