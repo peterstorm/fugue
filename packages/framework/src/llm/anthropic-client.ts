@@ -280,7 +280,7 @@ export class AnthropicLlmClient implements LlmClient {
 
       // The turn's usage rides along on both terminal error arms below so a
       // malformed success / schema failure still attributes the burned tokens
-      // (FR-W0-001, extended to cached tokens by FR-PC-006) — mirrors the
+      // (FR-001, extended to cached tokens by FR-PC-006) — mirrors the
       // sendWithTools arms.
       const usage = anthropicUsage(response.usage);
 
@@ -396,7 +396,7 @@ export class AnthropicLlmClient implements LlmClient {
         // final answer are unreliable and retrying the identical request hits
         // the identical cap, so it is a deterministic (non-retriable) failure
         // (mirrors sendStructured). The turn's own usage rides along so the
-        // loop still attributes the burned tokens (FR-W0-001).
+        // loop still attributes the burned tokens (FR-001).
         if (response.stop_reason === "max_tokens") {
           return err({
             kind: "node-crash",

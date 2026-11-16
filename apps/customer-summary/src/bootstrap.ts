@@ -263,40 +263,72 @@ export const buildCheckpointWriter = (cp: Checkpointer): CheckpointWriter => ({
 });
 
 /**
- * The Redis-backed collaborators, all-or-nothing: they are only usable
- * together (the /summarize handler refuses traffic unless BOTH checkpointer
- * and checkpointWriter are set), so the type admits every one wired or every
- * one `null`, never a mix.
+ * Redis at bootstrap, as a tagged union (the sibling of {@link LlmSetup}).
+ *
+ * `connected`: the client connected and every Redis-backed collaborator was
+ * built from it — they exist together or not at all. `isHealthy` is the
+ * event-driven flag the readiness probe reads lazily.
+ *
+ * `unavailable`: connecting (or building a collaborator) failed. There are no
+ * collaborators, so the /summarize handler refuses traffic and readiness is
+ * not-ready for the life of the process — even if the client later reconnects,
+ * since nothing was wired to it. `redis` is the constructed-unconnected client
+ * held only so shutdown disconnects it, or `null` if construction itself threw.
  */
-type RedisCollaborators =
+export type RedisSetup =
   | {
+      readonly kind: "connected";
+      readonly redis: Redis;
+      readonly isHealthy: () => boolean;
       readonly contextCache: ContextCache;
       readonly checkpointWriter: CheckpointWriter;
       readonly checkpointer: Checkpointer;
     }
-  | {
-      readonly contextCache: null;
-      readonly checkpointWriter: null;
-      readonly checkpointer: null;
-    };
+  | { readonly kind: "unavailable"; readonly redis: Redis | null };
 
-const NO_REDIS_COLLABORATORS: RedisCollaborators = Object.freeze({
-  contextCache: null,
-  checkpointWriter: null,
-  checkpointer: null,
-});
+/** The collaborators `AppDeps` takes, `null` for every one when Redis is unavailable. */
+const redisCollaborators = (
+  setup: RedisSetup,
+): Pick<AppDeps, "cache" | "checkpointWriter" | "checkpointer"> =>
+  setup.kind === "connected"
+    ? { cache: setup.contextCache, checkpointWriter: setup.checkpointWriter, checkpointer: setup.checkpointer }
+    : { cache: null, checkpointWriter: null, checkpointer: null };
+
+/** The Redis-backed collaborators a `connected` setup carries, built together. */
+export type RedisCollaborators = Pick<
+  Extract<RedisSetup, { readonly kind: "connected" }>,
+  "contextCache" | "checkpointWriter" | "checkpointer"
+>;
+
+/** Build every Redis-backed collaborator from one connected client. */
+const buildRedisCollaborators = (client: Redis, log: AppLogger): RedisCollaborators => {
+  const checkpointer = new RedisCheckpointer(client);
+  return {
+    contextCache: buildContextCache(new RedisCache(client), log),
+    checkpointWriter: buildCheckpointWriter(checkpointer),
+    checkpointer,
+  };
+};
 
 /**
- * When Redis is unreachable at bootstrap the collaborators are all `null` and
- * `isHealthy()` is false. BUT `redis` still holds the constructed-unconnected
- * client — `redis !== null` is NOT a liveness signal; read `isHealthy()`
- * (or the nullability of the collaborators) instead.
+ * Test/override seams for {@link setUpRedis} (the sibling of
+ * {@link TracingSeams}). Each defaults to the real construction path, so
+ * production passes none. Tests inject a client that connects without a server
+ * and a throwing collaborator factory, so the `unavailable` and health-flag
+ * paths run with no live Redis.
  */
-type RedisSetup = RedisCollaborators & {
-  readonly redis: Redis | null;
-  /** Event-driven health flag read lazily by the readiness probe. */
-  readonly isHealthy: () => boolean;
-};
+export interface RedisSeams {
+  /** Construct the lazy (not yet connected) client for `url`. */
+  readonly createClient?: (url: string) => Redis;
+  readonly buildCollaborators?: (client: Redis, log: AppLogger) => RedisCollaborators;
+}
+
+const createRedisClient = (url: string): Redis =>
+  new Redis(url, {
+    maxRetriesPerRequest: 1,
+    lazyConnect: true,
+    connectTimeout: 3000,
+  });
 
 /**
  * Redis is a hard dependency: it backs the checkpointer (durable resume) and
@@ -304,47 +336,44 @@ type RedisSetup = RedisCollaborators & {
  * the app, but readiness MUST report not-ready so traffic does not land here.
  * The /summarize handler also rejects requests when checkpointer is null.
  */
-export const setUpRedis = async (config: Config, log: AppLogger): Promise<RedisSetup> => {
-  let collaborators: RedisCollaborators = NO_REDIS_COLLABORATORS;
+export const setUpRedis = async (
+  config: Pick<Config, "REDIS_URL">,
+  log: AppLogger,
+  seams: RedisSeams = {},
+): Promise<RedisSetup> => {
+  const createClient = seams.createClient ?? createRedisClient;
+  const buildCollaborators = seams.buildCollaborators ?? buildRedisCollaborators;
   let redis: Redis | null = null;
-  let redisHealthy = false;
   try {
-    redis = new Redis(config.REDIS_URL, {
-      maxRetriesPerRequest: 1,
-      lazyConnect: true,
-      connectTimeout: 3000,
-    });
+    const client = createClient(config.REDIS_URL);
+    redis = client;
     // Event-driven health: ioredis emits "error" on disconnect AND on operation
     // failures. Without a listener, "Unhandled error event" floods stderr and
-    // readiness has to ping per request. Authoritative state lives in flags
+    // readiness has to ping per request. Authoritative state lives in a flag
     // updated by ready/end/error events.
-    redis.on("error", (e: unknown) => {
+    let healthy = false;
+    client.on("error", (e: unknown) => {
       log.error(`[redis] connection error: ${e instanceof Error ? e.message : String(e)}`);
-      redisHealthy = false;
+      healthy = false;
     });
-    redis.on("ready", () => {
-      redisHealthy = true;
+    client.on("ready", () => {
+      healthy = true;
     });
-    redis.on("end", () => {
-      redisHealthy = false;
+    client.on("end", () => {
+      healthy = false;
     });
-    await redis.connect();
+    await client.connect();
     log.info(`Redis connected at ${config.REDIS_URL}`);
-    redisHealthy = true;
+    healthy = true;
 
-    // All-or-nothing: every collaborator is built first and published in ONE
-    // assignment, so a failure at any construction step leaves the
-    // all-`null` default in place and none of them half-wired.
-    const checkpointer = new RedisCheckpointer(redis);
-    collaborators = {
-      contextCache: buildContextCache(new RedisCache(redis), log),
-      checkpointWriter: buildCheckpointWriter(checkpointer),
-      checkpointer,
-    };
+    // Every collaborator is built before the `connected` value exists, so a
+    // failure at any construction step lands in `unavailable` with none of them.
+    const collaborators = buildCollaborators(client, log);
+    return { kind: "connected", redis: client, isHealthy: () => healthy, ...collaborators };
   } catch (e) {
     log.warn("Redis connection failed — running without cache/checkpointing:", e);
+    return { kind: "unavailable", redis };
   }
-  return { ...collaborators, redis, isHealthy: () => redisHealthy };
 };
 
 /**
@@ -407,16 +436,17 @@ const selectLlmClient = (
   return { kind: "fake-fallback", llm: new FakeLlmClient(new Map()) };
 };
 
+/** The reasoning setting the app passes to the LLM, `undefined` when off. */
+type Thinking = AppDeps["thinking"];
+
 /**
  * ENABLE_THINKING is only honored by providers whose client implements reasoning.
  * Anthropic client currently ignores `req.thinking` (extended-thinking integration
  * pending), so passing it through would be a silent no-op visible only in the trace
- * attribute. Refuse it explicitly here so config matches behavior.
+ * attribute. Refuse it explicitly here so config matches behavior. Called by the
+ * bootstrap shell (it logs the refusal) before the app's deps are assembled.
  */
-const resolveThinking = (
-  config: Config,
-  log: AppLogger,
-): { type: "enabled"; budgetTokens: number } | undefined => {
+const resolveThinking = (config: Config, log: AppLogger): Thinking => {
   if (!config.ENABLE_THINKING) return undefined;
   const provider = config.LLM_PROVIDER;
   const providerSupportsThinking = provider === "openai" || provider === "azure";
@@ -463,9 +493,10 @@ export const buildHealth = (
   return {
     // Always defined: if Redis was never reachable at bootstrap, we still
     // need readiness to report not-ready (otherwise k8s leaves the pod in
-    // service while checkpointer/cache are null). Flag is event-driven —
-    // no per-request ping (would add round-trip on every k8s probe).
-    checkRedis: async () => redisSetup.isHealthy() && redisSetup.redis !== null,
+    // service while checkpointer/cache are null) — `unavailable` is never
+    // ready. Flag is event-driven — no per-request ping (would add
+    // round-trip on every k8s probe).
+    checkRedis: async () => redisSetup.kind === "connected" && redisSetup.isHealthy(),
     // Readiness gate for the LLM fallback: the unconfigured FakeLlmClient
     // guarantees every /summarize fails, so the pod must come OUT of
     // rotation instead of reporting ready while it can serve nothing.
@@ -528,11 +559,17 @@ interface ResolvedParts {
   readonly source: JsonFixtureSource;
   readonly prompts: Map<string, string>;
   readonly model: string;
+  readonly thinking: Thinking;
   readonly llmSetup: LlmSetup;
   readonly redisSetup: RedisSetup;
   readonly tracingSetup: TracingSetup;
 }
 
+/**
+ * Pure record assembly over already-resolved parts: every effectful
+ * resolution (including the thinking-refusal warning) happened in
+ * `bootstrap` first.
+ */
 const assembleAppDeps = (parts: ResolvedParts): AppDeps => {
   const { config, log, model, llmSetup, redisSetup, tracingSetup } = parts;
   return {
@@ -541,10 +578,8 @@ const assembleAppDeps = (parts: ResolvedParts): AppDeps => {
     prompts: parts.prompts,
     model,
     judgeModel: config.EVAL_JUDGE_MODEL ?? model,
-    thinking: resolveThinking(config, log),
-    cache: redisSetup.contextCache,
-    checkpointWriter: redisSetup.checkpointWriter,
-    checkpointer: redisSetup.checkpointer,
+    thinking: parts.thinking,
+    ...redisCollaborators(redisSetup),
     // Default path: NoopObserver (byte-for-byte unchanged, observability spec SC-006/FR-027).
     // Foundry path: BufferedObserver(AiFoundryObserver) sharing the trace
     // policy instance — composed by setUpTracing (via composeObservability)
@@ -611,9 +646,10 @@ export const bootstrap = async (injectedLogger?: AppLogger) => {
 
   const model = resolveModel(config);
   const llmSetup = selectLlmClient(config, model, tracingSetup.tracing !== null, log);
+  const thinking = resolveThinking(config, log);
 
   const app = createApp(
-    assembleAppDeps({ config, log, source, prompts, model, llmSetup, redisSetup, tracingSetup }),
+    assembleAppDeps({ config, log, source, prompts, model, thinking, llmSetup, redisSetup, tracingSetup }),
   );
   const shutdown = buildShutdown(tracingSetup, redisSetup.redis, log);
 

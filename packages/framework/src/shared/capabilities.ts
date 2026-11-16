@@ -91,7 +91,7 @@ export const validateCapabilities = (
         // the node would run against the static client while the system
         // believes the broker governs it (a silent authority widening). Fail
         // the run loudly instead. When broker-minted built-ins land
-        // (FR-W2-009), the merge's guard must change in the same commit as
+        // (FR-209), the merge's guard must change in the same commit as
         // this one.
         if (builtinCapabilityKeys.has(cap)) {
           return err({

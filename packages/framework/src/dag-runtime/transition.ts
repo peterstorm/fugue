@@ -163,7 +163,7 @@ export const dagTransition = (
       return { state: r.state, context: r.context };
     })
     .with([{ kind: "awaiting-human" }, { type: "node-failed" }], ([p, e]) => {
-      // FR-029a: hook crash retry. Guard: ignore events for a different node.
+      // FR-084: hook crash retry. Guard: ignore events for a different node.
       if (e.nodeId !== p.nodeId) return stay(p, ctx);
       const r = handleHookCrash(p.nodeId, p.output, p.prompt, e.error, ctx, p.pendingReviews, p.wave);
       return { state: r.state, context: r.context };

@@ -1,7 +1,7 @@
 /**
  * Tests for the correlated broker audit emitter (adapters/broker-audit.ts).
  *
- * @satisfies FR-X-004 / SC-009 — every mint and every refusal emits a record
+ * @satisfies FR-504 / SC-009 — every mint and every refusal emits a record
  *   carrying sub/azp/runId/nodeId/scope; agent hops omit `sub` (no end-user
  *   subject) rather than carry an empty-string sentinel.
  */

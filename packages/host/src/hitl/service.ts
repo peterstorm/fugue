@@ -18,8 +18,8 @@ import { match } from "ts-pattern";
 import type { DagId, RunId, NodeId, HumanAction, FrameworkError } from "@fuguejs/framework";
 import { ok, err, EXECUTOR_NODE_ID, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
-import type { HostError } from "../domain/host-error.js";
-import { formatHostError, tenantOverQuota } from "../domain/host-error.js";
+import type { HostError, RetryAfterSeconds } from "../domain/host-error.js";
+import { formatHostError, retryAfterSeconds, tenantOverQuota } from "../domain/host-error.js";
 import type { TenantId } from "../domain/tenant.js";
 import type { AuthIdentity, Team } from "../domain/auth.js";
 import type { LogPort } from "../ports.js";
@@ -60,10 +60,102 @@ interface HitlRunServiceDeps {
    * (backwards compatible: the single-tenant path and pre-field workers don't gate).
    */
   readonly maxQueuedRuns?: number;
-  /** Retry-After (seconds) advertised on the `tenant-over-quota` refusal. Default 5. */
+  /**
+   * Retry-After (seconds) advertised on the `tenant-over-quota` refusal.
+   * Default `DEFAULT_QUEUED_RUN_RETRY_AFTER_SECONDS` (5), applied at construction.
+   */
   readonly retryAfterSeconds?: number;
   readonly logger?: LogPort;
 }
+
+declare const __maxQueuedRunsBrand: unique symbol;
+/** A queue-depth ceiling: a non-negative safe integer (`0` refuses every durable start). */
+export type MaxQueuedRuns = number & {
+  readonly [__maxQueuedRunsBrand]: "MaxQueuedRuns";
+};
+
+/**
+ * Smart constructor for a queue-depth ceiling, the sibling of `retryAfterSeconds`:
+ * a negative, fractional or non-finite ceiling throws `RangeError`.
+ */
+export const maxQueuedRuns = (value: number): MaxQueuedRuns => {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError("maxQueuedRuns must be a non-negative safe integer");
+  }
+  return value as MaxQueuedRuns;
+};
+
+/**
+ * The queue-depth admission policy (ADR-0074), resolved ONCE at construction
+ * from `maxQueuedRuns` / `retryAfterSeconds`. `unlimited` (no ceiling
+ * configured) never reads the active-run count; `bounded` carries everything
+ * the refusal needs, its ceiling and Retry-After already parsed.
+ */
+export type QueuedRunAdmission =
+  | { readonly kind: "unlimited" }
+  | {
+      readonly kind: "bounded";
+      readonly tenant: TenantId;
+      readonly maxQueuedRuns: MaxQueuedRuns;
+      readonly retryAfterSeconds: RetryAfterSeconds;
+    };
+
+/** Retry-After (seconds) advertised on `tenant-over-quota` when none is configured. */
+export const DEFAULT_QUEUED_RUN_RETRY_AFTER_SECONDS = 5;
+
+/**
+ * Resolve the admission policy from the service deps. Parses the ceiling and
+ * the Retry-After here, so a malformed one (negative, fractional) throws
+ * `RangeError` at composition instead of at the first start or refusal.
+ */
+export const queuedRunAdmission = (
+  deps: Pick<HitlRunServiceDeps, "tenant" | "maxQueuedRuns" | "retryAfterSeconds">,
+): QueuedRunAdmission =>
+  deps.maxQueuedRuns === undefined
+    ? { kind: "unlimited" }
+    : {
+        kind: "bounded",
+        tenant: deps.tenant,
+        maxQueuedRuns: maxQueuedRuns(deps.maxQueuedRuns),
+        retryAfterSeconds: retryAfterSeconds(deps.retryAfterSeconds ?? DEFAULT_QUEUED_RUN_RETRY_AFTER_SECONDS),
+      };
+
+/**
+ * The bounded gate's decision (pure): admit while the tenant's outstanding
+ * (non-terminal) run count is below its ceiling, otherwise refuse with the
+ * tenant's OWN `tenant-over-quota`.
+ */
+export const decideQueuedRunAdmission = (
+  policy: Extract<QueuedRunAdmission, { readonly kind: "bounded" }>,
+  activeRuns: number,
+): Result<void, HostError> =>
+  activeRuns >= policy.maxQueuedRuns
+    ? err(tenantOverQuota(policy.tenant, policy.retryAfterSeconds))
+    : ok(undefined);
+
+/**
+ * The service's resolved context: the injected collaborators with every
+ * construction-time default applied (no optional field left for a use site to
+ * default). Each step below takes only the slice of it that it uses.
+ */
+interface HitlRunContext {
+  readonly runStore: RunStorePort;
+  readonly runQueue: RunQueuePort;
+  readonly decisions: DecisionStorePort;
+  readonly notifier: HumanReviewNotifierPort;
+  readonly executor: RunExecutorPort;
+  readonly clock: () => number;
+  readonly newRunId: () => RunId;
+  readonly admission: QueuedRunAdmission;
+  /** Diagnostics only; `logWithoutThrowing` treats an absent logger as silent. */
+  readonly logger: LogPort | undefined;
+}
+
+type WakeupCtx = Pick<HitlRunContext, "runQueue" | "logger">;
+type ExecuteCtx = Pick<HitlRunContext, "runStore" | "decisions" | "notifier" | "executor" | "logger">;
+type StartCtx = Pick<HitlRunContext, "runStore" | "runQueue" | "executor" | "clock" | "newRunId" | "admission" | "logger">;
+type DecisionCtx = Pick<HitlRunContext, "runStore" | "decisions" | "runQueue" | "logger">;
+type InspectCtx = Pick<HitlRunContext, "runStore" | "decisions" | "logger">;
 
 export type ReconciliationAttempt =
   | { readonly kind: "woken"; readonly runId: RunId }
@@ -120,14 +212,14 @@ const readRunTimestamp = (clock: () => number): Result<RunTimestampMs, HostError
  * intentionally non-fatal: lifecycle reconciliation owns eventual delivery.
  */
 const requestDirectWakeup = async (
-  deps: HitlRunServiceDeps,
+  ctx: WakeupCtx,
   runId: RunId,
   failureMessage: string,
   context: Readonly<Record<string, unknown>> = {},
 ): Promise<void> => {
-  const enqueued = await deps.runQueue.enqueue(runId);
+  const enqueued = await ctx.runQueue.enqueue(runId);
   if (enqueued.ok) return;
-  logWithoutThrowing(deps.logger, "error", failureMessage, {
+  logWithoutThrowing(ctx.logger, "error", failureMessage, {
     runId,
     ...context,
     error: enqueued.error.kind,
@@ -142,7 +234,8 @@ const requestDirectWakeup = async (
  * outstanding (non-terminal) runs here, AFTER the DAG is validated (so an
  * unknown DAG still 404s) and BEFORE the run is created (so a refused run
  * consumes no slot). Refuse with the tenant's OWN `tenant-over-quota` (429 +
- * Retry-After). UNSET limit → unlimited (backwards compatible).
+ * Retry-After). UNSET limit → unlimited (backwards compatible): the
+ * `unlimited` policy never reads the active-run count.
  *
  * SOFT CEILING (by design): this is a non-atomic check-then-create over the
  * active-run SET — the per-tenant Redis ACL denies `eval`/Lua (ADR-0067), so
@@ -155,29 +248,27 @@ const requestDirectWakeup = async (
  * on crashes. Non-durable load is bounded separately by the supervisor's
  * request-scoped `maxConcurrentRuns` gate.
  */
-const admitQueuedRun = async (deps: HitlRunServiceDeps): Promise<Result<void, HostError>> => {
-  const { runStore, tenant, maxQueuedRuns } = deps;
-  if (maxQueuedRuns === undefined) return ok(undefined);
+const admitQueuedRun = async (
+  runStore: RunStorePort,
+  admission: QueuedRunAdmission,
+): Promise<Result<void, HostError>> => {
+  if (admission.kind === "unlimited") return ok(undefined);
   const active = await runStore.countActiveRuns();
-  if (!active.ok) return active;
-  if (active.value >= maxQueuedRuns) {
-    return err(tenantOverQuota(tenant, deps.retryAfterSeconds ?? 5));
-  }
-  return ok(undefined);
+  return active.ok ? decideQueuedRunAdmission(admission, active.value) : active;
 };
 
 const startRun = async (
-  deps: HitlRunServiceDeps,
+  ctx: StartCtx,
   dagId: DagId,
   ownerTeam: Team,
   input: unknown,
   identity: AuthIdentity,
 ): Promise<Result<{ runId: RunId }, HostError>> => {
-  const { runStore, executor, clock, newRunId, logger } = deps;
+  const { runStore, executor, clock, newRunId, logger } = ctx;
   const seeded = await executor.seedCheckpoint(dagId, input);
   if (!seeded.ok) return seeded;
 
-  const admitted = await admitQueuedRun(deps);
+  const admitted = await admitQueuedRun(runStore, ctx.admission);
   if (!admitted.ok) return admitted;
 
   const runId = newRunId();
@@ -207,7 +298,7 @@ const startRun = async (
   // The run is already durably accepted. Do not destroy it merely because
   // the direct wakeup fails: reconciliation enumerates the active record.
   await requestDirectWakeup(
-    deps,
+    ctx,
     runId,
     "hitl: run accepted but initial wakeup failed — reconciliation will retry",
   );
@@ -234,12 +325,12 @@ const settleRunOutcome = (
 
 /** Run/resume the DAG for an already-marked-running record under the live lease. */
 const executeRun = async (
-  deps: HitlRunServiceDeps,
+  ctx: ExecuteCtx,
   lease: RunLease,
   record: RunRecord,
   job: RunExecutionJob,
 ): Promise<Result<void, HostError>> => {
-  const { runStore, decisions, notifier, executor, logger } = deps;
+  const { runStore, decisions, notifier, executor, logger } = ctx;
   const runId = lease.runId;
   const onHumanReview = makeOnHumanReview({
     decisions,
@@ -279,8 +370,8 @@ const executeRun = async (
   return settleRunOutcome(runStore, lease, result.value);
 };
 
-const processRun = async (deps: HitlRunServiceDeps, lease: RunLease): Promise<Result<void, HostError>> => {
-  const { runStore, logger } = deps;
+const processRun = async (ctx: ExecuteCtx, lease: RunLease): Promise<Result<void, HostError>> => {
+  const { runStore, logger } = ctx;
   const runId = lease.runId;
   if (lease.signal.aborted) return err({ kind: "run-lease-lost", runId });
   const fetched = await runStore.get(runId);
@@ -320,16 +411,16 @@ const processRun = async (deps: HitlRunServiceDeps, lease: RunLease): Promise<Re
     if (!settled.ok) return settled;
     return ok(undefined);
   }
-  return executeRun(deps, lease, record, jobLikeResult.value);
+  return executeRun(ctx, lease, record, jobLikeResult.value);
 };
 
 const recordDecision = async (
-  deps: HitlRunServiceDeps,
+  ctx: DecisionCtx,
   runId: RunId,
   nodeId: NodeId,
   action: HumanAction,
 ): Promise<Result<void, HostError>> => {
-  const { runStore, decisions } = deps;
+  const { runStore, decisions } = ctx;
   const fetched = await runStore.get(runId);
   if (!fetched.ok) return fetched;
   const record = fetched.value;
@@ -351,7 +442,7 @@ const recordDecision = async (
   // Both accepted and already-resolved identify durable state that is safe to
   // wake. A failed direct wakeup does not revoke the accepted decision.
   await requestDirectWakeup(
-    deps,
+    ctx,
     runId,
     "hitl: decision accepted but resume wakeup failed — reconciliation will retry",
     { nodeId, resolution: resolution.value.kind },
@@ -366,21 +457,21 @@ type ActiveRunInspection =
   | { readonly kind: "inspection-failed"; readonly error: HostError };
 
 const inspectActiveRun = async (
-  deps: HitlRunServiceDeps,
+  ctx: InspectCtx,
   runId: RunId,
 ): Promise<ActiveRunInspection> => {
-  const run = await deps.runStore.get(runId);
+  const run = await ctx.runStore.get(runId);
   if (!run.ok) return { kind: "inspection-failed", error: run.error };
   if (run.value === null) {
     // Parity with processRun: a stale active-run id (record deleted/expired) is
     // skipped, but the skip is surfaced so an id that should not be active is
     // diagnosable from the logs rather than silently swallowed each sweep.
-    logWithoutThrowing(deps.logger, "warn", "hitl: reconciliation for unknown run — skipping", { runId });
+    logWithoutThrowing(ctx.logger, "warn", "hitl: reconciliation for unknown run — skipping", { runId });
     return { kind: "skip" };
   }
   if (isTerminalRunStatus(run.value.status)) return { kind: "skip" };
   if (run.value.status.kind === "suspended") {
-    const decision = await deps.decisions.getDecision(runId, run.value.status.nodeId);
+    const decision = await ctx.decisions.getDecision(runId, run.value.status.nodeId);
     if (!decision.ok) return { kind: "inspection-failed", error: decision.error };
     if (decision.value === null) return { kind: "skip" };
   }
@@ -388,15 +479,15 @@ const inspectActiveRun = async (
 };
 
 const reconcileActiveRuns = async (
-  deps: HitlRunServiceDeps,
+  ctx: DecisionCtx,
 ): Promise<Result<readonly ReconciliationAttempt[], HostError>> => {
-  const { runStore, runQueue, logger } = deps;
+  const { runStore, runQueue, logger } = ctx;
   const active = await runStore.listActiveRunIds();
   if (!active.ok) return active;
 
   const attempts: ReconciliationAttempt[] = [];
   for (const runId of active.value) {
-    const inspection = await inspectActiveRun(deps, runId);
+    const inspection = await inspectActiveRun(ctx, runId);
     if (inspection.kind === "skip") continue;
     if (inspection.kind === "inspection-failed") {
       attempts.push({ kind: "inspection-failed", runId, error: inspection.error });
@@ -423,10 +514,26 @@ const reconcileActiveRuns = async (
   return ok(attempts);
 };
 
-export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService => ({
-  startRun: (dagId, ownerTeam, input, identity) => startRun(deps, dagId, ownerTeam, input, identity),
-  processRun: (lease) => processRun(deps, lease),
-  recordDecision: (runId, nodeId, action) => recordDecision(deps, runId, nodeId, action),
-  reconcileActiveRuns: () => reconcileActiveRuns(deps),
-  getRun: (runId) => deps.runStore.getMetadata(runId),
+/** Apply every construction-time default once (pure). */
+const resolveContext = (deps: HitlRunServiceDeps): HitlRunContext => ({
+  runStore: deps.runStore,
+  runQueue: deps.runQueue,
+  decisions: deps.decisions,
+  notifier: deps.notifier,
+  executor: deps.executor,
+  clock: deps.clock,
+  newRunId: deps.newRunId,
+  admission: queuedRunAdmission(deps),
+  logger: deps.logger,
 });
+
+export const createHitlRunService = (deps: HitlRunServiceDeps): HitlRunService => {
+  const ctx = resolveContext(deps);
+  return {
+    startRun: (dagId, ownerTeam, input, identity) => startRun(ctx, dagId, ownerTeam, input, identity),
+    processRun: (lease) => processRun(ctx, lease),
+    recordDecision: (runId, nodeId, action) => recordDecision(ctx, runId, nodeId, action),
+    reconcileActiveRuns: () => reconcileActiveRuns(ctx),
+    getRun: (runId) => ctx.runStore.getMetadata(runId),
+  };
+};

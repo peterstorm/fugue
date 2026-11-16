@@ -29,7 +29,7 @@ that the framework's typed error channel preserve the **retry vs. authorization
 vs. budget** distinction so the DAG runtime and downstream consumers can branch
 on the failure *kind* alone, without parsing message strings.
 
-There is a further forcing constraint (FR-X-003): a token-cache miss is **not** a
+There is a further forcing constraint (FR-503): a token-cache miss is **not** a
 failure at all. It is the normal trigger for a mint/exchange. The taxonomy must
 not represent a cache miss as an error, or every cold path would surface a
 spurious failure.
@@ -70,7 +70,7 @@ settled upstream by ADR-0051 and the broker-port ADRs).
    - Cons: the node's response to all three is identical — fail-closed, no retry,
      audit the denial. The extra discriminants buy no behavioural difference for
      v1 and force every consumer to enumerate three cases that are handled the
-     same way. FR-X-002 explicitly permits collapsing them into one
+     same way. FR-502 explicitly permits collapsing them into one
      authorization category; the provider's stated cause is preserved in a
      `reason` string for the audit record without a type-level explosion.
 
@@ -84,7 +84,7 @@ settled upstream by ADR-0051 and the broker-port ADRs).
 The variants are defined in
 `packages/framework/src/types/errors.ts` on the `FrameworkError` union:
 
-- **`llm-budget-exceeded`** `{ runId, nodeId, cumulative, budget }` (FR-W1-003).
+- **`llm-budget-exceeded`** `{ runId, nodeId, cumulative, budget }` (FR-103).
   Emitted by the host's metered LLM decorator when a per-run token budget is
   reached. The check runs *before* the call against the cumulative-so-far
   counter plus a concurrency reservation (`metered-llm.ts` reserves a learned
@@ -92,20 +92,20 @@ The variants are defined in
   admitted-but-unsettled call). Overshoot is bounded accordingly: the very
   first parallel burst — while the estimate is still 0, before any call has
   settled — can overshoot by N concurrent calls; thereafter the learned
-  reservation bounds overshoot to ~one call (the FR-W1-004 "at most one call"
+  reservation bounds overshoot to ~one call (the FR-104 "at most one call"
   allowance, generalised for concurrency). The error refuses the *next* call
   once `cumulative` plus the in-flight reservation has reached `budget`.
 
 - **`infra-unreachable`** *(shape superseded — see the 2026-06-12 Amendment
   below; current shape is `{ operation, hop, message }` with role-category
-  `operation`)* `{ operation, message }` (FR-X-001). The broker could
+  `operation`)* `{ operation, message }` (FR-501). The broker could
   not reach the IdP / token endpoint — a **transient** infrastructure failure
   (Keycloak down, DNS/socket error, 5xx or 429 from the mint endpoint), *not* an
   authorization decision. Callers may retry. `operation` names the failing hop
   (`"client-credentials"`, `"token-exchange"`, `"entra-wif"`, `"graph"`);
   `message` carries the diagnostic (status line, socket error).
 
-- **`policy-refusal`** `{ scope, agentClientId? }` (FR-X-001). A required scope is
+- **`policy-refusal`** `{ scope, agentClientId? }` (FR-501). A required scope is
   not assigned to the agent's client in the IdP policy — an **authorization**
   refusal raised **fail-closed by the broker's local policy gate BEFORE any
   downstream (Entra) call, and before any cache read**. Because it precedes every
@@ -118,7 +118,7 @@ The variants are defined in
   field stays optional in the type for brokers without a resolved client id;
   absence is an absent field, not an empty string.
 
-- **`downstream-denied`** `{ resource, reason }` (FR-X-002). A downstream identity
+- **`downstream-denied`** `{ resource, reason }` (FR-502). A downstream identity
   decision rejected the invocation: an Entra FIC subject/issuer mismatch, a WIF
   rejection, or a resource-scoping denial — **collapsed into one authorization
   category**. From the node's perspective these are all "the downstream said no",
@@ -135,17 +135,22 @@ mapper. The invariant is: **transport rejection or an unhandled status →
 `infra-unreachable`; a settled 4xx authorization status → `downstream-denied`;
 429/503 throttling → `infra-unreachable` (named as a throttle).**
 
-- **`packages/host/src/adapters/keycloak-broker.ts`** is the ordering authority.
-  The local policy gate in `mintFor` runs first: an unassigned scope returns
-  `policy-refusal` with **zero egress and without reading any cache** (SC-006 /
-  FR-W3-003). Only an assigned scope proceeds to the app-only cache check, the
-  SA mint (first egress), and the WIF exchange (second egress); mint/exchange
-  failures are surfaced verbatim on the `Result` channel and audited as
-  `mint-failed:<kind>`.
+- **`packages/host/src/domain/capability-gate.ts`** owns the ordering decision.
+  The pure `decideGate` runs first for every declared capability: an unassigned
+  scope is refused (surfaced as `policy-refusal`) with **zero egress and
+  without reading any cache** (SC-006 / FR-303). Only a gated (assigned)
+  scope proceeds to the app-only cache check, the SA mint (first egress), and
+  the WIF exchange (second egress).
+  **`packages/host/src/adapters/keycloak-broker.ts`** is the shell around that
+  decision: it audits a refusal and performs the egress for a gated scope;
+  mint/exchange failures are surfaced verbatim on the `Result` channel and
+  audited as `mint-failed:<kind>`. *(Wording amended when the gate was
+  extracted from the broker's `mintFor` into the pure `decideGate`; the
+  decision itself — gate first, fail closed, zero egress — is unchanged.)*
 
 - **`packages/host/src/adapters/entra-wif.ts`** maps the WIF token response:
   `400`/`401`/`403` → `downstream-denied` (FIC mismatch / WIF rejection /
-  resource denial collapsed, FR-X-002); `429`/`503` → `infra-unreachable` (named
+  resource denial collapsed, FR-502); `429`/`503` → `infra-unreachable` (named
   as a throttle); any other status (other 5xx, surprising) and any transport-level
   rejection → `infra-unreachable`.
 
@@ -159,9 +164,9 @@ mapper. The invariant is: **transport rejection or an unhandled status →
 - Every variant is reachable from `match(e)` and is a case in
   `formatFrameworkError`'s `.exhaustive()` (`errors.ts`). Adding a kind
   without a case is a compile error.
-- A **token-cache miss is not an error** (FR-X-003): in the broker it is the
-  normal path that triggers a mint/exchange (the miss/acquire path in
-  `doAcquireAppToken`, `keycloak-broker.ts`), never a `FrameworkError`.
+- A **token-cache miss is not an error** (FR-503): in the broker it is the
+  normal path that triggers a mint/exchange (the miss/acquire path of the
+  token cell's `obtain`, `token-cell.ts`), never a `FrameworkError`.
 - `policy-refusal` is raised strictly before any egress; `infra-unreachable` and
   `downstream-denied` only after a real reach attempt.
 - The four variants serialize cleanly through `FrameworkAugmentedError`
@@ -181,14 +186,14 @@ preserved in the type, not the message).
   alone (SC-013).
 - The fail-closed-before-Entra ordering is encoded: `policy-refusal` is, by
   construction, raised before any egress or cache read — visible in both the type
-  and the broker pipeline (SC-006 / FR-W3-003).
+  and the broker pipeline (SC-006 / FR-303).
 - `.exhaustive()` makes a future variant impossible to add silently — every
   consumer is forced to handle it.
 - Collapsing the three Entra denial mechanisms into `downstream-denied` keeps the
   type honest about behaviour (one response) while preserving the precise cause
   in `reason` for audit.
 - A cache miss stays off the error channel, so cold paths do not surface spurious
-  failures (FR-X-003).
+  failures (FR-503).
 
 **Negative:**
 
@@ -200,7 +205,7 @@ preserved in the type, not the message).
 - `downstream-denied` is deliberately coarse: the three Entra mechanisms are
   indistinguishable at the type level. If a future requirement needs
   mechanism-specific handling, the variant must be split — an accepted v1
-  tradeoff under FR-X-002.
+  tradeoff under FR-502.
 - The Graph 404→`downstream-denied` rule diverges from the WIF mapper (which
   treats other statuses as `infra-unreachable`). The divergence is intentional
   and documented, but it is a per-resource judgement that must be revisited for
@@ -220,7 +225,7 @@ preserved in the type, not the message).
 - **Per-mechanism downstream variants** (fic-mismatch / wif-rejected /
   resource-denied). Rejected for v1: all three drive identical node behaviour
   (fail-closed, no retry), so the extra discriminants add no branching value
-  while forcing every consumer to enumerate three equivalent cases. FR-X-002
+  while forcing every consumer to enumerate three equivalent cases. FR-502
   permits the collapse; the provider's stated cause is retained in `reason`.
 
 ## Amendment — `infra-unreachable.operation` generalised to role categories (2026-06-12)
@@ -233,6 +238,6 @@ categories (`"mint" | "exchange" | "federation" | "downstream"`), with a new
 free-form `hop: string` field carrying the host-specific hop name for
 diagnostics. The mapping is: `client-credentials` → `mint`, `token-exchange` →
 `exchange`, `entra-wif` → `federation`, `graph` → `downstream`. This reconciles
-this ADR with ADR-0054's provider-agnostic boundary (FR-W2-004 — no vendor
+this ADR with ADR-0054's provider-agnostic boundary (FR-204 — no vendor
 literal crosses into the framework): the framework union carries only role
 categories, and vendor hop names travel in the free-form `hop` field.

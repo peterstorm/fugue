@@ -251,7 +251,7 @@ export const HostConfigSchema = z.object({
   ADMIN_TOKEN: z.string().min(16),
   /**
    * Issuer URL of the fugue-platform realm whose OIDC JWTs the host accepts as a
-   * first-class inbound mode (FR-W3-006). When unset, the JWT (`user`) path stays
+   * first-class inbound mode (FR-306). When unset, the JWT (`user`) path stays
    * disabled and only admin/`fug_` tokens are accepted (fail closed).
    *
    * Setting it wires the inbound user JWT verification path LIVE (verifier +
@@ -268,7 +268,7 @@ export const HostConfigSchema = z.object({
   // token-URL derivation is applied additionally in superRefine below.
   REALM_JWT_ISSUER: z.string().url().optional(),
   /**
-   * Audience the host must appear in within an accepted realm JWT (FR-W3-006).
+   * Audience the host must appear in within an accepted realm JWT (FR-306).
    * Non-empty: an explicit `REALM_JWT_AUDIENCE=""` would neuter the audience
    * check (every token's `aud` trivially "contains" the empty expectation), so
    * it is rejected at boot rather than silently weakening verification.
@@ -288,7 +288,7 @@ export const HostConfigSchema = z.object({
   /**
    * Keycloak realm policy: the scopes assigned to each agent client, as a JSON
    * object mapping `agentClientId → ["<provider>:<operation>", …]`. This is the
-   * fail-closed gate the live broker consults BEFORE any Entra call (FR-W3-003):
+   * fail-closed gate the live broker consults BEFORE any Entra call (FR-303):
    * a scope absent from a client's list is refused with zero egress. A client
    * with no entry has NO scopes (fail closed). Unset means an empty policy —
    * every minting request fails closed — so the broker is inert until configured.

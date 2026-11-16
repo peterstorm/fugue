@@ -16,10 +16,10 @@
  * @satisfies US4 — a node declaring `requires:["msgraph:mail.send"]` receives a
  *   narrowed handle; the functional core can NEVER reach a raw downstream
  *   client or token (the handle types below expose neither).
- * @satisfies FR-W3-004 — operation narrowing: the handle exposes only the named
+ * @satisfies FR-304 — operation narrowing: the handle exposes only the named
  *   operation(s); the raw client is unreachable, enforced by the type with no
  *   escape hatch (no `client` member exists to widen to).
- * @satisfies FR-W3-005 — no raw token or vendor API key is reachable from
+ * @satisfies FR-305 — no raw token or vendor API key is reachable from
  *   node-executed code: the handle interfaces declare no `token`/`apiKey` field.
  * @satisfies SC-007 — 0 raw-client and 0 token/key fields reachable from a
  *   node's capability handle (type-level test in capability-scope.test.ts).
@@ -67,7 +67,7 @@ export type DownstreamScope =
   | { readonly provider: "dynamics"; readonly operation: DynamicsOperation };
 
 // ───────────────────────────────────────────────────────────────────────────
-// Operation-narrowed handle types (FR-W3-004 / FR-W3-005 / SC-007)
+// Operation-narrowed handle types (FR-304 / FR-305 / SC-007)
 //
 // Each handle interface carries ONLY operation methods. There is deliberately
 // NO `client`, `token`, or `apiKey` member: a node holding one of these handles
@@ -159,9 +159,10 @@ export type KnownScopesCoverProviders = [_ProvidersCovered];
  * system is one of the recognised names.
  *
  * A name that is not a recognised downstream scope reads as `undefined` —
- * first-class ABSENCE, not an error (the same FR-X-003 shape as
- * `token-cache.ts`'s `lookup`). Every caller (the broker's `mintFor` skip and
- * `provides`, the boot-time `AGENT_CLIENT_SCOPES` validation) asks "is this a
+ * first-class ABSENCE, not an error (the same FR-503 shape as
+ * `token-cache.ts`'s `lookup`). Every caller (`decideGate`'s pass-through in
+ * `domain/capability-gate.ts`, the broker's `provides`, the boot-time
+ * `AGENT_CLIENT_SCOPES` validation) asks "is this a
  * downstream scope?", a classification with a routine negative case: plain
  * capability names (`http`, `llm`) and ADR-0051 custom names flow through here
  * on every validation and are simply not scopes. An unknown name in a node's
@@ -184,6 +185,36 @@ export const parseScope = (name: string): DownstreamScope | undefined => {
   }
   return undefined;
 };
+
+/**
+ * Canonical `"<provider>:<operation>"` name for a parsed scope — the inverse of
+ * `parseScope` (`parseScope(scopeName(s))` is `s`). The single source for the
+ * scope string the policy gate, the token-cache key, the audit record and the
+ * Keycloak `scope` form parameter all use.
+ */
+export const scopeName = (scope: DownstreamScope): string => `${scope.provider}:${scope.operation}`;
+
+/**
+ * Downstream resource/audience a scope's token is narrowed to. Graph operations
+ * target the Microsoft Graph resource; Dynamics targets the configured per-org
+ * Dataverse host (FR-042), `https://<DYNAMICS_ORG_HOST>` (its `/.default` scope
+ * is requested at the WIF egress). Exhaustive over the scope ADT.
+ *
+ * FAIL CLOSED (FR-042): when `dynamicsOrgHost` is UNSET a `dynamics:read` scope
+ * resolves to `undefined`, and the capability gate (`capability-gate.ts`)
+ * refuses it with zero egress rather than minting against a placeholder
+ * audience. `msgraph` never depends on the org host, so it always resolves.
+ */
+export const audienceForScope = (
+  scope: DownstreamScope,
+  dynamicsOrgHost: string | undefined,
+): string | undefined =>
+  match(scope)
+    .with({ provider: "msgraph" }, () => "https://graph.microsoft.com")
+    .with({ provider: "dynamics" }, () =>
+      dynamicsOrgHost !== undefined ? `https://${dynamicsOrgHost}` : undefined,
+    )
+    .exhaustive();
 
 /**
  * The narrowed-handle KIND a parsed scope resolves to, as a stable string tag.

@@ -109,7 +109,7 @@ Everything below was read, not recalled.
 
 ## 3. Constraints the design must respect
 
-- **Sequential crossing is a published guarantee** (FR-W1-004 and the
+- **Sequential crossing is a published guarantee** (FR-104 and the
   `errors.ts` doc comment): at most one call may pass a reached ceiling in the
   sequential case. Separately, SC-003 bounds concurrency with the learned
   reservation; it makes no one-call claim for a cold or larger first burst.
@@ -183,7 +183,7 @@ export type Ceilings = readonly [Ceiling, ...Ceiling[]];
 A run is over budget when **any** ceiling is reached. Modelling it as a non-empty list
 rather than `{tokens?, usd?, calls?}` removes the `{}` state — "a budget that budgets
 nothing" — which would otherwise need a guard at every read site. `undefined` already
-means unbudgeted (FR-W1-006); two spellings of the same thing is the illegal state.
+means unbudgeted (FR-106); two spellings of the same thing is the illegal state.
 
 `calls` is included because it is the cheapest possible circuit-breaker for the
 retry-amplification failure the vault records: *"A buggy tool that always errors out
@@ -346,10 +346,10 @@ metering line gains the client's capability key so an operator can still see the
 | FR-B-008 | `llmBudgetTokens` parses into `[{kind:"tokens",limit}]` with byte-identical behaviour. |
 | FR-B-009 | A request-supplied ceiling narrows the DAG's; it can never widen it. |
 | FR-B-010 | `budget` is a built-in capability exposing `spent()` / `remaining()`; no `spend()`. |
-| FR-B-011 | Absent ceilings never refuse — metering and ledger writes still happen (FR-W1-006 preserved). |
+| FR-B-011 | Absent ceilings never refuse — metering and ledger writes still happen (FR-106 preserved). |
 | FR-B-012 | Every LLM client on the context shares one run-scoped meter. |
 | FR-B-013 | `llm-budget-exceeded` names the ceiling, the basis, and the observed figure. |
-| SC-B-001 | Sequential overshoot past a reached ceiling stays at most one crossing call (FR-W1-004); SC-003 remains the learned concurrent-reservation rule. |
+| SC-B-001 | Sequential overshoot past a reached ceiling stays at most one crossing call (FR-104); SC-003 remains the learned concurrent-reservation rule. |
 | SC-B-002 | The **admission** decision adds zero network round trips (restated SC-002/SC-004). |
 | SC-B-003 | Park/resume carries recorded spend forward; after a crash, every concurrently settled append still pending at process death can be lost, so aggregate crash loss is not bounded to one call (ADR-0083). |
 

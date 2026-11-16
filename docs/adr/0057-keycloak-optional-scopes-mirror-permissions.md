@@ -20,10 +20,10 @@ The forces at play:
 - **One policy surface.** The grant decision must live in exactly one place,
   not split across realm roles, application code, and Entra app-permission
   consent. A reviewer approving a new agent capability must see the grant in the
-  same diff as the agent code (US4, FR-W3-001).
+  same diff as the agent code (US4, FR-301).
 - **Fail-closed before egress.** The refusal point must be reachable and
   decidable *locally at the Keycloak hop*, so an unentitled scope never causes a
-  network call to Entra (FR-W3-003, SC-006). A policy model that can only be
+  network call to Entra (FR-303, SC-006). A policy model that can only be
   evaluated after a token reaches the downstream resource is unacceptable.
 - **Config-as-code governance.** The `fugue-platform` realm is already managed by
   the keycloakConfigAsCode repository: declarative steps, a golden-export test,
@@ -109,7 +109,7 @@ Concretely:
   in the agent's `AGENT_CLIENT_SCOPES` assignment returns
   `{ kind: "policy-refusal", scope, agentClientId }` (403) with zero egress; the
   Keycloak mint, the WIF exchange, and therefore Entra are never reached
-  (FR-W3-003, SC-006). The token request the broker does send names *exactly* the
+  (FR-303, SC-006). The token request the broker does send names *exactly* the
   parsed scope, so Keycloak itself also refuses an unassigned scope at the
   `client_credentials` / token-exchange hop — defense in depth at both the local
   gate and the issuer.
@@ -132,9 +132,9 @@ category, distinct from `infra-unreachable` and `downstream-denied`.
 
 - The capability grant is config-as-code with the identical review and golden-test
   gate as the agent code — one policy surface, one diff, one approval (US4,
-  FR-W3-001).
+  FR-301).
 - Refusal is local and pre-egress: an unentitled scope is denied at the Keycloak
-  hop with zero Entra calls, asserted by the broker's no-egress test (FR-W3-003,
+  hop with zero Entra calls, asserted by the broker's no-egress test (FR-303,
   SC-006).
 - Scope granularity equals node-declaration granularity, enabling true per-agent
   least privilege without over-granting.

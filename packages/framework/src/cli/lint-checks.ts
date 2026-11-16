@@ -63,41 +63,53 @@ const checkFanInKeys = (dag: DagDef): LintError[] => {
 
 const edgeKey = (from: string, to: string): string => `${from}\0${to}`;
 
-/** The edge structure shape detection compares against the helper templates. */
-interface ShapeGraph {
-  readonly ids: readonly string[];
-  readonly edgeCount: number;
-  readonly indeg: ReadonlyMap<string, number>;
-  readonly outTargets: ReadonlyMap<string, readonly string[]>;
-  readonly actualEdges: ReadonlySet<string>;
-  readonly sources: readonly string[];
-  readonly sinks: readonly string[];
-}
+/**
+ * The edge structure shape detection compares against the helper templates:
+ * an adjacency list in node order (every node id → its targets, one entry per
+ * edge). It is the ONE stored fact — edge count, in-degrees, sources, sinks
+ * and the edge set are derived from it on read, so no graph can hold a count
+ * or a source list that contradicts its own edges.
+ */
+type ShapeGraph = ReadonlyMap<string, readonly string[]>;
 
 const buildShapeGraph = (dag: DagDef, edges: readonly DagDef["edges"][number][]): ShapeGraph => {
-  const ids = dag.nodes.map((n) => n.id as string);
-  const indeg = new Map<string, number>(ids.map((id) => [id, 0]));
-  const outTargets = new Map<string, string[]>(ids.map((id) => [id, []]));
-  const actualEdges = new Set<string>();
-  for (const e of edges) {
-    const f = e.from as string;
-    const t = e.to as string;
-    indeg.set(t, (indeg.get(t) ?? 0) + 1);
-    outTargets.get(f)!.push(t);
-    actualEdges.add(edgeKey(f, t));
-  }
-  const sources = ids.filter((id) => indeg.get(id) === 0);
-  const sinks = ids.filter((id) => outTargets.get(id)!.length === 0);
-  return { ids, edgeCount: edges.length, indeg, outTargets, actualEdges, sources, sinks };
+  const outTargets = new Map<string, string[]>(dag.nodes.map((n) => [n.id as string, []]));
+  for (const e of edges) outTargets.get(e.from as string)!.push(e.to as string);
+  return outTargets;
 };
+
+const targetsOf = (g: ShapeGraph, id: string): readonly string[] => g.get(id) ?? [];
+
+const edgeCountOf = (g: ShapeGraph): number =>
+  [...g.values()].reduce((count, targets) => count + targets.length, 0);
+
+const inDegreesOf = (g: ShapeGraph): ReadonlyMap<string, number> => {
+  const indeg = new Map<string, number>([...g.keys()].map((id) => [id, 0]));
+  for (const targets of g.values()) {
+    for (const t of targets) indeg.set(t, (indeg.get(t) ?? 0) + 1);
+  }
+  return indeg;
+};
+
+const sourcesOf = (g: ShapeGraph): readonly string[] => {
+  const indeg = inDegreesOf(g);
+  return [...g.keys()].filter((id) => indeg.get(id) === 0);
+};
+
+const sinksOf = (g: ShapeGraph): readonly string[] =>
+  [...g.keys()].filter((id) => targetsOf(g, id).length === 0);
+
+const edgeSetOf = (g: ShapeGraph): ReadonlySet<string> =>
+  new Set([...g].flatMap(([from, targets]) => targets.map((to) => edgeKey(from, to))));
 
 // Linear: single chain — one source, one sink, every node in/out degree ≤ 1.
 const linearChainHint = (dag: DagDef, g: ShapeGraph): LintAdvisory | null => {
+  const indeg = inDegreesOf(g);
   const isChain =
-    g.edgeCount === g.ids.length - 1 &&
-    g.sources.length === 1 &&
-    g.sinks.length === 1 &&
-    g.ids.every((id) => (g.indeg.get(id) ?? 0) <= 1 && g.outTargets.get(id)!.length <= 1);
+    edgeCountOf(g) === g.size - 1 &&
+    sourcesOf(g).length === 1 &&
+    sinksOf(g).length === 1 &&
+    [...g.keys()].every((id) => (indeg.get(id) ?? 0) <= 1 && targetsOf(g, id).length <= 1);
   if (!isChain) return null;
   return {
     kind: "shape-helper-hint",
@@ -116,7 +128,7 @@ const diamondHint = (
   source: string,
   branches: readonly string[],
 ): LintAdvisory | null => {
-  const firstBranchTargets = g.outTargets.get(branches[0]!) ?? [];
+  const firstBranchTargets = targetsOf(g, branches[0]!);
   if (firstBranchTargets.length !== 1) return null;
   const join = firstBranchTargets[0]!;
   if (join === source || branches.includes(join)) return null;
@@ -125,7 +137,8 @@ const diamondHint = (
     expected.add(edgeKey(source, b));
     expected.add(edgeKey(b, join));
   }
-  if (expected.size !== g.actualEdges.size || ![...expected].every((k) => g.actualEdges.has(k))) {
+  const actualEdges = edgeSetOf(g);
+  if (expected.size !== actualEdges.size || ![...expected].every((k) => actualEdges.has(k))) {
     return null;
   }
   return {
@@ -140,7 +153,7 @@ const diamondHint = (
 
 // Fan-out with no join: every edge leaves the source; branches are all sinks.
 const fanOutHint = (dag: DagDef, g: ShapeGraph, branches: readonly string[]): LintAdvisory | null => {
-  if (g.edgeCount !== branches.length || !branches.every((b) => g.outTargets.get(b)!.length === 0)) {
+  if (edgeCountOf(g) !== branches.length || !branches.every((b) => targetsOf(g, b).length === 0)) {
     return null;
   }
   return {
@@ -173,9 +186,10 @@ const detectShapeHelper = (dag: DagDef): LintAdvisory | null => {
   const linear = linearChainHint(dag, graph);
   if (linear !== null) return linear;
 
-  if (graph.sources.length !== 1) return null;
-  const source = graph.sources[0]!;
-  const branches = graph.outTargets.get(source)!;
+  const sources = sourcesOf(graph);
+  if (sources.length !== 1) return null;
+  const source = sources[0]!;
+  const branches = targetsOf(graph, source);
   if (branches.length < 2) return null;
 
   return diamondHint(dag, graph, source, branches) ?? fanOutHint(dag, graph, branches);

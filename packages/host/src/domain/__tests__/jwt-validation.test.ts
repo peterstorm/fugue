@@ -1,8 +1,8 @@
 /**
  * Tests for the pure realm JWT claim validator (host domain).
  *
- * @satisfies FR-W3-006 — iss/aud enforcement for fugue-platform OIDC tokens.
- * @satisfies FR-W3-007 — sub/azp extraction on success.
+ * @satisfies FR-306 — iss/aud enforcement for fugue-platform OIDC tokens.
+ * @satisfies FR-307 — sub/azp extraction on success.
  *
  * The validator is PURE and assumes the signature was already verified by the
  * injected verifier in the imperative shell — these tests exercise the claim

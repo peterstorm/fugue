@@ -76,7 +76,7 @@ Duplicates collapsed (`type-design-analyzer-5..8` restate `1..4`; `comment-analy
 
 | ID | Reason |
 |---|---|
-| `type-design-analyzer-4` | `llm-budget-exceeded.cumulative` has no type-level settled-vs-projected distinction. The variant is **pre-existing** (host budget work, FR-W1-003), not introduced by this PR, and drawing the distinction is an interface change across the error ADT and its persisted wire schema — deepen territory, not remediation of this diff. |
+| `type-design-analyzer-4` | `llm-budget-exceeded.cumulative` has no type-level settled-vs-projected distinction. The variant is **pre-existing** (host budget work, FR-103), not introduced by this PR, and drawing the distinction is an interface change across the error ADT and its persisted wire schema — deepen territory, not remediation of this diff. |
 | `code-simplifier-8` | Unifying `metered-llm`'s `sendStructured`/`sendWithTools` scaffolding into one `runMetered` closure. The duplication is **pre-existing**, and the shared code is the reserve→settle→rethrow→release concurrency path where a subtle refactor error is silent. Deserves its own change with focused tests rather than riding a caching PR. |
 
 ### Dismissed (1)

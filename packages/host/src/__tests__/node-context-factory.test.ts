@@ -910,7 +910,7 @@ describe("createNodeContextForDag — static client wiring (SC-005)", () => {
   // Regression proof for the base-context wiring: the boot-scoped static client
   // must be reachable on the NodeContext BYTE-IDENTICAL to what `extractClients`
   // produces — the SAME reference, not a copy. Per-node minting layers OVER this
-  // base; the static client itself is never copied (FR-W2-003 / SC-005).
+  // base; the static client itself is never copied (FR-203 / SC-005).
   it("exposes the exact same capability client reference the handle wired in (byte-identical)", async () => {
     const httpHandle = createHttpCapability();
     const shared = baseSharedInfra([httpHandle]);
@@ -932,7 +932,7 @@ describe("createNodeContextForDag — static client wiring (SC-005)", () => {
 
 // ── Metered-LLM wiring (review gap: factory wraps shared.llm + threads budget) ─
 
-describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..006)", () => {
+describe("createNodeContextForDag — metered LLM wiring (FR-001/FR-101..106)", () => {
   /** A fake inner LlmClient reporting fixed usage per call — call-recording, no mocks. */
 
   const sharedWithLlm = (llm: LlmClient): SharedInfra => ({ ...baseSharedInfra(), llm });
@@ -1052,7 +1052,7 @@ describe("createNodeContextForDag — metered LLM wiring (FR-W0-001/FR-W1-001..0
     expect(calls.length).toBe(1);
   });
 
-  it("with llmBudgetTokens unset, the decorator meters but never refuses (FR-W1-006) — budget comes ONLY from dag.config", async () => {
+  it("with llmBudgetTokens unset, the decorator meters but never refuses (FR-106) — budget comes ONLY from dag.config", async () => {
     const { llm, calls } = fakeLlm(1_000_000, 0);
     const shared = sharedWithLlm(llm);
 
@@ -1317,7 +1317,7 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
   });
 });
 
-// ── Identity → Invocation.origin threading (FR-W3-007) ──────────────────────
+// ── Identity → Invocation.origin threading (FR-307) ──────────────────────
 //
 // Before this fix the user identity dead-ended: every run built
 // `origin: { kind: "agent", agentClientId: dagId }`, so an OIDC user's `sub`
@@ -1326,7 +1326,7 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
 // origin; these tests prove the user `sub`/`azp` actually land and that the
 // admin/team placeholder is unchanged (byte-for-byte the prior behaviour).
 
-describe("invocationOriginForIdentity — user sub threading + real-client resolution (FR-W3-007, FR-040)", () => {
+describe("invocationOriginForIdentity — user sub threading + real-client resolution (FR-307, FR-040)", () => {
   // FR-040: the DAG id resolves to its REAL Keycloak agent client via the map,
   // not the dag-id placeholder. test-dag → fugue-agent-test.
   const AGENT_MAP = { [testDagId as string]: "fugue-agent-test" };

@@ -58,9 +58,9 @@ Agents: code-reviewer, silent-failure-hunter, pr-test-analyzer, type-design-anal
 - **Fix:** `// SECURITY:` cross-reference linking this predicate to the future JWKS-verifier wiring site (and vice versa in host.ts/auth docs), so the verifier wave cannot land without revisiting.
 
 ### Fix 10: validateCapabilities/mergeScopedCapabilities disagreement
-- **Source:** architecture-tech-lead (+ comment-analyzer FR-W2-009 note)
+- **Source:** architecture-tech-lead (+ comment-analyzer FR-209 note)
 - **File:** packages/framework/src/shared/capabilities.ts:75, make-node-context.ts:100, types/capability-broker.ts:104
-- **Fix:** Option (a): `validateCapabilities` rejects `broker.provides(cap) === true` for `BUILTIN_CAPABILITY_KEYS` as a wiring error (loud, not silent drop). Amend the FR-W2-009 comment to state the merge must also change when broker-minted built-ins land. Property test pinning: every cap `provides()` exempts survives the merge.
+- **Fix:** Option (a): `validateCapabilities` rejects `broker.provides(cap) === true` for `BUILTIN_CAPABILITY_KEYS` as a wiring error (loud, not silent drop). Amend the FR-209 comment to state the merge must also change when broker-minted built-ins land. Property test pinning: every cap `provides()` exempts survives the merge.
 
 ### Fix 11: Vendor hop names in framework error taxonomy
 - **Source:** architecture-tech-lead

@@ -22,11 +22,11 @@ Fugue's durable-runtime ports (JobLike event journal, Checkpointer, FreshnessInd
 **Why this priority:** This is the Loom unblock — the point of F6. `createFileJob` + the event-log reader + `resumeFileJob` replace the hand-rolled ProgramJournal and make single-process durable execution a first-class framework capability. Everything else in F6 is smaller.
 
 **Acceptance Scenarios:**
-- Given a completed journal in a directory, When I open it in a fresh process and resume, Then the run replays to the identical final state (events, checkpoint, and progress all round-trip; replay proves state)
-- Given a crash between appending an event and checkpointing the post-state (the one benign lag window), When I resume, Then the lagging checkpoint is recovered by replaying the authoritative event log — treated as expected, not corruption
-- Given a checkpoint that disagrees with the replay of any strict prefix of the event log, When I resume, Then the run fails closed with a typed `FrameworkError` rather than proceeding
-- Given an event file containing corrupt or truncated JSON, When the reader loads it, Then the whole read fails closed through `Result<_, FrameworkError>` — the entry is never silently skipped and a partial log is never returned
-- Given an invalid or out-of-range dedup key, When it crosses the immutable `JobLike.appendEvent(...): Promise<void>` persistence boundary, Then the promise rejects with a typed `FrameworkError`, never a raw `Error`, and no path escapes the run directory
+- AS-001: Given a completed journal in a directory, When I open it in a fresh process and resume, Then the run replays to the identical final state (events, checkpoint, and progress all round-trip; replay proves state)
+- AS-002: Given a crash between appending an event and checkpointing the post-state (the one benign lag window), When I resume, Then the lagging checkpoint is recovered by replaying the authoritative event log — treated as expected, not corruption
+- AS-003: Given a checkpoint that disagrees with the replay of any strict prefix of the event log, When I resume, Then the run fails closed with a typed `FrameworkError` rather than proceeding
+- AS-004: Given an event file containing corrupt or truncated JSON, When the reader loads it, Then the whole read fails closed through `Result<_, FrameworkError>` — the entry is never silently skipped and a partial log is never returned
+- AS-005: Given an invalid or out-of-range dedup key, When it crosses the immutable `JobLike.appendEvent(...): Promise<void>` persistence boundary, Then the promise rejects with a typed `FrameworkError`, never a raw `Error`, and no path escapes the run directory
 
 ### US2: [P1] File-backed Checkpointer over the composite address space
 
@@ -37,12 +37,12 @@ Fugue's durable-runtime ports (JobLike event journal, Checkpointer, FreshnessInd
 **Why this priority:** Together with US1 this is the Loom unblock. The composite address space ships here as a backend-agnostic extension of the Checkpointer port with a canonical fallback, so existing consumers and the in-memory/Redis backends are untouched.
 
 **Acceptance Scenarios:**
-- Given a file checkpointer over a fresh directory, When I `load` an unknown run, Then I get a clean `null` (never an error)
-- Given a saved node under any composite address (namespace, nodeId, index, attempt) or the canonical form (plain nodeId), When I load the run, Then every stored node comes back with its exact output, including per-node corrupt entries dropped and surfaced via `corruptNodeAddresses`
-- Given a checkpoint written by a different framework version, When I load with the shared suite's checks active, Then load rejects with `checkpoint-version-mismatch` (ADR-0017 semantics)
-- Given an `expectedDagFingerprint` option and a stored fingerprint that is absent or different, When I load, Then load rejects with `checkpoint-version-mismatch`
-- Given a checkpoint older than 24h, When I load, Then load reports `checkpoint-expired` — expiry evaluated lazily at load, with no background sweeper
-- Given a node ID that is invalid or out of range, When it crosses the persistence boundary, Then the Result-bearing write returns a typed `FrameworkError` — never path-escape, never a silently misplaced entry
+- AS-006: Given a file checkpointer over a fresh directory, When I `load` an unknown run, Then I get a clean `null` (never an error)
+- AS-007: Given a saved node under any composite address (namespace, nodeId, index, attempt) or the canonical form (plain nodeId), When I load the run, Then every stored node comes back with its exact output, including per-node corrupt entries dropped and surfaced via `corruptNodeAddresses`
+- AS-008: Given a checkpoint written by a different framework version, When I load with the shared suite's checks active, Then load rejects with `checkpoint-version-mismatch` (ADR-0017 semantics)
+- AS-009: Given an `expectedDagFingerprint` option and a stored fingerprint that is absent or different, When I load, Then load rejects with `checkpoint-version-mismatch`
+- AS-010: Given a checkpoint older than 24h, When I load, Then load reports `checkpoint-expired` — expiry evaluated lazily at load, with no background sweeper
+- AS-011: Given a node ID that is invalid or out of range, When it crosses the persistence boundary, Then the Result-bearing write returns a typed `FrameworkError` — never path-escape, never a silently misplaced entry
 
 ### US3: [P2] Durable single-process FreshnessIndex
 
@@ -53,9 +53,9 @@ Fugue's durable-runtime ports (JobLike event journal, Checkpointer, FreshnessInd
 **Why this priority:** Named in the convergence doc (C5). Kept in F6 because it crosses the exact same durability boundary as the other two pieces, but it has no current consumer blocking on it.
 
 **Acceptance Scenarios:**
-- Given a recorded write, When the process restarts and a later run calls `findConflict`, Then the selected live singleton is still visible and conflict detection has the observable singleton parity defined by FR-032: inclusive `sinceMs`, same-value suppression, clean missing/expired behavior, and a refreshed 24h lifetime
-- Given a resource with a live singleton, When writes arrive in any order, Then selection and replacement are one atomic transaction: the greater `succeededAtMs` wins, an equal score uses Redis reverse-binary member ordering, and a lower-scored loser leaves the winner intact while refreshing the lifetime; a reader sees either complete singleton, never partial JSON
-- Given no live record for a resource, When I call `findConflict`, Then the result is a clean no-conflict — never an error
+- AS-012: Given a recorded write, When the process restarts and a later run calls `findConflict`, Then the selected live singleton is still visible and conflict detection has the observable singleton parity defined by FR-032: inclusive `sinceMs`, same-value suppression, clean missing/expired behavior, and a refreshed 24h lifetime
+- AS-013: Given a resource with a live singleton, When writes arrive in any order, Then selection and replacement are one atomic transaction: the greater `succeededAtMs` wins, an equal score uses Redis reverse-binary member ordering, and a lower-scored loser leaves the winner intact while refreshing the lifetime; a reader sees either complete singleton, never partial JSON
+- AS-014: Given no live record for a resource, When I call `findConflict`, Then the result is a clean no-conflict — never an error
 
 ---
 
@@ -146,17 +146,17 @@ Measurable outcomes that define "done". Acceptance bar for **P1** is SC-001 thro
 
 Explicitly NOT part of this feature:
 
-- File `QueueBackend` / workers (approach B) — no enqueue/worker lifecycle, concurrency, attempts, delay, backoff, dead-letter, or markers in this pass; a file worker is later composed from `createFileJob` + a small polling loop.
-- SQLite (approach C) — pure JSON only; no native dependencies.
-- Store / memory capability — separate future ADR.
-- Workflow DSL / generic registry (FR-004 discipline).
-- F1 dynamic fan-out, F8 nested subgraph, F4 caching — they only *consume* the composite address space later.
-- Changes to existing in-memory/Redis/BullMQ backends or their on-disk layouts.
-- Migration of historical Loom run directories — they are read-only artifacts; the Loom retirement effort adapts (no migration tooling).
-- Background sweeper / physical GC of expired run directories — TTL is evaluated lazily at load/findConflict only; run-directory lifecycle belongs to the consumer.
-- Exact Redis ZSET member-history or command-by-command mutation parity — including identical-member downward-score mutation and reselection from retained members; FR-031/FR-032 deliberately require one score-monotonic singleton instead.
-- Changes to `JobLike` or any other existing port signature to add a `Result` channel — throwing-only immutable surfaces use typed `FrameworkError` throws under FR-040.
-- Parallel writers to a single journal directory — single-writer contract by design; multi-writer orchestration is the consumer's job.
+- OOS-001: File `QueueBackend` / workers (approach B) — no enqueue/worker lifecycle, concurrency, attempts, delay, backoff, dead-letter, or markers in this pass; a file worker is later composed from `createFileJob` + a small polling loop.
+- OOS-002: SQLite (approach C) — pure JSON only; no native dependencies.
+- OOS-003: Store / memory capability — separate future ADR.
+- OOS-004: Workflow DSL / generic registry (FR-004 discipline).
+- OOS-005: F1 dynamic fan-out, F8 nested subgraph, F4 caching — they only *consume* the composite address space later.
+- OOS-006: Changes to existing in-memory/Redis/BullMQ backends or their on-disk layouts.
+- OOS-007: Migration of historical Loom run directories — they are read-only artifacts; the Loom retirement effort adapts (no migration tooling).
+- OOS-008: Background sweeper / physical GC of expired run directories — TTL is evaluated lazily at load/findConflict only; run-directory lifecycle belongs to the consumer.
+- OOS-009: Exact Redis ZSET member-history or command-by-command mutation parity — including identical-member downward-score mutation and reselection from retained members; FR-031/FR-032 deliberately require one score-monotonic singleton instead.
+- OOS-010: Changes to `JobLike` or any other existing port signature to add a `Result` channel — throwing-only immutable surfaces use typed `FrameworkError` throws under FR-040.
+- OOS-011: Parallel writers to a single journal directory — single-writer contract by design; multi-writer orchestration is the consumer's job.
 
 ---
 

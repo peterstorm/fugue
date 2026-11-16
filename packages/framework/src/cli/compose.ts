@@ -23,7 +23,6 @@
 // Seams are injected (LlmClient + ComposeIo) so the whole loop is testable
 // with a scripted fake — no network, no TTY.
 
-import { match } from "ts-pattern";
 import { z } from "zod";
 import type { LlmClient } from "../types/llm.js";
 import { formatFrameworkError } from "../types/errors.js";
@@ -43,7 +42,15 @@ import { describedToMermaid } from "./visualize.js";
 import { writeAuthoredScaffold } from "./new.js";
 import { DEFAULT_MODEL } from "./new-templates.js";
 import { CONFIDENCE_BUCKET } from "./vocabulary.js";
-import { parseFlagValue } from "./arg-parsing.js";
+import {
+  accept,
+  all,
+  noProblems,
+  reject,
+  scanArgs,
+  type Checked,
+  type Rejected,
+} from "./arg-parsing.js";
 import { formatLintError, type LintError, type NewResult } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -221,70 +228,33 @@ interface ParsedComposeArgs {
   readonly ok: true;
   readonly options: ComposeOptions;
 }
-interface ParseComposeError {
-  readonly ok: false;
-  readonly problems: readonly string[];
-}
 
-/** Raw flag values as scanned — not yet validated into `ComposeOptions`. */
-interface ScannedComposeArgs {
-  readonly intent: string | undefined;
-  readonly team: string | undefined;
-  readonly model: string | undefined;
-  readonly owner: string | undefined;
-  readonly root: string | undefined;
-  readonly force: boolean;
-  readonly problems: string[];
-}
+const COMPOSE_FLAGS = {
+  valueFlags: ["--team", "--model", "--owner", "--dir"],
+  switches: ["--force"],
+} as const;
 
-/** Scan flags + the positional intent, accumulating every scan problem. */
-const scanComposeArgs = (args: readonly string[]): ScannedComposeArgs => {
-  const problems: string[] = [];
-  let intent: string | undefined;
-  let team: string | undefined;
-  let model: string | undefined;
-  let owner: string | undefined;
-  let root: string | undefined;
-  let force = false;
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]!;
-    const takeValue = (flag: string): string | undefined => {
-      const parsed = parseFlagValue(args, i, flag);
-      i = parsed.nextIndex;
-      if (!parsed.ok) {
-        problems.push(parsed.problem);
-        return undefined;
-      }
-      return parsed.value;
-    };
-    match(arg)
-      .with("--team", () => {
-        team = takeValue("--team");
-      })
-      .with("--model", () => {
-        model = takeValue("--model");
-      })
-      .with("--owner", () => {
-        owner = takeValue("--owner");
-      })
-      .with("--dir", () => {
-        root = takeValue("--dir");
-      })
-      .with("--force", () => {
-        force = true;
-      })
-      .otherwise((other) => {
-        if (other.startsWith("--")) {
-          problems.push(`unknown flag: ${other}`);
-        } else if (intent === undefined) {
-          intent = other;
-        } else {
-          problems.push(`unexpected argument: ${other}`);
-        }
-      });
+const parseIntentArg = (intent: string | undefined): Checked<Intent> => {
+  if (intent === undefined) {
+    return reject('missing intent string (e.g. `fugue compose "Process refunds…" --team payments`)');
   }
-  return { intent, team, model, owner, root, force, problems };
+  // A blank intent gives the model nothing to draft from — reject it here
+  // rather than burning an LLM round on an empty brief. `parseIntent` is
+  // the single producer of the branded intent.
+  const parsed = parseIntent(intent);
+  return parsed === null ? reject("intent must be non-empty") : accept(parsed);
+};
+
+const parseTeamFlag = (team: string | undefined): Checked<Kebab> => {
+  if (team === undefined) return reject("missing --team <team>");
+  // The team lands in the AuthoredDag (kebab-case there) and in the
+  // dags/<team>/ directory name — reject junk at the boundary instead of
+  // letting the first LLM draft fail schema validation on our own flag.
+  // `parseKebab` is the single producer of the branded team.
+  const parsed = parseKebab(team);
+  return parsed === null
+    ? reject(`--team '${team}' must be kebab-case (lowercase, digits, single dashes)`)
+    : accept(parsed);
 };
 
 /**
@@ -292,41 +262,26 @@ const scanComposeArgs = (args: readonly string[]): ScannedComposeArgs => {
  * into validated `ComposeOptions`. Pure — no I/O, no `process.*`; the bin
  * keeps only readline/SIGINT/env-key wiring. Accumulates ALL problems rather
  * than failing on the first, so the author sees every fix at once (mirrors
- * `parseNewArgs`).
+ * `parseNewArgs`; both share `arg-parsing.ts`'s scanner and `Checked`).
  */
-export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | ParseComposeError => {
-  const { intent, team, model, owner, root, force, problems } = scanComposeArgs(args);
-
-  const parsedIntent = intent === undefined ? null : parseIntent(intent);
-  if (intent === undefined) {
-    problems.push('missing intent string (e.g. `fugue compose "Process refunds…" --team payments`)');
-  } else if (parsedIntent === null) {
-    // A blank intent gives the model nothing to draft from — reject it here
-    // rather than burning an LLM round on an empty brief. `parseIntent` is
-    // the single producer of the branded intent.
-    problems.push("intent must be non-empty");
-  }
-
-  const parsedTeam = team === undefined ? null : parseKebab(team);
-  if (team === undefined) {
-    problems.push("missing --team <team>");
-  } else if (parsedTeam === null) {
-    // The team lands in the AuthoredDag (kebab-case there) and in the
-    // dags/<team>/ directory name — reject junk at the boundary instead of
-    // letting the first LLM draft fail schema validation on our own flag.
-    // `parseKebab` is the single producer of the branded team.
-    problems.push(`--team '${team}' must be kebab-case (lowercase, digits, single dashes)`);
-  }
-
-  if (parsedIntent === null || parsedTeam === null || problems.length > 0) {
-    return { ok: false, problems };
-  }
+export const parseComposeArgs = (args: readonly string[]): ParsedComposeArgs | Rejected => {
+  const scanned = scanArgs(args, COMPOSE_FLAGS);
+  const checked = all(
+    noProblems(scanned.problems),
+    parseIntentArg(scanned.positional),
+    parseTeamFlag(scanned.value("--team")),
+  );
+  if (!checked.ok) return checked;
+  const [, intent, team] = checked.value;
+  const model = scanned.value("--model");
+  const owner = scanned.value("--owner");
+  const root = scanned.value("--dir");
   return {
     ok: true,
     options: {
-      intent: parsedIntent,
-      team: parsedTeam,
-      force,
+      intent,
+      team,
+      force: scanned.isSet("--force"),
       ...(model !== undefined ? { model } : {}),
       ...(owner !== undefined ? { owner } : {}),
       ...(root !== undefined ? { root } : {}),

@@ -12,17 +12,17 @@
 //
 // It mints NOTHING and makes ZERO token requests, so SC-008 (≤1 token request
 // per (identity,audience,scope)/TTL) is satisfied trivially. It references no
-// concrete identity provider of any kind (FR-W2-004).
+// concrete identity provider of any kind (FR-204).
 //
 // Pure factory: returns a closure over the captured clients. No I/O, no
 // `Date.now`/`Math.random`, no mutation.
 //
-// @satisfies FR-W2-002 — framework ships a pass-through broker handing back
+// @satisfies FR-202 — framework ships a pass-through broker handing back
 //   statically-configured clients, reproducing today's behavior exactly
-// @satisfies FR-W2-003 — every DAG/embedder compiling today keeps byte-identical
+// @satisfies FR-203 — every DAG/embedder compiling today keeps byte-identical
 //   capability behavior with zero migration steps (omitting the broker is that
 //   path; this broker reproduces it for embedders that want an explicit value)
-// @satisfies FR-W2-004 — neither the port nor this default references any
+// @satisfies FR-204 — neither the port nor this default references any
 //   concrete identity provider by name (no imports, no type names, no string
 //   literals)
 // @satisfies SC-005 — byte-identical client resolution (same references)

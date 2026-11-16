@@ -59,7 +59,9 @@ import { createUnwiredTokenEndpoint } from "./adapters/unwired-token-endpoint.js
 import { createUnwiredEntraWifExchange, createUnwiredGraphHttp } from "./adapters/unwired-entra-wif.js";
 import { createKeycloakTokenEndpoint } from "./adapters/keycloak-token-endpoint-http.js";
 import { createEntraWifExchange } from "./adapters/entra-wif.js";
-import type { EntraWifExchange, EntraWifConfig } from "./adapters/entra-wif.js";
+import type { EntraWifExchange } from "./adapters/entra-wif.js";
+import { planAuthorityLegs, unwiredLegsWarning } from "./domain/authority-legs.js";
+import type { EntraLeg, KeycloakLeg } from "./domain/authority-legs.js";
 import type { KeycloakTokenEndpoint } from "./adapters/keycloak-token-endpoint.js";
 import type { GraphHttp } from "./adapters/graph-capability.js";
 import { createFetchHttpPost } from "./adapters/fetch-http-post.js";
@@ -341,77 +343,39 @@ const warnLiveBrokerMisconfig = (
 };
 
 /**
- * The Entra WIF exchange and the Graph transport are wired TOGETHER (the app-only
- * token from WIF is what the Graph transport presents) — both behind the Entra
- * config (`ENTRA_TENANT_ID` AND `ENTRA_CLIENT_ID`, validated as an inseparable
- * pair at boot, so either-set ⇒ both-set). The SA token is the only credential
- * (SC-011): no static Entra secret.
- *
- * Parse-don't-validate: the pair is lifted into ONE `EntraWifConfig | undefined`
- * so its presence both gates the legs and carries the narrowed (non-undefined)
- * strings — no later non-null assertion needed.
+ * Build the Keycloak SA-mint leg's endpoint from its plan: the live endpoint over
+ * the fetch transport, or the fail-closed unwired stub.
  */
-const selectEntraAuthority = (
-  config: HostConfig,
-): { readonly wired: boolean; readonly entraWif: EntraWifExchange; readonly graphHttp: GraphHttp } => {
-  const entraConfig: EntraWifConfig | undefined =
-    config.ENTRA_TENANT_ID !== undefined && config.ENTRA_CLIENT_ID !== undefined
-      ? { tenantId: config.ENTRA_TENANT_ID, clientId: config.ENTRA_CLIENT_ID }
-      : undefined;
-  if (entraConfig === undefined) {
-    return { wired: false, entraWif: createUnwiredEntraWifExchange(), graphHttp: createUnwiredGraphHttp() };
-  }
-  return {
-    wired: true,
-    entraWif: createEntraWifExchange(entraConfig, createFetchHttpPost()),
-    graphHttp: createFetchGraphHttp(),
-  };
-};
+const buildKeycloakEndpoint = (leg: KeycloakLeg): KeycloakTokenEndpoint =>
+  match(leg)
+    .with({ kind: "wired" }, (wired) =>
+      createKeycloakTokenEndpoint({
+        config: { tokenUrl: wired.tokenUrl },
+        http: createFetchHttpPost(),
+        credentials: createAgentClientCredentials(wired.credentials),
+      }),
+    )
+    .with({ kind: "unwired" }, () => createUnwiredTokenEndpoint())
+    .exhaustive();
 
 /**
- * Keycloak SA-mint leg ⟸ KEYCLOAK_AGENT_CLIENT_CREDENTIALS present (a non-empty
- * credential map). The token URL is the explicit KEYCLOAK_TOKEN_URL (https-
- * validated at boot) or, when unset, derived from the realm issuer.
+ * Build the Entra leg from its plan. The WIF exchange and the Graph transport are
+ * wired TOGETHER (the app-only token from WIF is what the Graph transport
+ * presents). The SA token is the only credential (SC-011): no static Entra secret.
  */
-const selectKeycloakEndpoint = (
-  config: HostConfig,
-  realmIssuer: string,
-): { readonly wired: boolean; readonly endpoint: KeycloakTokenEndpoint } => {
-  if (Object.keys(config.KEYCLOAK_AGENT_CLIENT_CREDENTIALS).length === 0) {
-    return { wired: false, endpoint: createUnwiredTokenEndpoint() };
-  }
-  return {
-    wired: true,
-    endpoint: createKeycloakTokenEndpoint({
-      config: {
-        tokenUrl:
-          config.KEYCLOAK_TOKEN_URL ??
-          `${realmIssuer.replace(/\/$/, "")}/protocol/openid-connect/token`,
-      },
-      http: createFetchHttpPost(),
-      credentials: createAgentClientCredentials(config.KEYCLOAK_AGENT_CLIENT_CREDENTIALS),
-    }),
-  };
-};
-
-/**
- * FR-011: emit EXACTLY ONE boot warning naming the unwired leg(s), only when a
- * leg is partially/unwired. Both wired → no warning.
- */
-const warnUnwiredLegs = (logger: SyncLogger, keycloakWired: boolean, entraWired: boolean): void => {
-  const unwiredLegs: string[] = [];
-  if (!keycloakWired) {
-    unwiredLegs.push("Keycloak token endpoint (set KEYCLOAK_AGENT_CLIENT_CREDENTIALS)");
-  }
-  if (!entraWired) {
-    unwiredLegs.push("Entra WIF exchange + Graph transport (set ENTRA_TENANT_ID and ENTRA_CLIENT_ID)");
-  }
-  if (unwiredLegs.length > 0) {
-    logger.warn(
-      `capability authority leg(s) not wired — remain fail-closed (assigned scopes surface infra-unreachable): ${unwiredLegs.join("; ")}`,
-    );
-  }
-};
+const buildEntraAuthority = (
+  leg: EntraLeg,
+): { readonly entraWif: EntraWifExchange; readonly graphHttp: GraphHttp } =>
+  match(leg)
+    .with({ kind: "wired" }, (wired) => ({
+      entraWif: createEntraWifExchange({ tenantId: wired.tenantId, clientId: wired.clientId }, createFetchHttpPost()),
+      graphHttp: createFetchGraphHttp(),
+    }))
+    .with({ kind: "unwired" }, () => ({
+      entraWif: createUnwiredEntraWifExchange(),
+      graphHttp: createUnwiredGraphHttp(),
+    }))
+    .exhaustive();
 
 /**
  * Own-property lookup only — never resolve an inherited Object.prototype key
@@ -443,7 +407,7 @@ const assignedScopesFor = (config: HostConfig): AssignedScopes => (agentClientId
  * is wired into `runDag`, so the framework skips per-node minting entirely and
  * every node runs against the boot-scoped static client set, byte-identical to
  * today (SC-005), zero regression. Pools stay boot-scoped either way
- * (FR-W2-005); only authority resolution moves behind the broker.
+ * (FR-205); only authority resolution moves behind the broker.
  *
  * AD-3 config-presence gating (FR-011): each authority leg is wired LIVE only
  * when ITS OWN config is present — there is no single global enable flag.
@@ -455,6 +419,10 @@ const assignedScopesFor = (config: HostConfig): AssignedScopes => (agentClientId
  * unwired leg(s) (FR-011). An assigned-but-not-yet-wired scope still surfaces
  * `infra-unreachable` (retriable), never a silent success — and an un-granted
  * scope is refused at the local gate BEFORE either leg (zero Entra egress, FR-012).
+ *
+ * The decision is the pure `planAuthorityLegs` (`domain/authority-legs.ts`);
+ * this shell only builds the adapters each leg's plan names and emits that one
+ * warning (`unwiredLegsWarning`).
  */
 export const selectCapabilityBroker = (
   config: HostConfig,
@@ -477,15 +445,15 @@ export const selectCapabilityBroker = (
   }
   warnLiveBrokerMisconfig(config, logger, resolveSubjectToken);
 
-  // ── AD-3 config-presence gating (FR-011): wire each leg LIVE only when its own
-  //    config is present. No single global enable flag — a leg without its config
-  //    keeps the fail-closed unwired stub.
-  const keycloak = selectKeycloakEndpoint(config, config.REALM_JWT_ISSUER);
-  const entra = selectEntraAuthority(config);
-  warnUnwiredLegs(logger, keycloak.wired, entra.wired);
+  // ── AD-3 config-presence gating (FR-011): the pure plan decides each leg from
+  //    its own config; this shell builds the adapters and emits the ONE warning.
+  const legs = planAuthorityLegs(config, config.REALM_JWT_ISSUER);
+  const unwiredWarning = unwiredLegsWarning(legs);
+  if (unwiredWarning !== undefined) logger.warn(unwiredWarning);
+  const entra = buildEntraAuthority(legs.entra);
 
   return createKeycloakBroker({
-    endpoint: keycloak.endpoint,
+    endpoint: buildKeycloakEndpoint(legs.keycloak),
     entraWif: entra.entraWif,
     graphHttp: entra.graphHttp,
     assignedScopes: assignedScopesFor(config),
@@ -1060,7 +1028,7 @@ interface RunAuthority {
 
 /**
  * Build the per-run NodeContext factory. The resolved inbound identity is
- * threaded through to the factory (FR-W3-007), which derives `Invocation.origin`
+ * threaded through to the factory (FR-307), which derives `Invocation.origin`
  * from it: an OIDC `user` carries its `sub` (with the DAG's agent-type client as
  * `agentClientId`) so the run is correctly attributed to the user instead of
  * being silently re-labelled `agent`. The origin is returned alongside the base

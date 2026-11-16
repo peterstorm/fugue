@@ -1,6 +1,6 @@
 # Plan: F3 PR-D — Budget capability surface and complete spend metering
 
-**Spec:** `docs/plans/2026-08-27-f3-budget-capability.md`
+**Program plan:** `docs/plans/2026-08-27-f3-budget-capability.md` (F3 has no formal spec; that program plan and the ADRs below are its requirements source)
 **Authoritative decisions:** `docs/adr/0082-budgets-are-denominated-in-spend-not-tokens.md`, `docs/adr/0083-spend-durability-lives-in-a-ledger-port.md`, `CONTEXT.md`
 **Branch:** `feat/f3-budget-capability-surface`
 **Created:** 2026-08-30
@@ -552,7 +552,7 @@ The existing host test-directory typecheck exclusion remains out of scope (remov
 - Live price feeds and budget-aware retry unification.
 - A stock-host file-backend environment selector, implicit `DAGS_LOCAL_PATH` storage, or file-to-Redis migration tooling.
 - File compaction, background GC, fsync/power-loss guarantees, or network filesystems whose rename/lock semantics violate the F6 contract.
-- Broker minting of built-in `llm`/`judgeLlm`; the existing FR-W2-009 prohibition remains. This PR covers the boot-scoped main client and boot-scoped capability bag described by the F3 plan.
+- Broker minting of built-in `llm`/`judgeLlm`; the existing identity-scoped-capabilities FR-209 prohibition remains. This PR covers the boot-scoped main client and boot-scoped capability bag described by the F3 plan.
 - Repairing the host `tsconfig` test exclusion.
 
 ---

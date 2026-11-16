@@ -22,7 +22,7 @@ all), so the downstream capability broker could never preserve the *user's*
 identity when reaching Microsoft Graph / Dynamics. Every run was attributed to an
 agent.
 
-The identity-scoped-capabilities effort (US5, FR-W3-006/008/010) requires the
+The identity-scoped-capabilities effort (US5, FR-306/308/310) requires the
 opposite: when a human initiates a run, the user's subject must survive all the
 way down to the per-hop downstream token exchange so that resource-level
 authorization (mailbox, site, record scoping) is evaluated *as the user*, not as
@@ -44,7 +44,7 @@ The forces:
   401, never silently degrade to a weaker identity.
 - **This effort owns the inbound path.** It cannot block on a separate frontend
   migration to deliver the `user` identity; the host must accept and validate
-  `fugue-platform` JWTs itself (FR-W3-010).
+  `fugue-platform` JWTs itself (FR-310).
 
 ## Decision
 
@@ -132,9 +132,9 @@ Concretely, four seams change:
 
 4. **Origin-dispatched downstream authority** in `keycloak-broker.ts`:
    - `user`  → Standard Token Exchange V2 per hop (`exchangeV2`), `sub` stays
-     the user, `azp` becomes the agent (FR-W3-008 / SC-010);
+     the user, `azp` becomes the agent (FR-308 / SC-010);
    - `agent` → direct `client_credentials` (`mintClientCredentials`), **no
-     exchange** (FR-W3-009 / SC-010).
+     exchange** (FR-309 / SC-010).
 
    The cache-dedup identity follows the origin — the pair
    `(sub, agentClientId)` for a user hop (so distinct agents never share a
@@ -154,7 +154,7 @@ but unverifiable JWT is rejected, not downgraded.
 - User identity is preserved end-to-end: a human-initiated run reaches Microsoft
   Graph / Dynamics *as the user* via V2 exchange, satisfying US5 and the SC-010
   origin-dispatch requirement.
-- The host owns its own inbound path (FR-W3-010) — no dependency on a separate
+- The host owns its own inbound path (FR-310) — no dependency on a separate
   frontend migration to start producing `user` identities.
 - Additive, zero-regression: the admin / team / agent paths are byte-identical;
   only attribution of human-initiated runs changes (from a mislabelled `agent`
@@ -210,7 +210,7 @@ but unverifiable JWT is rejected, not downgraded.
 3. **Depend on an external frontend migration to deliver the inbound user path.**
    - Pros: the host would not need OIDC verification logic.
    - Cons: blocks this effort on out-of-team work and leaves the host unable to
-     accept a human identity until that lands. FR-W3-010 assigns inbound
+     accept a human identity until that lands. FR-310 assigns inbound
      ownership to this effort. Rejected: this effort owns the inbound path.
 
 4. **`act`-claim in-token delegation** (Keycloak emits a token whose `act`
@@ -245,7 +245,7 @@ gap.
   into the broker deps at the wiring site.
 - The framework seam (`InvocationOrigin`) stays exactly as shipped —
   provider-agnostic strings, no bearer credential. Widening it would leak a
-  host auth concern through the framework port (FR-W2-004 tension) and is
+  host auth concern through the framework port (FR-204 tension) and is
   rejected.
 - `ExchangeV2Request` gains the subject-token field in the same change that
   wires the live endpoint; the unwired default keeps failing closed until then.

@@ -9,7 +9,7 @@
  *   - the declarative BOOTSTRAP path (`supervisor/bootstrap/*`), which seeds
  *     tenants from a mounted ConfigMap at supervisor startup with no admin API.
  *
- * Both feed the SAME `tenantConfig` smart constructor (`tenant-registry.ts`), so
+ * Both feed the SAME `parseTenantConfig` parse (`tenant-registry.ts`), so
  * a config that registers over HTTP and the identical config seeded from the
  * bootstrap file produce a byte-identical `ActiveTenantConfig` — and the registry
  * `register`'s structural-equality idempotency (multi-tenant spec SC-009) then treats a
@@ -25,7 +25,7 @@ import type { Result } from "@fuguejs/framework";
 import { markSecretsRef } from "../../domain/tenant.js";
 import { canonicalTeam, canonicalizeTeamName } from "../../domain/auth.js";
 import type { TenantId } from "../../domain/tenant.js";
-import { tenantConfig } from "./tenant-registry.js";
+import { parseTenantConfig, describeTenantConfigFault } from "./tenant-registry.js";
 import type { ActiveTenantConfig, TenantConfigBase } from "./tenant-registry.js";
 import { tenantConfigInvalid } from "../../domain/host-error.js";
 import type { HostError } from "../../domain/host-error.js";
@@ -93,8 +93,8 @@ const parseRequiredField = (
 /**
  * Parse-don't-validate the admission limits at this trust boundary: both MUST be
  * numbers. A non-number (`"5"`, `true`, `[]`, `null`) is REJECTED rather than
- * coerced via `Number(...)` into a valid-looking limit. The registry smart
- * constructor (`tenantConfig`) is the final non-negative-integer assertion over
+ * coerced via `Number(...)` into a valid-looking limit. The registry's pure
+ * parse (`parseTenantConfig`) is the final non-negative-integer assertion over
  * these already-typed numbers.
  */
 const parseAdmission = (
@@ -108,18 +108,17 @@ const parseAdmission = (
 };
 
 /**
- * The registry smart constructor validates the parsed body. A semantic
- * rejection is a CLIENT error here (a bad config), so translate its
- * `config-invalid` (→ 500, reserved for host config-LOAD faults) into
- * `tenant-config-invalid` (→ 400) at this boundary. Any other error kind is
- * passed through unchanged.
+ * The registry's pure parse (`parseTenantConfig`) checks the remaining
+ * invariants. Its typed `TenantConfigFault` is a CLIENT error here (a bad
+ * config), so it maps straight to `tenant-config-invalid` (→ 400), rendered by
+ * the registry's one `describeTenantConfigFault` — never through the
+ * host-config-load `config-invalid` (→ 500).
  */
 const buildTenantConfig = (base: TenantConfigBase): Result<ActiveTenantConfig, HostError> => {
-  const built = tenantConfig(base);
-  if (!built.ok && built.error.kind === "config-invalid") {
-    return err(tenantConfigInvalid(built.error.message));
-  }
-  return built;
+  const parsed = parseTenantConfig(base);
+  return parsed.ok
+    ? parsed
+    : err(tenantConfigInvalid(`tenant '${base.id}': ${describeTenantConfigFault(parsed.error, base.id)}`));
 };
 
 /**
@@ -127,7 +126,7 @@ const buildTenantConfig = (base: TenantConfigBase): Result<ActiveTenantConfig, H
  *
  * The `id` arrives already branded (its smart constructor `tenantId` is the seam
  * that validates/brands it); this parser validates the remaining fields and
- * delegates the final invariant checks to the `tenantConfig` smart constructor.
+ * delegates the final invariant checks to the registry's `parseTenantConfig`.
  *
  * Any semantic rejection is translated to `tenant-config-invalid` (→ 400 on the
  * HTTP path; a fatal boot abort on the bootstrap path) rather than the registry's

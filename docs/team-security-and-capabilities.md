@@ -822,7 +822,7 @@ agent service-account clients, optional-scope mirror) and the host broker
 does **not** exist until an operator runs these steps is the Azure-portal
 provisioning of `fugue-agents`, its FICs, and its resource-scoping policies.
 
-Per FR-W4-006, every step has an **explicit, checkable acceptance** verified
+Per FR-406, every step has an **explicit, checkable acceptance** verified
 *before moving on*. Several are security-load-bearing (the FIC case-match, the
 no-secret invariant, the resource-scoping denial). A failed acceptance is a hard
 stop.
@@ -844,7 +844,7 @@ step runs against a real tenant.
 > Entra tenant + no live `fugue-platform` realm reachable at authoring time). **Do
 > not execute against a production tenant until spikes #1–#3 PASS.**
 
-### A.1 Register `fugue-agents` with the union of application permissions (FR-W4-001 / AD-3)
+### A.1 Register `fugue-agents` with the union of application permissions (FR-401 / AD-3)
 1. Entra admin center → App registrations → New registration. Name `fugue-agents`.
    **Single tenant**, no redirect URI (never does interactive auth). Register.
 2. Record **Application (client) ID** + **Directory (tenant) ID** → feed the
@@ -865,7 +865,7 @@ step runs against a real tenant.
 exist only as *Keycloak* clients); permission list is **exactly the union** (no
 broader sibling, no extra); all are **Application** (app-only), not Delegated.
 
-### A.2 Grant admin consent once (FR-W4-001)
+### A.2 Grant admin consent once (FR-401)
 App → API permissions → Grant admin consent → confirm each row **Granted for
 `<tenant>`**. For Dynamics, confirm the application user's security role is
 assigned in the target environment (Graph consent doesn't cover the Dataverse
@@ -873,7 +873,7 @@ role).
 **Acceptance:** every union permission Granted; consent recorded **once** at app
 level; no per-agent consent, no runtime consent prompt possible on the app-only path.
 
-### A.3 Add Federated Identity Credentials — Variant A (FR-W4-002 / AD-4)
+### A.3 Add Federated Identity Credentials — Variant A (FR-402 / AD-4)
 For each agent-type client (fugue-agent-mail, then fugue-agent-sites):
 1. App → Certificates & secrets → Federated credentials → Add → **Other issuer**.
 2. Set the three match fields, **copy-pasted verbatim** (Entra matches exactly,
@@ -895,7 +895,7 @@ it at `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token`
 not an array); **negative (mandatory)** — flip one char's case in a FIC subject,
 re-exchange, confirm `AADSTS70021`, then revert.
 
-### A.4 Resource-scoping policies (FR-W4-005 / AD-3)
+### A.4 Resource-scoping policies (FR-405 / AD-3)
 The app-only `.default` token carries the full union every call and **cannot be
 downscoped per request** — these two mechanisms are the *only* Entra-side
 containment. Spike #3 must prove both **coverage** and **denial**.
@@ -919,7 +919,7 @@ the Dataverse role permits only the needed read surface.)
 > A green positive path alone does **not** satisfy this step — the value is what
 > these policies *deny*. Both coverage and containment must pass.
 
-### A.5 Confirm zero stored secret/certificate (FR-W4-004 / SC-011)
+### A.5 Confirm zero stored secret/certificate (FR-404 / SC-011)
 App → Certificates & secrets: **Client secrets** empty, **Certificates** empty,
 **Federated credentials** = only the two FICs. The host's `entra-wif` config
 references no Entra secret/cert (only app/tenant IDs + the Keycloak assertion as
@@ -954,7 +954,7 @@ Lives in the `fugue-platform` realm package
 - The realm mints the federation assertion's audience via the **`entra-exchange`**
   optional client scope — a hardcoded-audience protocol mapper stamping
   `aud: api://AzureADTokenExchange` on the **access token only**, exactly one
-  mapper (FR-W4-003). Every FIC's `audience` must equal this.
+  mapper (FR-403). Every FIC's `audience` must equal this.
 - Agent-type clients **fugue-agent-mail** / **fugue-agent-sites** are
   confidential service-account (client-credentials only; ROPC/standard-flow
   disabled), each carrying the optional scope mapping to its Entra permission.
@@ -965,7 +965,7 @@ Lives in the `fugue-platform` realm package
 - **Golden-test confirmation:** FuguePlatformRealmGoldenTest.java already
   asserts both client types present (bothClientTypesPresent(), SC-012) and the
   `entra-exchange` scope mints exactly `aud: api://AzureADTokenExchange`,
-  access-token-only, single mapper (FR-W4-003), optional-never-default.
+  access-token-only, single mapper (FR-403), optional-never-default.
 
 ---
 
@@ -996,7 +996,7 @@ Located in `docs/spikes/`. Run waves 3–4 only after these PASS:
 
 | Constant | Value | Source of truth |
 |---|---|---|
-| Entra app | `fugue-agents` (one app; the deployed host process is the trust boundary) | AD-3 / FR-W4-001 |
+| Entra app | `fugue-agents` (one app; the deployed host process is the trust boundary) | AD-3 / FR-401 |
 | Federation audience | `api://AzureADTokenExchange` | minted by the `entra-exchange` Keycloak scope; every FIC's `audience` |
 | Issuer | `https://<kc-host>/realms/fugue-platform` (no trailing slash) | the `fugue-platform` realm; every FIC's `issuer` |
 | Agent-type clients | fugue-agent-mail, fugue-agent-sites | `fugue-platform` ClientStep (one FIC each, variant A) |

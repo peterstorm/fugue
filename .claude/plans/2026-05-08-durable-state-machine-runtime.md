@@ -454,7 +454,7 @@ Two parallel tracks; both depend on Phase 3 layer-3 interfaces and Phase 1 kerne
 > - `queue/types.ts`: `DeadLetterOpts.getRecipients` signature is `(id: string, err: unknown) => readonly string[]` (not `(data: unknown)`).
 > - `queue/in-memory.ts`: `errorHandlers` are now wired up by `worker.onError(...)` and invoked when a `failedHandler` throws — surface the same contract from any new BullMQ adapter you reference.
 >
-> Spec FR-029a (hook-crash retry) was added during remediation — check it before touching DAG runtime types. ADR 0008 documents the decision.
+> Spec FR-084 (hook-crash retry) was added during remediation — check it before touching DAG runtime types. ADR 0008 documents the decision.
 
 ---
 

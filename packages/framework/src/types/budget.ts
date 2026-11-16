@@ -55,7 +55,7 @@ export type CeilingKind = Ceiling["kind"];
  * - **Non-empty** because "a budget that limits nothing" and "no budget" are the
  *   same fact, and one fact deserves one spelling. The second spelling is
  *   `undefined`, which is what the pre-existing absent-budget contract already
- *   used (FR-W1-006).
+ *   used (FR-106).
  * - **At most one per kind** because two token ceilings would raise "which one
  *   applies?", a question with no good answer at the point of refusal.
  * - **Canonically ordered** so the ceiling reported in a refusal is stable

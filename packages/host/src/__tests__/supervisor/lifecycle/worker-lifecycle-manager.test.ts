@@ -146,6 +146,13 @@ const fixedClock = (start = 0) => {
   return { clock, advance: (ms: number) => { t += ms; } };
 };
 
+/** Persist a worker record as a prior supervisor would have, for `reconcileReadopt` to find. */
+const seedRecord = (fake: ReturnType<typeof createInMemoryWorkerRedisFake>, rec: WorkerRecord): void => {
+  fake.store.set(`${WORKER_KEY_PREFIX}${rec.tenant}`, JSON.stringify({
+    pid: rec.pid, udsPath: rec.udsPath, startedAt: rec.startedAt, health: rec.health, eagerPin: rec.eagerPin,
+  }));
+};
+
 /** One unpinned tenant `acme` over an in-memory registry, a fixed clock and a silent log. */
 const acmeLifecycle = () => {
   const fake = createInMemoryWorkerRedisFake();
@@ -350,74 +357,22 @@ describe("createWorkerLifecycle: onCrash (FR-015, AD-8 containment)", () => {
   });
 });
 
-// ── Per-tenant Redis ACL provisioning (ADR-0067, AD-6) ──────────────────────────
+// ── Spawn env handoff + per-tenant Redis ACL provisioning (ADR-0061/0067/0074) ──
+//
+// Which keys the env carries, their precedence and their absence are pinned at
+// the pure seam (`composeSpawnEnv`, worker-lifecycle-decisions.test.ts). Here:
+// the manager hands the registry's spawn config and the minted credential to it
+// and the result reaches the spawn spec; a provisioning failure fails closed.
 
-describe("createWorkerLifecycle: per-tenant HITL queue-depth env (ADR-0074)", () => {
-  test("forwards the registry maxQueuedRuns into the worker spawn env (handoff)", async () => {
-    const fake = createInMemoryWorkerRedisFake();
-    const reg = createWorkerRegistry(fake.redis, async () => true);
-    const { spawn, proc, spawned } = makeSpawn();
-    const lc = createWorkerLifecycle({
-      spawn, proc, registry: reg, probe: async () => true,
-      tenants: tenantsView({ acme: { eagerPin: false, maxQueuedRuns: 7 } }),
-      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
-    });
-    const r = await lc.ensureWorker(tid("acme"));
-    expect(r.ok).toBe(true);
-    // The configured ceiling reached the worker via the spawn env (the handoff),
-    // STRINGIFIED. A regression dropping or mis-stringifying it would silently make
-    // the worker fall back to "unlimited", defeating ADR-0074's durable-path
-    // queue-depth admission — with no other failing test.
-    const spec = spawned[0]!.spec;
-    expect(spec.extraEnv?.["FUGUE_MAX_QUEUED_RUNS"]).toBe("7");
-  });
-
-  test("no maxQueuedRuns configured → env absent (zero-regression default)", async () => {
-    const { lc, spawned } = acmeLifecycle();
-    await lc.ensureWorker(tid("acme"));
-    const spec = spawned[0]!.spec;
-    expect(spec.extraEnv?.["FUGUE_MAX_QUEUED_RUNS"]).toBeUndefined();
-  });
-});
-
-describe("createWorkerLifecycle: per-tenant DAG root env (ADR-0061 at-rest isolation)", () => {
-  test("forwards the registry dagsRoot into the worker spawn env as DAGS_LOCAL_PATH", async () => {
-    const fake = createInMemoryWorkerRedisFake();
-    const reg = createWorkerRegistry(fake.redis, async () => true);
-    const { spawn, proc, spawned } = makeSpawn();
-    const lc = createWorkerLifecycle({
-      spawn, proc, registry: reg, probe: async () => true,
-      tenants: tenantsView({ acme: { eagerPin: false, dagsRoot: "/dags/acme" } }),
-      clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
-    });
-    const r = await lc.ensureWorker(tid("acme"));
-    expect(r.ok).toBe(true);
-    // The tenant's DAG root reached the worker via the spawn env: the worker runs
-    // the LocalGitAdapter rooted HERE and globs ONLY this team's staged bundle. A
-    // regression dropping it would make the worker inherit the pod-wide
-    // DAGS_LOCAL_PATH (the whole multi-team tree), collapsing the at-rest isolation
-    // boundary this field exists to enforce — with no other failing test.
-    const spec = spawned[0]!.spec;
-    expect(spec.extraEnv?.["DAGS_LOCAL_PATH"]).toBe("/dags/acme");
-  });
-
-  test("no dagsRoot configured → env absent (the inherited DAGS_LOCAL_PATH stands)", async () => {
-    const { lc, spawned } = acmeLifecycle();
-    await lc.ensureWorker(tid("acme"));
-    const spec = spawned[0]!.spec;
-    expect(spec.extraEnv?.["DAGS_LOCAL_PATH"]).toBeUndefined();
-  });
-});
-
-describe("createWorkerLifecycle: per-tenant Redis ACL provisioning (ADR-0067)", () => {
-  test("injects the minted ACL credential into the worker spawn env (handoff)", async () => {
+describe("createWorkerLifecycle: spawn env handoff and Redis ACL provisioning", () => {
+  test("the registry's dagsRoot + maxQueuedRuns and the minted ACL credential reach the worker spawn env", async () => {
     const fake = createInMemoryWorkerRedisFake();
     const reg = createWorkerRegistry(fake.redis, async () => true);
     const { spawn, proc, spawned } = makeSpawn();
     const provisioned: TenantId[] = [];
     const lc = createWorkerLifecycle({
       spawn, proc, registry: reg, probe: async () => true,
-      tenants: tenantsView({ acme: { eagerPin: false } }),
+      tenants: tenantsView({ acme: { eagerPin: false, maxQueuedRuns: 7, dagsRoot: "/dags/acme" } }),
       clock: fixedClock().clock, config: baseConfig(), logger: silentLog,
       provisionRedisAcl: async (tenant) => {
         provisioned.push(tenant);
@@ -427,10 +382,21 @@ describe("createWorkerLifecycle: per-tenant Redis ACL provisioning (ADR-0067)", 
     const r = await lc.ensureWorker(tid("acme"));
     expect(r.ok).toBe(true);
     expect(provisioned).toEqual([tid("acme")]);
-    // The minted credential reached the worker via the spawn env (the handoff).
-    const spec = spawned[0]!.spec;
-    expect(spec.extraEnv?.["FUGUE_REDIS_ACL_USERNAME"]).toBe("fugue-tenant-acme");
-    expect(spec.extraEnv?.["FUGUE_REDIS_ACL_PASSWORD"]).toBe("minted-secret-256");
+    // A regression dropping any of these is silent elsewhere: no dagsRoot means the
+    // worker globs the whole multi-team tree; no ceiling means "unlimited" HITL
+    // admission; no credential means the shared default Redis user.
+    expect(spawned[0]!.spec.extraEnv).toEqual({
+      DAGS_LOCAL_PATH: "/dags/acme",
+      FUGUE_MAX_QUEUED_RUNS: "7",
+      FUGUE_REDIS_ACL_USERNAME: "fugue-tenant-acme",
+      FUGUE_REDIS_ACL_PASSWORD: "minted-secret-256",
+    });
+  });
+
+  test("nothing to forward and no provisioner wired: the spawn carries no extraEnv", async () => {
+    const { lc, spawned } = acmeLifecycle();
+    await lc.ensureWorker(tid("acme"));
+    expect(spawned[0]!.spec.extraEnv).toBeUndefined();
   });
 
   test("fails closed (worker-unavailable, NEVER spawns) when ACL provisioning errors", async () => {
@@ -448,13 +414,6 @@ describe("createWorkerLifecycle: per-tenant Redis ACL provisioning (ADR-0067)", 
     if (!r.ok) expect(r.error.kind).toBe("worker-unavailable");
     expect(spawned.length).toBe(0); // never spawned — no worker started without its scoped credential
     expect(lc.liveWorkerCount()).toBe(0);
-  });
-
-  test("no provisioner wired → no ACL env injected (zero-regression default)", async () => {
-    const { lc, spawned } = acmeLifecycle();
-    await lc.ensureWorker(tid("acme"));
-    const spec = spawned[0]!.spec;
-    expect(spec.extraEnv?.["FUGUE_REDIS_ACL_USERNAME"]).toBeUndefined();
   });
 
   // ── FR-033 TOCTOU: the cap holds across the ACL-provisioning await window ──────
@@ -510,18 +469,13 @@ describe("createWorkerLifecycle: per-tenant Redis ACL provisioning (ADR-0067)", 
 // ── reconcileReadopt: eagerPin from the registry (C3, AD-7, SC-006) ─────────────
 
 describe("createWorkerLifecycle: reconcileReadopt (SC-006, C3 eager-pin)", () => {
-  const seed = async (fake: ReturnType<typeof createInMemoryWorkerRedisFake>, rec: WorkerRecord) => {
-    fake.store.set(`${WORKER_KEY_PREFIX}${rec.tenant}`, JSON.stringify({
-      pid: rec.pid, udsPath: rec.udsPath, startedAt: rec.startedAt, health: rec.health, eagerPin: rec.eagerPin,
-    }));
-  };
 
   test("re-adopts a live worker and sources eagerPin from the TENANT REGISTRY (not the record)", async () => {
     const fake = createInMemoryWorkerRedisFake();
     const reg = createWorkerRegistry(fake.redis, async () => true);
     // The persisted record says eagerPin:false, but the live registry says TRUE —
     // the registry is authoritative (a pin toggled while the supervisor was down).
-    await seed(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 1000, health: "live", eagerPin: false });
+    seedRecord(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 1000, health: "live", eagerPin: false });
     const lc = createWorkerLifecycle({
       spawn: makeSpawn().spawn, proc: makeSpawn().proc, registry: reg, probe: async () => true,
       tenants: tenantsView({ acme: { eagerPin: true } }),
@@ -536,7 +490,7 @@ describe("createWorkerLifecycle: reconcileReadopt (SC-006, C3 eager-pin)", () =>
   test("a re-adopted eager-pinned worker is NOT idle-evictable (AD-7)", async () => {
     const fake = createInMemoryWorkerRedisFake();
     const reg = createWorkerRegistry(fake.redis, async () => true);
-    await seed(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "live", eagerPin: false });
+    seedRecord(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "live", eagerPin: false });
     const clk = fixedClock();
     const lc = createWorkerLifecycle({
       spawn: makeSpawn().spawn, proc: makeSpawn().proc, registry: reg, probe: async () => true,
@@ -554,7 +508,7 @@ describe("createWorkerLifecycle: reconcileReadopt (SC-006, C3 eager-pin)", () =>
   test("idle-evict sweep DOES evict an unpinned idle worker", async () => {
     const fake = createInMemoryWorkerRedisFake();
     const reg = createWorkerRegistry(fake.redis, async () => true);
-    await seed(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "live", eagerPin: false });
+    seedRecord(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "live", eagerPin: false });
     const clk = fixedClock();
     const lc = createWorkerLifecycle({
       spawn: makeSpawn().spawn, proc: makeSpawn().proc, registry: reg, probe: async () => true,
@@ -574,7 +528,7 @@ describe("createWorkerLifecycle: reconcileReadopt (SC-006, C3 eager-pin)", () =>
     const base = makeSpawn();
     // Persisted as DRAINING (SIGTERM'd to drain before the supervisor restart) and
     // still answering its UDS (probe true) → it is re-adopted.
-    await seed(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "draining", eagerPin: false });
+    seedRecord(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "draining", eagerPin: false });
     const lc = createWorkerLifecycle({
       spawn: base.spawn, proc: base.proc, registry: reg, probe: async () => true,
       tenants: tenantsView({ acme: { eagerPin: false } }),
@@ -766,11 +720,6 @@ describe("createWorkerLifecycle: crash-exit watcher (FR-014/FR-015, AD-8)", () =
 // tenant at 503 forever (an eager-pinned one is never idle-evicted either).
 
 describe("createWorkerLifecycle: liveness sweep for re-adopted workers (SC-006, FR-014/FR-015)", () => {
-  const seed = (fake: ReturnType<typeof createInMemoryWorkerRedisFake>, rec: WorkerRecord) => {
-    fake.store.set(`${WORKER_KEY_PREFIX}${rec.tenant}`, JSON.stringify({
-      pid: rec.pid, udsPath: rec.udsPath, startedAt: rec.startedAt, health: rec.health, eagerPin: rec.eagerPin,
-    }));
-  };
 
   /** Wrap a base proc so liveness is controllable per-pid (default: alive). */
   const controllableProc = (base: ProcManagePort) => {
@@ -788,7 +737,7 @@ describe("createWorkerLifecycle: liveness sweep for re-adopted workers (SC-006, 
     const base = makeSpawn();
     const { proc, kill } = controllableProc(base.proc);
     // Eager-pinned: also proves the never-idle-evicted wedge case recovers.
-    seed(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "live", eagerPin: true });
+    seedRecord(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "live", eagerPin: true });
     const lc = createWorkerLifecycle({
       spawn: base.spawn, proc, registry: reg, probe: async () => true,
       tenants: tenantsView({ acme: { eagerPin: true } }),
@@ -812,7 +761,7 @@ describe("createWorkerLifecycle: liveness sweep for re-adopted workers (SC-006, 
     const reg = createWorkerRegistry(fake.redis, async () => true);
     const base = makeSpawn();
     const { proc } = controllableProc(base.proc); // nothing killed → all alive
-    seed(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "live", eagerPin: false });
+    seedRecord(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "live", eagerPin: false });
     const lc = createWorkerLifecycle({
       spawn: base.spawn, proc, registry: reg, probe: async () => true,
       tenants: tenantsView({ acme: { eagerPin: false } }),
@@ -861,7 +810,7 @@ describe("createWorkerLifecycle: liveness sweep for re-adopted workers (SC-006, 
         return false; // the re-parented pid is dead
       },
     };
-    seed(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "live", eagerPin: true });
+    seedRecord(fake, { tenant: tid("acme"), pid: 5, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "live", eagerPin: true });
     const lc = createWorkerLifecycle({
       spawn: base.spawn, proc, registry: reg, probe: async () => true,
       tenants: tenantsView({ acme: { eagerPin: true } }),
@@ -890,7 +839,7 @@ describe("createWorkerLifecycle: liveness sweep for re-adopted workers (SC-006, 
     const base = makeSpawn();
     const { proc, kill } = controllableProc(base.proc);
     // Re-adopted as DRAINING (a worker SIGTERM'd to drain that survived the restart).
-    seed(fake, { tenant: tid("acme"), pid: 7, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "draining", eagerPin: false });
+    seedRecord(fake, { tenant: tid("acme"), pid: 7, udsPath: "/run/fugue/acme.sock", startedAt: 0, health: "draining", eagerPin: false });
     const lc = createWorkerLifecycle({
       spawn: base.spawn, proc, registry: reg, probe: async () => true,
       tenants: tenantsView({ acme: { eagerPin: false } }),
@@ -943,6 +892,30 @@ describe("createWorkerLifecycle: drain kill deadline (FR-017, FR-004)", () => {
     expect(await lc.livenessSweep()).toEqual([]);
     expect(signalled.map((s) => s.sig)).toEqual(["SIGTERM"]); // only the drain's own SIGTERM
     expect(lc.liveWorkerCount()).toBe(1);
+  });
+
+  // A RE-ADOPTED draining worker has no exit watcher: its overdue drain is
+  // caught by the same sweep, before the dead-pid probe ever runs.
+  test("a re-adopted draining worker past its deadline is hard-stopped by the sweep", async () => {
+    const fake = createInMemoryWorkerRedisFake();
+    const registry = createWorkerRegistry(fake.redis, async () => true);
+    const { spawn, proc, spawned, signalled } = makeSpawn();
+    const clk = fixedClock(500);
+    seedRecord(fake, { tenant: tid("acme"), pid: 7, udsPath: "/run/fugue/acme.sock", startedAt: 500, health: "draining", eagerPin: false });
+    const lc = createWorkerLifecycle({
+      spawn, proc, registry, probe: async () => true,
+      tenants: tenantsView({ acme: { eagerPin: false } }),
+      clock: clk.clock, config: baseConfig({ drainKillAfterMs: 1_000 }), logger: silentLog,
+    });
+    await lc.reconcileReadopt();
+    expect(lc.liveWorkerCount()).toBe(1);
+
+    clk.advance(1_000);
+    expect(await lc.livenessSweep()).toEqual([tid("acme")]);
+    expect(signalled).toEqual([{ pid: 7, sig: "SIGTERM" }, { pid: 7, sig: "SIGKILL" }]);
+    expect(fake.store.has(`${WORKER_KEY_PREFIX}acme`)).toBe(false);
+    expect(lc.liveWorkerCount()).toBe(0);
+    expect(spawned.length).toBe(0); // hard-stopped, never restarted
   });
 
   test("a drain past its deadline is hard-stopped, and the tenant can spawn again", async () => {

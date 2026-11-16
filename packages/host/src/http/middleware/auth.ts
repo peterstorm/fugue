@@ -7,7 +7,7 @@
  *    AND is JWT-shaped, with a verifier configured. Signature verified via the
  *    INJECTED JWKS verifier, then pure claim validation (iss=realm,
  *    aud=fugue-host, exp>now). On success the identity is
- *    `{ kind: "user", sub, azp, canRunDag }` (FR-W3-006/007) — `canRunDag`
+ *    `{ kind: "user", sub, azp, canRunDag }` (FR-306/307) — `canRunDag`
  *    carries the wiring site's REQUIRED `authorizeUserRun` policy
  *    (`RealmJwtDeps`), the inbound run-gate decision for this user. FAIL
  *    CLOSED — never falls through to the team path on failure.
@@ -87,9 +87,9 @@ export interface RealmJwtDeps {
    * tests). The ONLY producer of `SignatureVerifiedClaims`.
    */
   readonly verify: VerifyRealmJwt;
-  /** The fugue-platform realm issuer the JWT must declare (FR-W3-006). */
+  /** The fugue-platform realm issuer the JWT must declare (FR-306). */
   readonly expectedIss: string;
-  /** The audience this host must appear in — `fugue-host` (FR-W3-006). */
+  /** The audience this host must appear in — `fugue-host` (FR-306). */
   readonly expectedAud: string;
   /**
    * AUTHORIZATION policy for user-initiated runs: may `user` run/see DAGs
@@ -241,7 +241,7 @@ const verifyJwtSignature = async (
 };
 
 /**
- * Path 2: fugue-platform OIDC JWT — first-class inbound mode (FR-W3-006).
+ * Path 2: fugue-platform OIDC JWT — first-class inbound mode (FR-306).
  * FAIL CLOSED: a JWT-shaped token that reaches here must be fully verified and
  * validated; it never falls through to the team path on failure.
  */

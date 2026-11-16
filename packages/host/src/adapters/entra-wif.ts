@@ -19,12 +19,12 @@
  *
  * The assertion's OWN `aud` claim (`api://AzureADTokenExchange`) is NOT a field
  * this host emits — it is stamped into the Keycloak SA token by the
- * `entra-exchange` protocol mapper at mint time (FR-W4-003) and enforced
+ * `entra-exchange` protocol mapper at mint time (FR-403) and enforced
  * Azure-side by the `fugue-agents` federated-identity-credential (FIC) config.
  * `AZURE_AD_TOKEN_EXCHANGE_AUDIENCE` below is the reference value those two sides
  * must agree on (informational), not a request parameter.
  *
- * Error mapping (FR-X-002): an Entra FIC subject/issuer mismatch, a WIF
+ * Error mapping (FR-502): an Entra FIC subject/issuer mismatch, a WIF
  * rejection, or a resource-scoping denial all collapse into one
  * `downstream-denied` (a settled authorization "no", carrying `resource` +
  * `reason` for the audit). A transient reach failure (DNS/socket/5xx, "we never
@@ -33,10 +33,10 @@
  *
  * @satisfies US7 — a node reaches Graph/Dynamics through a narrowed handle over
  *   an app-only token minted via WIF; no static Entra secret exists.
- * @satisfies FR-W4-004 — the Keycloak SA token is presented as `client_assertion`
+ * @satisfies FR-404 — the Keycloak SA token is presented as `client_assertion`
  *   in a `client_credentials` request to Entra; an app-only token is returned;
  *   no stored Entra secret or certificate.
- * @satisfies FR-X-002 — FIC mismatch / WIF rejection / resource-scoping denial
+ * @satisfies FR-502 — FIC mismatch / WIF rejection / resource-scoping denial
  *   collapse into `downstream-denied`, kept distinct from `infra-unreachable`.
  * @satisfies SC-011 — 0 static Entra secrets/certificates on this path.
  */
@@ -51,7 +51,7 @@ import { parseOAuthTokenBody, oauthErrorDescription } from "./oauth-token-body.j
  * The reference `aud` value an Entra federated-credential `client_assertion` must
  * carry. This is the Azure AD token-exchange audience. NOTE: this host does NOT
  * emit it — the assertion's `aud` is stamped into the Keycloak SA token by the
- * `entra-exchange` protocol mapper (FR-W4-003) and validated Azure-side by the
+ * `entra-exchange` protocol mapper (FR-403) and validated Azure-side by the
  * `fugue-agents` FIC. This constant is the single value those two sides must
  * AGREE on, kept here as the documented reference (informational), so a drift
  * between the Keycloak mapper and the Azure FIC has one canonical anchor.
@@ -158,13 +158,13 @@ export const wifTokenEndpoint = (cfg: EntraWifConfig): string => {
  *   - NO `client_secret` and NO certificate field appear (SC-011, emitted here):
  *     the caller-provided Keycloak SA token IS the credential.
  *   - the requested `scope` is the downstream resource's `.default` (app-only) —
- *     the host-side `.default` request half of FR-W4-005's narrowing (the
+ *     the host-side `.default` request half of FR-405's narrowing (the
  *     operation-method/URL half lives in graph-capability.ts).
  *
  * NOT emitted here: the assertion's `aud` claim
  * (`api://AzureADTokenExchange`). That pin is an AZURE-SIDE federated-credential
  * (FIC) constraint, mirrored Keycloak-side by the `entra-exchange` protocol
- * mapper that stamps `aud` into the SA assertion at mint time (FR-W4-003) — it is
+ * mapper that stamps `aud` into the SA assertion at mint time (FR-403) — it is
  * a property of the assertion token, not a field this request carries.
  */
 export const buildWifFormBody = (cfg: EntraWifConfig, req: WifExchangeRequest): string => {
@@ -176,7 +176,7 @@ export const buildWifFormBody = (cfg: EntraWifConfig, req: WifExchangeRequest): 
   params.set("client_assertion_type", JWT_BEARER_ASSERTION_TYPE);
   params.set("client_assertion", req.clientAssertion);
   // App-only: request the resource's `.default` scope; the resource audience
-  // narrows where the union-permission token can act (FR-W4-005).
+  // narrows where the union-permission token can act (FR-405).
   params.set("scope", `${req.audience}/.default`);
   return params.toString();
 };
@@ -189,7 +189,7 @@ export const buildWifFormBody = (cfg: EntraWifConfig, req: WifExchangeRequest): 
  * - `200` with an `access_token` → `ok(AppOnlyToken)`.
  * - a 4xx authorization status (`400`/`401`/`403`) → `downstream-denied`: a
  *   settled "no" (FIC mismatch, WIF rejection, resource-scoping denial all
- *   collapse here per FR-X-002). `reason` carries Entra's `error_description`
+ *   collapse here per FR-502). `reason` carries Entra's `error_description`
  *   (or `error`), `resource` the audience that was refused.
  * - `429`/`503` throttling → `infra-unreachable`, but with a message NAMING the
  *   throttle/rate-limit so operators aren't misdirected by a generic "unreachable"
@@ -218,7 +218,7 @@ export const mapWifResponse = (
   }
 
   // A settled authorization "no" — FIC mismatch / WIF rejection / resource denial
-  // all collapse into one `downstream-denied` (FR-X-002).
+  // all collapse into one `downstream-denied` (FR-502).
   if (res.status === 400 || res.status === 401 || res.status === 403) {
     const reason = oauthErrorDescription(res.json) ?? `Entra WIF denied (HTTP ${res.status})`;
     return err({ kind: "downstream-denied", resource: audience, reason });

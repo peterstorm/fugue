@@ -3,7 +3,8 @@
 // filesystem, no lock and no clock of its own.
 //
 // `journal.ts`'s `appendEvent` is the imperative shell around this: it lists,
-// stamps the injected clock, executes the returned plan with `atomicWriteFile`,
+// hands its injected clock to `stampRecordedAt` (which validates the reading),
+// executes the returned plan with `atomicWriteFile`,
 // and normalizes failures at the public journal boundary. The split mirrors the
 // `checkpointer.ts` → `checkpointer-codec.ts` template already used by this
 // subsystem, and gives the SC-003 convergence / FR-015 dedup / sequence-ceiling
@@ -21,11 +22,13 @@ import {
 } from "./layout.js";
 import {
   parseJournalSequence,
+  parseRecordedAtMs,
   serializeFileEventRecord,
 } from "./event-record.js";
 import type { DedupKey, FileEventRecord, RecordedAtMs } from "./event-record.js";
 import type { FrameworkError } from "../types/errors.js";
-import { fileCacheError, type FileOperation } from "./boundary-error.js";
+import { err, type Result } from "../types/result.js";
+import { fileCacheError, fileThrownValueMessage, type FileOperation } from "./boundary-error.js";
 
 /**
  * Build the ADR-0080 typed failure for the journal's permanent capacity ceiling.
@@ -70,6 +73,31 @@ export const isAlreadyCommitted = (
   if (dedupKey === "") return false;
   const digest = keyDigest(dedupKey);
   return existing.some((name) => name.endsWith(`-${digest}.json`));
+};
+
+/**
+ * Read the injected clock once and mint the record's `recordedAtMs`.
+ *
+ * Total: a clock that throws (any value, including hostile ones whose
+ * rendering itself throws) or returns a non-finite / non-number reading is an
+ * `err` naming the clock as the failing dependency — never a throw — so the
+ * shell can classify it as a clock failure instead of misattributing it to the
+ * lock machinery or the record codec. The stamp is minted through
+ * `parseRecordedAtMs`, the record codec's single finiteness clause, so the
+ * journal can never hand the serializer a value the strict reader would
+ * reject. The reading is used verbatim: no rounding, no monotonic clamp.
+ */
+export const stampRecordedAt = (now: () => unknown): Result<RecordedAtMs, string> => {
+  const failed = (detail: string): Result<RecordedAtMs, string> =>
+    err(`clock failed while stamping the append: ${detail}`);
+  let reading: unknown;
+  try {
+    reading = now();
+  } catch (error) {
+    return failed(fileThrownValueMessage(error));
+  }
+  const parsed = parseRecordedAtMs(reading);
+  return parsed.ok ? parsed : failed(parsed.error);
 };
 
 /** The bytes and the durable name a planned append commits. */

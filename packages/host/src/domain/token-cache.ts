@@ -1,9 +1,8 @@
 /**
  * Token Cache — pure, time-injected freshness logic for minted downstream
- * tokens. The functional core of the Keycloak-backed broker
- * (`adapters/keycloak-broker.ts`, which holds two cache cells over this module
- * and is selected at boot when `REALM_JWT_ISSUER` is set; the cache itself is
- * mandated by FR-W2-007): this
+ * tokens, mandated by FR-207. Its stateful shell is `adapters/token-cell.ts`,
+ * which the Keycloak-backed broker (`adapters/keycloak-broker.ts`, selected at
+ * boot when `REALM_JWT_ISSUER` is set) instantiates once per egress. This
  * module decides WHETHER a cached token may be reused and HOW its lookup key is
  * built, with zero I/O and zero ambient clock — `now` is always injected so the
  * decision is a deterministic function of its inputs (Constraint: functional
@@ -11,14 +10,14 @@
  *
  * Two invariants live here in TYPES, not comments:
  *   - A cache MISS is the absence of a value (`undefined`), never an `Err`
- *     (FR-X-003) — a miss is a normal control-flow signal to mint, not a
+ *     (FR-503) — a miss is a normal control-flow signal to mint, not a
  *     failure. `lookup` returns `CachedToken | undefined`; there is no error
  *     channel to misuse.
  *   - A `CachedToken` carries its OWN absolute expiry (`expiresAt`), so
  *     freshness is the entry's property, not a separate TTL the caller must
  *     remember to thread. `isFresh` therefore needs only `(entry, now)`.
  *
- * @satisfies FR-X-003 — token cache miss is NOT an error; it triggers a mint
+ * @satisfies FR-503 — token cache miss is NOT an error; it triggers a mint
  * @satisfies SC-008 — ≤ 1 token request per (identity,audience,scope) per TTL
  *   window: a key resolves to the same cached token for every lookup inside its
  *   freshness window, so the broker mints at most once per window (property-
@@ -82,6 +81,38 @@ export const cacheToken = (token: string, storedAt: number, ttlMs: number): Cach
 });
 
 /**
+ * Early-refresh skew margin — a DURATION in milliseconds (not an instant). A
+ * cached token is treated as stale this many millis BEFORE its real
+ * `expires_in`, so a token looked up just before expiry is re-minted rather
+ * than presented downstream microseconds before it lapses — which would 401 and
+ * (mis)map to `downstream-denied`, the never-retried category (review I2,
+ * ADR-0059).
+ */
+export const TOKEN_REFRESH_SKEW_MS = 60_000;
+
+/**
+ * Effective cache TTL for a freshly minted token whose issuer reported
+ * `expiresInSec`: its lifetime minus `TOKEN_REFRESH_SKEW_MS`, but never less
+ * than half its lifetime, so a token whose own lifetime is below `2 × skew`
+ * still caches for a useful window instead of being born stale.
+ *
+ * Total over every `number`: a lifetime that is not a finite positive number
+ * (`NaN`, `±Infinity`, `0`, negative — a misbehaving issuer) is UNCACHEABLE and
+ * yields exactly `0`. A 0 TTL makes `expiresAt === storedAt`, which `isFresh`
+ * reads as stale at the store instant, and `store` never binds an entry that is
+ * stale when stored — so an uncacheable token is used once and never reused.
+ * A finite lifetime too large to express in milliseconds is clamped to
+ * `Number.MAX_SAFE_INTEGER` ms, so the result is always a finite number `>= 0`.
+ */
+export const effectiveTtlMs = (expiresInSec: number): number => {
+  if (!Number.isFinite(expiresInSec) || expiresInSec <= 0) return 0;
+  // Clamped so a huge-but-finite lifetime cannot overflow to Infinity in ms.
+  const lifetimeMs = Math.min(expiresInSec * 1000, Number.MAX_SAFE_INTEGER);
+  const margin = Math.min(TOKEN_REFRESH_SKEW_MS, Math.floor(lifetimeMs / 2));
+  return lifetimeMs - margin;
+};
+
+/**
  * Freshness predicate with an EXPLICIT boundary: an entry is fresh iff
  * `now < entry.expiresAt` — strictly less-than. At the exact expiry instant
  * (`now === expiresAt`) the entry is STALE. Rationale: `expiresAt` is the first
@@ -106,7 +137,7 @@ export const emptyCache: TokenCache = { entries: {} };
 /**
  * Look up a key in the cache, returning the FRESH entry or `undefined`.
  *
- * "Miss" is first-class absence, NOT an error (FR-X-003): an absent key and an
+ * "Miss" is first-class absence, NOT an error (FR-503): an absent key and an
  * expired-but-present key both read as `undefined`, because to the caller they
  * mean the same thing — "no reusable token, go mint". The return type has no
  * error channel, so a miss can never be mistaken for a failure.
@@ -121,7 +152,9 @@ export const lookup = (cache: TokenCache, key: string, now: number): CachedToken
  * Return a new cache with `key` bound to `entry`, SWEEPING every entry already
  * stale at `now`. Pure — the input cache is unchanged (immutability).
  * Overwrites any existing entry for the key, which is exactly the post-mint
- * refresh path.
+ * refresh path. An `entry` that is itself stale at `now` (an uncacheable 0 TTL
+ * from `effectiveTtlMs`) is not bound: the key is left with no entry, so the
+ * next lookup is a miss and mints again.
  *
  * The sweep bounds the cache: without it, every distinct (identity, audience,
  * scope) triple ever minted is retained forever — unbounded growth AND
@@ -138,8 +171,8 @@ export const store = (
 ): TokenCache => {
   const entries: Record<string, CachedToken> = {};
   for (const [k, e] of Object.entries(cache.entries)) {
-    if (isFresh(e, now)) entries[k] = e;
+    if (k !== key && isFresh(e, now)) entries[k] = e;
   }
-  entries[key] = entry;
+  if (isFresh(entry, now)) entries[key] = entry;
   return { entries };
 };

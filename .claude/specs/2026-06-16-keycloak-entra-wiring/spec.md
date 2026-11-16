@@ -39,13 +39,13 @@ fails closed rather than silently insecure.
 foundations; nothing else can land without them.
 
 **Acceptance Scenarios:**
-- Given a host booted with **no** Entra/Keycloak config, When it starts, Then it
+- AS-001: Given a host booted with **no** Entra/Keycloak config, When it starts, Then it
   boots successfully on the existing static capability path with behaviour
   byte-identical to today (zero regression).
-- Given a host booted with **partial** config (e.g. realm issuer but no agent
+- AS-002: Given a host booted with **partial** config (e.g. realm issuer but no agent
   credentials), When it starts, Then it boots, emits exactly one boot warning
   naming what is unwired, and the unwired path remains fail-closed.
-- Given a fresh checkout, When a developer reads `.env.example`, Then every
+- AS-003: Given a fresh checkout, When a developer reads `.env.example`, Then every
   Entra, Keycloak, Bot, and HITL variable is present with an explanatory comment.
 
 ### US2: [P1] Agent-initiated run reaches a scoped downstream capability (Phase 1)
@@ -60,13 +60,13 @@ more, without ever holding a credential.
 end-to-end mint.
 
 **Acceptance Scenarios:**
-- Given an agent run whose DAG declares `requires: ["msgraph:mail.send"]` and
+- AS-004: Given an agent run whose DAG declares `requires: ["msgraph:mail.send"]` and
   whose agent client is granted that scope, When the node executes, Then it
   receives a handle exposing only `sendMail` and the mail is sent.
-- Given an agent run that declares a capability **not** granted to its client,
+- AS-005: Given an agent run that declares a capability **not** granted to its client,
   When the broker attempts to mint, Then the request is refused at the Keycloak
   hop with **zero** egress to Entra, and the refusal is audited.
-- Given the node holding a capability handle, When it inspects the handle, Then
+- AS-006: Given the node holding a capability handle, When it inspects the handle, Then
   no raw token or broad client is reachable from it.
 
 ### US3: [P1] User-initiated run is authenticated and authorized per team (Phase 2)
@@ -80,13 +80,13 @@ the DAG I'm invoking
 downstream exchange.
 
 **Acceptance Scenarios:**
-- Given a valid realm JWT carrying my team membership, When I invoke a DAG owned
+- AS-007: Given a valid realm JWT carrying my team membership, When I invoke a DAG owned
   by one of my teams, Then the run is authorized.
-- Given a valid realm JWT, When I invoke a DAG owned by a team I do **not** belong
+- AS-008: Given a valid realm JWT, When I invoke a DAG owned by a team I do **not** belong
   to, Then the run is denied **before** consuming any concurrency.
-- Given a JWT-shaped token while the verifier is not yet wired, When I present it,
+- AS-009: Given a JWT-shaped token while the verifier is not yet wired, When I present it,
   Then it is rejected (fail-closed), never accepted unverified.
-- Given an opaque `fug_` team token, When I present it, Then it resolves on the
+- AS-010: Given an opaque `fug_` team token, When I present it, Then it resolves on the
   existing team path unchanged (no regression).
 
 ### US4: [P2] User-initiated run reaches downstream as the user (Phase 3)
@@ -99,12 +99,12 @@ agent (`azp`) and scoped to what I'm entitled to.
 **Why this priority:** Completes the user origin; depends on both US2 and US3.
 
 **Acceptance Scenarios:**
-- Given an authorized user run, When a node requests a capability, Then the
+- AS-011: Given an authorized user run, When a node requests a capability, Then the
   downstream token preserves the user as `sub` and the agent as `azp`.
-- Given the exchange path with no resolvable verified user token for the run,
+- AS-012: Given the exchange path with no resolvable verified user token for the run,
   When the broker attempts to exchange, Then it fails closed (no proof-less
   impersonation is ever issued).
-- Given an entitled `Sites.Selected` site, When the user run reads it, Then it
+- AS-013: Given an entitled `Sites.Selected` site, When the user run reads it, Then it
   succeeds; a non-entitled site returns a downstream-denied result.
 
 ### US5: [P2] HITL approvals are authorized per team (Phase 4)
@@ -117,9 +117,9 @@ agent (`azp`) and scoped to what I'm entitled to.
 already-shipped HITL button path; not blocking the capability story.
 
 **Acceptance Scenarios:**
-- Given a suspended run owned by team A, When a member of team A clicks
+- AS-014: Given a suspended run owned by team A, When a member of team A clicks
   approve/reject in Teams, Then the decision is recorded.
-- Given the same run, When a non-member of team A clicks approve/reject, Then the
+- AS-015: Given the same run, When a non-member of team A clicks approve/reject, Then the
   decision is refused (parity with the HTTP approve path).
 
 ### US6: [P2] Live verification against a real tenant (Phase 5)
@@ -130,9 +130,9 @@ the federation surface proven secretless
 **So that** I can trust the live security posture.
 
 **Acceptance Scenarios:**
-- Given the provisioned `fugue-agents` app, When its credentials are inspected,
+- AS-016: Given the provisioned `fugue-agents` app, When its credentials are inspected,
   Then there are zero client secrets and zero certificates (federation only).
-- Given the four verification spikes, When each is run against the live tenant,
+- AS-017: Given the four verification spikes, When each is run against the live tenant,
   Then each records a PASS (or PARTIAL with a documented fallback) before any
   gated step is trusted.
 
@@ -262,17 +262,17 @@ runbook acceptance + sign-in-log evidence for the live tenant phase.
 
 ## Out of Scope
 
-- Per-team client resolution inside one host (deliberately rejected — host = team
+- OOS-001: Per-team client resolution inside one host (deliberately rejected — host = team
   = trust boundary).
-- A secret store (Vault / Azure Key Vault) adapter — the env-map behind the
+- OOS-002: A secret store (Vault / Azure Key Vault) adapter — the env-map behind the
   `AgentClientCredentials` port is acceptable for v1; the port keeps it swappable.
-- git-sync subdir/sparse-checkout scoping (baked-image per-team path is the
+- OOS-003: git-sync subdir/sparse-checkout scoping (baked-image per-team path is the
   supported mechanism; git-sync scoping remains unbuilt).
-- RFC 8693 `act`-claim delegation chains (Keycloak does not support it yet;
+- OOS-004: RFC 8693 `act`-claim delegation chains (Keycloak does not support it yet;
   identity is preserved via `sub`+`azp`+trace logging until it ships).
-- Splitting `fugue-agents` into sensitivity-tier apps (`-read`/`-act`) — escalation
+- OOS-005: Splitting `fugue-agents` into sensitivity-tier apps (`-read`/`-act`) — escalation
   path only, not this round.
-- The non-security BFF/dashboard work (lives in its own plan).
+- OOS-006: The non-security BFF/dashboard work (lives in its own plan).
 
 ---
 

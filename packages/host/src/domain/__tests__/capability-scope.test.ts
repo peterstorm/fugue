@@ -11,6 +11,8 @@ import { describe, it, expect } from "bun:test";
 import { match } from "ts-pattern";
 import {
   parseScope,
+  scopeName,
+  audienceForScope,
   handleKindForScope,
   type DownstreamScope,
   type HandleKind,
@@ -42,7 +44,7 @@ describe("parseScope — parse-don't-validate", () => {
     ["unknownprovider:read", "unknown provider"],
     ["msgraph:mail.send:extra", "extra segment — operation 'mail.send:extra' unknown"],
   ])("reads malformed/unknown name %p (%s) as first-class absence", (name) => {
-    // "Not a downstream scope" is classification, not failure (FR-X-003 shape):
+    // "Not a downstream scope" is classification, not failure (FR-503 shape):
     // plain capability names flow through this parser routinely.
     expect(parseScope(name)).toBeUndefined();
   });
@@ -52,6 +54,29 @@ describe("parseScope — parse-don't-validate", () => {
     for (const n of names) {
       expect(parseScope(n)).toBeDefined();
     }
+  });
+});
+
+describe("scopeName / audienceForScope — scope → canonical name and audience", () => {
+  it("scopeName round-trips parseScope for every recognised scope", () => {
+    for (const name of ["msgraph:mail.send", "msgraph:sites.read", "dynamics:read"]) {
+      const parsed = parseScope(name);
+      expect(parsed).toBeDefined();
+      if (parsed === undefined) continue;
+      expect(scopeName(parsed)).toBe(name);
+    }
+  });
+
+  it("audienceForScope maps each provider to its downstream resource (FR-042: Dynamics → per-org host)", () => {
+    const mail = parseScope("msgraph:mail.send");
+    const dyn = parseScope("dynamics:read");
+    if (mail === undefined || dyn === undefined) throw new Error("parse failed");
+    // msgraph never depends on the org host.
+    expect(audienceForScope(mail, undefined)).toBe("https://graph.microsoft.com");
+    expect(audienceForScope(mail, "org.crm4.dynamics.com")).toBe("https://graph.microsoft.com");
+    // Dynamics targets the CONFIGURED per-org host; UNSET → undefined (fail-closed).
+    expect(audienceForScope(dyn, "org.crm4.dynamics.com")).toBe("https://org.crm4.dynamics.com");
+    expect(audienceForScope(dyn, undefined)).toBeUndefined();
   });
 });
 
@@ -81,7 +106,7 @@ describe("handleKindForScope — exhaustive scope→handle mapping", () => {
 // handle, the `@ts-expect-error` lines would stop erroring and the test would
 // fail to compile. The `Equal<keyof Handle, ...>` assertions pin the exact
 // member set, leaving no escape hatch.
-// @satisfies SC-007 @satisfies FR-W3-004 @satisfies FR-W3-005
+// @satisfies SC-007 @satisfies FR-304 @satisfies FR-305
 // ───────────────────────────────────────────────────────────────────────────
 
 type _Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
@@ -118,9 +143,9 @@ describe("SC-007 — narrowed handle exposes no raw client / no token / no key",
     };
     // @ts-expect-error — SC-007: no raw downstream client is reachable.
     void mail.client;
-    // @ts-expect-error — FR-W3-005: no raw token is reachable.
+    // @ts-expect-error — FR-305: no raw token is reachable.
     void mail.token;
-    // @ts-expect-error — FR-W3-005: no vendor API key is reachable.
+    // @ts-expect-error — FR-305: no vendor API key is reachable.
     void mail.apiKey;
 
     // The named operation IS reachable (sanity: the surface is not empty).

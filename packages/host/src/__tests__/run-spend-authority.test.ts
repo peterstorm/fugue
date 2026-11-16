@@ -715,7 +715,7 @@ describe("RunSpendAuthority", () => {
 
   it("counts a failed attempt's burned tokens AND the successful retry's toward one budget", async () => {
     // `node-crash.usage` exists so a crash that burned tokens still attributes
-    // them (FR-W0-001). The ledger is a monotone append, so a retry ADDS to the
+    // them (FR-001). The ledger is a monotone append, so a retry ADDS to the
     // failed attempt rather than replacing it — which is the only honest
     // accounting: the provider charged for both. A retry that clobbered the
     // first would let an unbounded retry loop cost an unbounded amount under a

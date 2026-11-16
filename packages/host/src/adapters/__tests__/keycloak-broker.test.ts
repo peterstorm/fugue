@@ -2,17 +2,17 @@
  * Tests for the live Keycloak-backed CapabilityBroker (adapters/keycloak-broker.ts).
  *
  * The security-critical invariants under test:
- *   - SC-006 / FR-W3-003 — fail closed, ZERO Entra egress: an unassigned scope
+ *   - SC-006 / FR-303 — fail closed, ZERO Entra egress: an unassigned scope
  *     is refused (`policy-refusal`) and the injected token endpoint's mint/exchange
  *     methods are NEVER called.
  *   - US4 / SC-007 — operation narrowing: the returned handle exposes only the
  *     named operation; no raw client/token field is reachable (type-level).
  *   - US4 / SC-008 — cache TTL: repeated (identity,audience,scope) within TTL →
  *     at most one mint call on the endpoint.
- *   - SC-010 / FR-W3-008/009 — exchange semantics: user origin → exactly one V2
+ *   - SC-010 / FR-308/309 — exchange semantics: user origin → exactly one V2
  *     exchange (sub=user, azp=agent); agent origin → 0 exchanges, one
  *     client_credentials mint.
- *   - FR-X-004 / SC-009 — every mint AND refusal emits exactly one correlated
+ *   - FR-504 / SC-009 — every mint AND refusal emits exactly one correlated
  *     record with sub/azp/runId/nodeId/scope.
  */
 
@@ -27,7 +27,7 @@ import type {
   RunId,
 } from "@fuguejs/framework";
 import type { LogPort } from "../../ports.js";
-import { createKeycloakBroker, scopeName, audienceForScope } from "../keycloak-broker.js";
+import { createKeycloakBroker } from "../keycloak-broker.js";
 import type {
   KeycloakTokenEndpoint,
   ClientCredentialsRequest,
@@ -35,7 +35,7 @@ import type {
 } from "../keycloak-token-endpoint.js";
 import type { EntraWifExchange, WifExchangeRequest } from "../entra-wif.js";
 import type { GraphHttp, GraphRequest } from "../graph-capability.js";
-import { parseScope } from "../../domain/capability-scope.js";
+import { scopeName, audienceForScope } from "../../domain/capability-scope.js";
 import { markSubjectToken, type SubjectToken } from "../../domain/auth.js";
 import { collectLogs } from "./fixtures/log-capture.js";
 
@@ -198,9 +198,9 @@ const mkBroker = (
     ...deps,
   });
 
-// ── Fail-closed no-egress (SC-006 / FR-W3-003) ──────────────────────────────
+// ── Fail-closed no-egress (SC-006 / FR-303) ──────────────────────────────
 
-describe("keycloak-broker — fail closed before any Entra call (SC-006/FR-W3-003)", () => {
+describe("keycloak-broker — fail closed before any Entra call (SC-006/FR-303)", () => {
   it("refuses an UNASSIGNED scope with policy-refusal and ZERO egress (Keycloak AND WIF)", async () => {
     const { endpoint, egressCount } = recordingEndpoint();
     const { wif, wifCount } = recordingWif();
@@ -536,9 +536,9 @@ describe("keycloak-broker — half-lifetime floor keeps a short-lived token usab
   });
 });
 
-// ── Exchange semantics (SC-010 / FR-W3-008/009) ─────────────────────────────
+// ── Exchange semantics (SC-010 / FR-308/309) ─────────────────────────────
 
-describe("keycloak-broker — exchange semantics (SC-010/FR-W3-008/009)", () => {
+describe("keycloak-broker — exchange semantics (SC-010/FR-308/309)", () => {
   it("USER origin → exactly one Token Exchange V2; sub stays user, azp becomes agent; 0 client_credentials", async () => {
     const { endpoint, ccCalls, exCalls } = recordingEndpoint();
     const { logger } = collectLogs();
@@ -560,7 +560,7 @@ describe("keycloak-broker — exchange semantics (SC-010/FR-W3-008/009)", () => 
     expect(ccCalls.length).toBe(0); // 0 client_credentials on the user path
     expect(exCalls[0]?.userSub).toBe("user-abc"); // sub stays the user
     expect(exCalls[0]?.agentClientId).toBe("fugue-frontend"); // azp becomes the agent
-    // SC-007 / FR-W3-004 — narrowing AT EGRESS: the exact scope+audience that
+    // SC-007 / FR-304 — narrowing AT EGRESS: the exact scope+audience that
     // was requested is threaded into the exchange call, not a broader grant.
     const exReq = exCalls[0];
     if (exReq === undefined) throw new Error("expected one exchange call");
@@ -569,7 +569,7 @@ describe("keycloak-broker — exchange semantics (SC-010/FR-W3-008/009)", () => 
     expect(exReq.audience).toBe("https://graph.microsoft.com");
   });
 
-  it("AGENT origin → exactly one client_credentials mint; 0 exchanges (FR-W3-009)", async () => {
+  it("AGENT origin → exactly one client_credentials mint; 0 exchanges (FR-309)", async () => {
     const { endpoint, ccCalls, exCalls } = recordingEndpoint();
     const { logger } = collectLogs();
     const broker = mkBroker({
@@ -589,7 +589,7 @@ describe("keycloak-broker — exchange semantics (SC-010/FR-W3-008/009)", () => 
     expect(ccCalls.length).toBe(1);
     expect(exCalls.length).toBe(0); // agent hops perform ZERO exchanges
     expect(ccCalls[0]?.agentClientId).toBe("fugue-agent-sites");
-    // SC-007 / FR-W3-004 — narrowing AT EGRESS for the agent (client_credentials)
+    // SC-007 / FR-304 — narrowing AT EGRESS for the agent (client_credentials)
     // path: the requested scope+audience are threaded verbatim into the mint.
     const ccReq = ccCalls[0];
     if (ccReq === undefined) throw new Error("expected one client_credentials call");
@@ -637,7 +637,7 @@ describe("keycloak-broker — user exchange presents the resolved subject_token 
     expect(seen).toEqual([runId]);
   });
 
-  it("AGENT branch NEVER resolves nor presents a subject_token (FR-W3-009)", async () => {
+  it("AGENT branch NEVER resolves nor presents a subject_token (FR-309)", async () => {
     const { endpoint, ccCalls, exCalls } = recordingEndpoint();
     const { logger } = collectLogs();
     let resolverCalls = 0;
@@ -747,9 +747,9 @@ describe("keycloak-broker — NFR-011: no raw subject_token reachable from a ret
   });
 });
 
-// ── Audit coverage (FR-X-004 / SC-009) ──────────────────────────────────────
+// ── Audit coverage (FR-504 / SC-009) ──────────────────────────────────────
 
-describe("keycloak-broker — correlated audit on every mint AND refusal (FR-X-004/SC-009)", () => {
+describe("keycloak-broker — correlated audit on every mint AND refusal (FR-504/SC-009)", () => {
   it("a successful mint emits exactly one record with sub/azp/runId/nodeId/scope", async () => {
     const { endpoint } = recordingEndpoint();
     const { logger, logs } = collectLogs();
@@ -859,7 +859,7 @@ describe("keycloak-broker — endpoint denial surfaces + audits as refusal (A3/S
   });
 });
 
-// ── WIF second-egress hop (T10 / FR-W4-004 / SC-011 / FR-X-002 / SC-009) ────
+// ── WIF second-egress hop (T10 / FR-404 / SC-011 / FR-502 / SC-009) ────
 
 describe("keycloak-broker — Entra WIF second egress after the Keycloak mint (T10)", () => {
   it("presents the Keycloak SA token as the WIF client_assertion, narrowed to the scope+audience", async () => {
@@ -927,7 +927,7 @@ describe("keycloak-broker — Entra WIF second egress after the Keycloak mint (T
     expect(requests[0]?.bearer).toBe("app-only-1-from(cc-token-1)");
   });
 
-  it("surfaces a WIF downstream-denied VERBATIM and audits it as a mint-failed refusal (FR-X-002/SC-009)", async () => {
+  it("surfaces a WIF downstream-denied VERBATIM and audits it as a mint-failed refusal (FR-502/SC-009)", async () => {
     const { endpoint, egressCount } = recordingEndpoint();
     const { wif, calls } = denyingWif("https://graph.microsoft.com", "FIC subject mismatch");
     const { logger, logs } = collectLogs();
@@ -1018,7 +1018,7 @@ describe("keycloak-broker — Entra WIF second egress after the Keycloak mint (T
   it("an AGENT-path successful resolution audits the mint with via === client_credentials", async () => {
     // The user-path `via === "token-exchange-v2"` is checked in the audit-coverage
     // suite; this closes the agent-path half — the agent hop mints via
-    // `client_credentials` (NO token exchange, FR-W3-009) and the audit witnesses it.
+    // `client_credentials` (NO token exchange, FR-309) and the audit witnesses it.
     const { endpoint } = recordingEndpoint();
     const { wif } = recordingWif();
     const { logger, logs } = collectLogs();
@@ -1103,31 +1103,6 @@ describe("keycloak-broker — a throwing audit sink never breaks mintFor's Resul
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected refusal despite throwing logger");
     expect(result.error.kind).toBe("policy-refusal");
-  });
-});
-
-// ── Pure helpers (round-trip / audience mapping) ────────────────────────────
-
-describe("keycloak-broker — pure scope helpers", () => {
-  it("scopeName round-trips parseScope for every recognised scope", () => {
-    for (const name of ["msgraph:mail.send", "msgraph:sites.read", "dynamics:read"]) {
-      const parsed = parseScope(name);
-      expect(parsed).toBeDefined();
-      if (parsed === undefined) continue;
-      expect(scopeName(parsed)).toBe(name);
-    }
-  });
-
-  it("audienceForScope maps each provider to its downstream resource (FR-042: Dynamics → per-org host)", () => {
-    const mail = parseScope("msgraph:mail.send");
-    const dyn = parseScope("dynamics:read");
-    if (mail === undefined || dyn === undefined) throw new Error("parse failed");
-    // msgraph never depends on the org host.
-    expect(audienceForScope(mail, undefined)).toBe("https://graph.microsoft.com");
-    expect(audienceForScope(mail, "org.crm4.dynamics.com")).toBe("https://graph.microsoft.com");
-    // Dynamics targets the CONFIGURED per-org host; UNSET → undefined (fail-closed).
-    expect(audienceForScope(dyn, "org.crm4.dynamics.com")).toBe("https://org.crm4.dynamics.com");
-    expect(audienceForScope(dyn, undefined)).toBeUndefined();
   });
 });
 

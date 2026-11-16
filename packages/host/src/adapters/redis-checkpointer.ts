@@ -127,35 +127,19 @@ interface StoredNodeState {
 }
 
 /**
- * Narrow a parsed node record to its pass-through `output`. `output` is the one
- * field the framework's record grammar does not constrain, so it is read off the
- * record the grammar has already proven to be a JSON object.
- */
-const isJsonObject = (value: unknown): value is Readonly<Record<string, unknown>> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-const nodeOutputOf = (record: unknown): unknown =>
-  isJsonObject(record) ? record.output : undefined;
-
-/**
  * Decode ONE stored node entry — pure, and total over hostile bytes.
  *
  * Separate from the load loop because it is the only part of that loop with no
  * I/O and no reporting in it: the loop then reads as "decode, else drop and
  * name", one level of abstraction throughout. The record grammar itself belongs
- * to the framework (`parseNodeStateRecord`); `output` is pass-through, exactly
- * as it is in the in-package Redis backend.
+ * to the framework (`parseNodeStateRecord`), which also returns the record's
+ * pass-through `output`: this backend stores the output itself, exactly as the
+ * in-package Redis backend does, so the parsed record IS the node state.
  */
 const decodeNodeEntry = (raw: string): Result<NodeState, string> => {
   try {
     const stored: unknown = JSON.parse(raw);
-    const parsed = parseNodeStateRecord(stored);
-    if (!parsed.ok) return err(parsed.error);
-    return ok({
-      nodeId: parsed.value.nodeId,
-      output: nodeOutputOf(stored),
-      completedAt: parsed.value.completedAt,
-    });
+    return parseNodeStateRecord(stored);
   } catch (error) {
     return err(safeErrorMessage(error));
   }

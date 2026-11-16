@@ -157,7 +157,7 @@ export const handleNodeFailed = (
 };
 
 // ---------------------------------------------------------------------------
-// handleHookCrash — FR-029a hook-crash retry semantics
+// handleHookCrash — FR-084 hook-crash retry semantics
 // ---------------------------------------------------------------------------
 
 /**
@@ -166,7 +166,7 @@ export const handleNodeFailed = (
  * The node's output and prompt are preserved. Retries the hook up to the node's retry
  * budget (shared with node retries). Hook retries do NOT re-execute the node.
  *
- * FR-029a: When `onHumanReview` throws, the framework MUST treat this as a hook crash
+ * FR-084: When `onHumanReview` throws, the framework MUST treat this as a hook crash
  * (NOT a node failure). The node's output and prompt are preserved. The framework SHALL
  * retry the hook up to the node's retry budget with exponential backoff and jitter
  * (same parameters as node retry). When the budget is exhausted, the DAG MUST transition

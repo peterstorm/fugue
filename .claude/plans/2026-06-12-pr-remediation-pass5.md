@@ -35,7 +35,7 @@
 ### Fix 5: unfenced dispatchToolCallsWithSpans drops accumulated usage
 - **Source:** silent-failure-hunter
 - **File:** packages/framework/src/llm/tool-use-loop.ts:233
-- **Issue:** Only unfenced await in the loop; a throw (e.g. asToolContext null-llm authoring error) escapes with no token usage, bypassing FR-W0-001 attribution and reclassified as retriable node-crash.
+- **Issue:** Only unfenced await in the loop; a throw (e.g. asToolContext null-llm authoring error) escapes with no token usage, bypassing FR-001 attribution and reclassified as retriable node-crash.
 - **Fix:** try/catch around the dispatch, return err(withAccumulatedUsage(node-crash, non-retriable)).
 
 ### Fix 6: learnObservedCall ingests unsanitized provider figures
@@ -59,7 +59,7 @@
 ### Fix 9: parseScope error-as-control-flow
 - **Source:** architecture-tech-lead
 - **File:** packages/host/src/domain/capability-scope.ts:173
-- **Issue:** Err(policy-refusal) used as routine "not a downstream scope" classifier; all callers discard payload. Contradicts FR-X-003 miss-is-absence.
+- **Issue:** Err(policy-refusal) used as routine "not a downstream scope" classifier; all callers discard payload. Contradicts FR-503 miss-is-absence.
 - **Fix:** Reshape to `parseScope(name): DownstreamScope | undefined`; update consumers (keycloak-broker provides/mintFor skip, config boot validation) and tests.
 
 ### Fix 10: U+001F composite-key invariant duplicated

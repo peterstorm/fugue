@@ -45,7 +45,7 @@ Apply `rules/architecture.md`, `rules/typescript-patterns.md`, `code-implementer
    - Correct the regression to require zero provider calls on the first refused request for both standard LLM operations where practical.
 
 3. **`comment-analyzer-1` — metered LLM header conflates sequential crossing with SC-003.**
-   - Attribute the sequential crossing-call allowance to FR-W1-004 and learned concurrent reservation accounting to SC-003; explicitly avoid a one-call claim for cold/larger bursts.
+   - Attribute the sequential crossing-call allowance to FR-104 and learned concurrent reservation accounting to SC-003; explicitly avoid a one-call claim for cold/larger bursts.
 
 4. **`comment-analyzer-2` — shipped plan claims a one-call crash-loss window.**
    - Replace the claim with the current ADR-0083 contract: every concurrently settled append still pending at process death can be lost; aggregate crash loss is not bounded to one call.
@@ -74,7 +74,7 @@ Apply `rules/architecture.md`, `rules/typescript-patterns.md`, `code-implementer
    - Add immutability regressions without changing the public union.
 
 6. **`comment-analyzer-3` — shipped plan maps sequential crossing to SC-003.**
-   - Map sequential crossing to FR-W1-004 and reserve SC-003 for learned concurrent reservations.
+   - Map sequential crossing to FR-104 and reserve SC-003 for learned concurrent reservations.
 
 7. **`comment-analyzer-4` — repeated model append called a total no-op.**
    - State that repetition is a no-op only for the unpriced-model set; token/call figures still append.

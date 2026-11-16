@@ -628,7 +628,7 @@ const resolveOriginAndBindSubjectToken = (args: {
  * (the rejected eager-resolution design) could never reach the minting machinery
  * and silently dropped every statically-configured client on the realm path.
  *
- * Pools stay boot-scoped (FR-W2-005): only authority resolution moved behind the
+ * Pools stay boot-scoped (FR-205): only authority resolution moved behind the
  * broker, and it now moves per node, in the framework.
  *
  * @satisfies FR-013 — Cache key isolation
@@ -637,8 +637,8 @@ const resolveOriginAndBindSubjectToken = (args: {
  * @satisfies FR-041 — Per-DAG TTL overrides
  * @satisfies SC-008 (host spec: cross-DAG cache isolation — not the
  *   identity-scoped-capabilities token-dedup SC-008)
- * @satisfies FR-W2-005 — pools (connect/close/healthCheck) remain boot-scoped
- * @satisfies FR-W3-007 — `origin` carries the user's `sub` so a user-initiated
+ * @satisfies FR-205 — pools (connect/close/healthCheck) remain boot-scoped
+ * @satisfies FR-307 — `origin` carries the user's `sub` so a user-initiated
  *   run is attributable and per-hop-exchangeable by the broker
  */
 /**

@@ -194,7 +194,7 @@ describe("authenticateIdentity", () => {
 
 // ── authenticateIdentity — JWT (user) path + team-store unavailability ─────────
 
-describe("authenticateIdentity — JWT user path (FR-W3-006) + auth-infra failures", () => {
+describe("authenticateIdentity — JWT user path (FR-306) + auth-infra failures", () => {
   // A JWT-SHAPED token: three non-empty base64url segments. Content is irrelevant
   // (the injected verifier is authoritative); only the SHAPE selects the path.
   const JWT = "aaa.bbb.ccc";

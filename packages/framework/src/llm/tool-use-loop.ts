@@ -92,7 +92,7 @@ const stripCodeFences = (text: string): string =>
 /**
  * Attach the loop's accumulated cross-turn token totals onto a usage-carrying
  * `FrameworkError`, so a mid-loop failure still attributes the tokens burned by
- * already-completed turns (FR-W0-001). Errors that do not carry a `usage` field
+ * already-completed turns (FR-001). Errors that do not carry a `usage` field
  * (e.g. `validation`) cannot hold the totals — rather than DROP them silently
  * (a budget under-count), the accumulated figure is emitted as
  * a structured `llm.usage-unattributed` warning so the burned tokens remain
@@ -233,7 +233,7 @@ export const toolUseLoop = async <O>(
     // (e.g. `asToolContext` rejecting a node that omitted `requires: ["llm"]`)
     // is an authoring error — deterministic, so non-retriable — and the tokens
     // burned producing these tool calls must still ride the typed error channel
-    // (FR-W0-001); an escaping throw would surface as a usage-less retriable
+    // (FR-001); an escaping throw would surface as a usage-less retriable
     // node-crash upstream.
     let results: Awaited<ReturnType<typeof dispatchToolCallsWithSpans>>;
     try {
@@ -259,7 +259,7 @@ export const toolUseLoop = async <O>(
   }
 
   // Iteration limit exhausted — non-retriable. Tokens burned across every turn
-  // of the (now-exhausted) loop must still be attributed (FR-W0-001).
+  // of the (now-exhausted) loop must still be attributed (FR-001).
   return fail({
     kind: "node-crash",
     nodeId: config.nodeId,
@@ -290,7 +290,7 @@ const parseFinalAnswer = <O>(
       nodeId: config.nodeId,
       message: `Not valid JSON (${msg}): ${text.slice(0, 200)}`,
       // The whole loop's tokens were consumed to produce this final (unparseable)
-      // turn — attribute them even though parsing failed (FR-W0-001).
+      // turn — attribute them even though parsing failed (FR-001).
       usage,
     });
   }

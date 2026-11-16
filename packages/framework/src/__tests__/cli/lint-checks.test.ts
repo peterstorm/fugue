@@ -3,6 +3,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
+import * as fc from "fast-check";
 import { ok } from "../../types/result.js";
 import { createSourceNode } from "../../nodes/fetch.js";
 import { createTransformNode } from "../../nodes/transform.js";
@@ -206,6 +207,64 @@ describe("B3 — shape-helper-hint", () => {
     expect(
       analyzeDag(dag).advisories.filter((a) => a.kind === "shape-helper-hint"),
     ).toEqual([]);
+  });
+
+  // Commutativity: every shape fact (edge count, in/out degrees, sources,
+  // sinks, edge set) is derived from the edges, so the hint can depend on the
+  // topology only — never on the order nodes or edges were declared in.
+  const shuffled = <T,>(items: readonly T[], keys: readonly number[]): T[] =>
+    items
+      .map((item, i) => ({ item, key: keys[i] ?? 0 }))
+      .sort((x, y) => x.key - y.key)
+      .map(({ item }) => item);
+  const hintOf = (dag: Parameters<typeof analyzeDag>[0]) =>
+    analyzeDag(dag).advisories.flatMap((a) => (a.kind === "shape-helper-hint" ? [a.helper] : []));
+  const declaredInOrder = (
+    id: string,
+    ids: readonly string[],
+    edges: readonly { readonly from: string; readonly to: string }[],
+    outputNodeId: string,
+    nodeKeys: readonly number[],
+    edgeKeys: readonly number[],
+  ) =>
+    defineDag({
+      id,
+      nodes: Object.fromEntries(shuffled(ids, nodeKeys).map((nid) => [nid, n(nid, z.unknown(), z.unknown())])),
+      edges: [{ from: DAG_INPUT, to: ids[0]! }, ...shuffled(edges, edgeKeys)],
+      outputNodeId,
+    });
+  const orderKeys = fc.array(fc.integer(), { minLength: 16, maxLength: 16 });
+
+  it("hints a manual chain of any length as linear, whatever the declaration order", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 2, max: 8 }), orderKeys, orderKeys, (length, nodeKeys, edgeKeys) => {
+        const ids = Array.from({ length }, (_, i) => `n${i}`);
+        const edges = ids.slice(1).map((to, i) => ({ from: ids[i]!, to }));
+        const dag = declaredInOrder("prop-chain", ids, edges, ids[length - 1]!, nodeKeys, edgeKeys);
+        expect(hintOf(dag)).toEqual(["defineLinearDag"]);
+      }),
+    );
+  });
+
+  it("hints a manual fan-out of any width as a diamond with a join and a fan-out without, whatever the order", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 2, max: 6 }),
+        fc.boolean(),
+        orderKeys,
+        orderKeys,
+        (width, withJoin, nodeKeys, edgeKeys) => {
+          const branches = Array.from({ length: width }, (_, i) => `b${i}`);
+          const ids = ["src", ...branches, ...(withJoin ? ["join"] : [])];
+          const edges = branches.flatMap((b) => [
+            { from: "src", to: b },
+            ...(withJoin ? [{ from: b, to: "join" }] : []),
+          ]);
+          const dag = declaredInOrder("prop-fan", ids, edges, withJoin ? "join" : branches[0]!, nodeKeys, edgeKeys);
+          expect(hintOf(dag)).toEqual([withJoin ? "defineDiamond" : "defineFanOut"]);
+        },
+      ),
+    );
   });
 
   it("stays silent on the no-helper multi-root shape", () => {

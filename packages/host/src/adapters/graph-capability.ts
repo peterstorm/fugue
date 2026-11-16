@@ -19,7 +19,7 @@
  *
  * @satisfies US7 — the node calls Graph/Dynamics through a narrowly-scoped handle
  *   over the app-only WIF token; no raw client/token is reachable.
- * @satisfies FR-W4-005 — the operation-method/URL narrowing half: the handle
+ * @satisfies FR-405 — the operation-method/URL narrowing half: the handle
  *   targets the specific Graph resource/operation and only the named operation is
  *   reachable. (The other half — requesting the resource's `.default` app-only
  *   scope at the WIF egress — lives in entra-wif.ts `buildWifFormBody`.)

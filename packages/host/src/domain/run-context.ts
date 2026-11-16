@@ -4,7 +4,7 @@
  * derive a run's authority inputs from its inbound `AuthIdentity`:
  *
  *  - `invocationOriginForIdentity` → the framework `InvocationOrigin` (string-only)
- *    the broker gates/mints each node against (FR-W3-007).
+ *    the broker gates/mints each node against (FR-307).
  *  - `subjectTokenForIdentity` → the verified user `subject_token` (a branded
  *    `SubjectToken | undefined`) that a user run threads HOST-SIDE for the RFC 8693
  *    exchange; `undefined` for agent/team/admin runs (FR-030/FR-032). This is the
@@ -31,7 +31,7 @@ import { agentClientIdForDag } from "./auth.js";
 
 /**
  * Build the `Invocation.origin` for a run from its resolved inbound identity
- * (FR-W3-007). PURE and exported so the sub-threading is directly assertable
+ * (FR-307). PURE and exported so the sub-threading is directly assertable
  * without standing up the whole context factory:
  *
  *  - `user`  → `{ kind: "user", sub, agentClientId }`. The user's `sub`
@@ -100,7 +100,7 @@ export interface NodeContextForDag {
    * Who initiated the run. Threaded into `runDag` alongside the broker so the
    * framework builds a per-node `Invocation { origin, runId, dagId, nodeId }`
    * and mints each node's declared scopes AT DISPATCH. Built from the inbound
-   * identity (FR-W3-007).
+   * identity (FR-307).
    *
    * `undefined` ONLY when no per-node minting is wired (no broker) AND the DAG
    * has no `AGENT_CLIENT_MAP` entry — i.e. the zero-regression static path where

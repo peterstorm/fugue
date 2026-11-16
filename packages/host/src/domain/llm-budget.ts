@@ -69,7 +69,7 @@ export const LlmBudgetConfigSchema = z
  */
 export interface LlmBudgetDeclaration {
   /**
-   * Legacy scalar (FR-W1-001), shipped in v0.5.1 and still honoured. Sugar for
+   * Legacy scalar (FR-101), shipped in v0.5.1 and still honoured. Sugar for
    * `llmBudget: { tokens: N }` — it normalises into the same `Ceilings` value
    * below rather than following a second enforcement path.
    */
@@ -79,7 +79,7 @@ export interface LlmBudgetDeclaration {
 
 /**
  * Translate a declaration into the ceilings the meter enforces, or `undefined`
- * when nothing is declared (FR-W1-006: no budget, no enforcement).
+ * when nothing is declared (FR-106: no budget, no enforcement).
  *
  * Declaring both `llmBudgetTokens` and `llmBudget.tokens` is legal and takes the
  * TIGHTER of the two. That is not a special case written here — `ceilings`

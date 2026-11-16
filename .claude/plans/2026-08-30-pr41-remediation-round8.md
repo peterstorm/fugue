@@ -36,7 +36,7 @@ Apply `rules/architecture.md`, `rules/typescript-patterns.md`, `code-implementer
    - Add a table-driven regression that appends an extra `dagId`, `runId`, and neutral field to every valid variant and proves rejection, plus HTTP coverage proving a HostError-like 4xx object with extras takes the logged generic 500 path without leaking extras.
 
 3. **`comment-analyzer-1` — SC-003 is mislabeled as an overshoot-by-one rule.**
-   - Split the file-level description: FR-W1-004 permits the sequential crossing call; SC-003 uses learned estimate-based reservation accounting and does not promise a one-call bound for first/larger concurrent bursts.
+   - Split the file-level description: FR-104 permits the sequential crossing call; SC-003 uses learned estimate-based reservation accounting and does not promise a one-call bound for first/larger concurrent bursts.
    - No behavior change.
 
 ## Advisory dispositions

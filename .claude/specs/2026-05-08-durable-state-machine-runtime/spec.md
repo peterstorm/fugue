@@ -24,9 +24,9 @@ The "users" of this library are application authors (ai-summary, reclaw, future 
 **Why this priority:** Backwards compatibility is a hard constraint. A breaking change blocks every downstream consumer.
 
 **Acceptance Scenarios:**
-- Given an existing call `runDag(dag, input, ctx)` with no options, When the runtime executes, Then output, error semantics, wave parallelism, and ordering match the pre-refactor behavior.
-- Given an existing call where one node fails, When `runDag` returns, Then it returns a `Result` failure with the same error shape consumers receive today.
-- Given an existing test suite for the ai-summary executor, When run against the new implementation, Then all tests pass with no source modifications.
+- AS-001: Given an existing call `runDag(dag, input, ctx)` with no options, When the runtime executes, Then output, error semantics, wave parallelism, and ordering match the pre-refactor behavior.
+- AS-002: Given an existing call where one node fails, When `runDag` returns, Then it returns a `Result` failure with the same error shape consumers receive today.
+- AS-003: Given an existing test suite for the ai-summary executor, When run against the new implementation, Then all tests pass with no source modifications.
 
 ### US2: [P1] Build a durable workflow on the kernel
 
@@ -37,10 +37,10 @@ The "users" of this library are application authors (ai-summary, reclaw, future 
 **Why this priority:** This is the core kernel; every other layer is built on it.
 
 **Acceptance Scenarios:**
-- Given a `Machine` and `Executor`, When `runStateMachine(job, machine, executor)` is called, Then the runtime drives the machine to a terminal state, checkpointing after each successful transition.
-- Given an executor throws an unexpected error, When the runtime catches it, Then the error is wrapped into an `ERROR` event delivered to the machine's transition function (no direct rethrow before transition).
-- Given the machine transitions to a failed terminal state, When the runtime observes that state, Then the runtime MUST NOT checkpoint the failed state and MUST throw so the queue layer can retry.
-- Given a process crash mid-run, When a fresh process picks up the job, Then execution resumes from the last successfully checkpointed state, not from the start.
+- AS-004: Given a `Machine` and `Executor`, When `runStateMachine(job, machine, executor)` is called, Then the runtime drives the machine to a terminal state, checkpointing after each successful transition.
+- AS-005: Given an executor throws an unexpected error, When the runtime catches it, Then the error is wrapped into an `ERROR` event delivered to the machine's transition function (no direct rethrow before transition).
+- AS-006: Given the machine transitions to a failed terminal state, When the runtime observes that state, Then the runtime MUST NOT checkpoint the failed state and MUST throw so the queue layer can retry.
+- AS-007: Given a process crash mid-run, When a fresh process picks up the job, Then execution resumes from the last successfully checkpointed state, not from the start.
 
 ### US3: [P1] DAG executor as a state machine
 
@@ -51,13 +51,13 @@ The "users" of this library are application authors (ai-summary, reclaw, future 
 **Why this priority:** The DAG layer is the primary consumer of the kernel and the migration target for ai-summary's executor.
 
 **Acceptance Scenarios:**
-- Given a DAG with retry limits and a node that fails transiently, When the node fails fewer times than its limit, Then the runtime retries the node within the same wave with exponential backoff (default 1s/2s/4s plus jitter).
-- Given a DAG with a node that fails more times than its limit, When retries are exhausted, Then the DAG transitions to a `failed` state carrying the original error.
-- Given a node declares `humanReview`, When that node completes, Then the DAG transitions to `awaiting-human` and waits for an external `human-responded` event.
-- Given a wave contains multiple human-review nodes, When the wave finishes, Then the runtime presents reviews sequentially in node-id order (one at a time, next begins only after the prior is resolved).
-- Given a human responds with `reroute` to a node in the current or an earlier wave, When the event is processed, Then the DAG resumes from that target wave.
-- Given a human responds with `reroute` to a node in a later wave, When the event is processed, Then the DAG transitions to `failed` with an `invalid-reroute` error.
-- Given an `abort` event arrives in any non-terminal state, When processed, Then the DAG transitions to `failed` with an `aborted` error and the reason is preserved.
+- AS-008: Given a DAG with retry limits and a node that fails transiently, When the node fails fewer times than its limit, Then the runtime retries the node within the same wave with exponential backoff (default 1s/2s/4s plus jitter).
+- AS-009: Given a DAG with a node that fails more times than its limit, When retries are exhausted, Then the DAG transitions to a `failed` state carrying the original error.
+- AS-010: Given a node declares `humanReview`, When that node completes, Then the DAG transitions to `awaiting-human` and waits for an external `human-responded` event.
+- AS-011: Given a wave contains multiple human-review nodes, When the wave finishes, Then the runtime presents reviews sequentially in node-id order (one at a time, next begins only after the prior is resolved).
+- AS-012: Given a human responds with `reroute` to a node in the current or an earlier wave, When the event is processed, Then the DAG resumes from that target wave.
+- AS-013: Given a human responds with `reroute` to a node in a later wave, When the event is processed, Then the DAG transitions to `failed` with an `invalid-reroute` error.
+- AS-014: Given an `abort` event arrives in any non-terminal state, When processed, Then the DAG transitions to `failed` with an `aborted` error and the reason is preserved.
 
 ### US4: [P2] Pluggable queue backend
 
@@ -68,10 +68,10 @@ The "users" of this library are application authors (ai-summary, reclaw, future 
 **Why this priority:** Required to deliver checkpoint/resume in real deployments and to keep the test suite hermetic.
 
 **Acceptance Scenarios:**
-- Given the BullMQ adapter, When a worker processes a job, Then the worker exposes a `JobLike` whose `updateData` and `updateProgress` map to BullMQ equivalents.
-- Given the in-memory adapter, When tests run, Then no Redis connection is opened and the public surface matches `QueueBackend` exactly.
-- Given a job exhausts its queue-level retry attempts, When the dead-letter handler fires, Then the configured `DeadLetterNotifier` receives the formatted message and recipient list derived from the job data.
-- Given a `MarkerStore` is provided, When a marker is set with TTL N, Then `exists` returns true within the window and false (or eventually false) after expiry.
+- AS-015: Given the BullMQ adapter, When a worker processes a job, Then the worker exposes a `JobLike` whose `updateData` and `updateProgress` map to BullMQ equivalents.
+- AS-016: Given the in-memory adapter, When tests run, Then no Redis connection is opened and the public surface matches `QueueBackend` exactly.
+- AS-017: Given a job exhausts its queue-level retry attempts, When the dead-letter handler fires, Then the configured `DeadLetterNotifier` receives the formatted message and recipient list derived from the job data.
+- AS-018: Given a `MarkerStore` is provided, When a marker is set with TTL N, Then `exists` returns true within the window and false (or eventually false) after expiry.
 
 ### US5: [P2] Cron scheduler with dependencies and catch-up
 
@@ -82,11 +82,11 @@ The "users" of this library are application authors (ai-summary, reclaw, future 
 **Why this priority:** Required for reclaw-style scheduled workflows and any future periodic ai-summary tasks.
 
 **Acceptance Scenarios:**
-- Given a registry containing a cyclic dependency chain, When `hasCycle(taskId, registry)` runs, Then it returns true (and the scheduler refuses to arm the cycle).
-- Given an active set of timers and a new desired registry, When `diffRegistry(active, desired)` runs, Then it returns disjoint `add`, `remove`, and `update` lists that fully reconcile active to desired.
-- Given a task fired but did not complete, When `decideCatchUp` evaluates after restart, Then it returns `skip` (the in-flight worker handles it).
-- Given a task fired and completed within the validity window but its dependents did not fire, When `decideCatchUp` evaluates, Then it returns `enqueue-dependents` listing the unfired dependent ids.
-- Given a task did not fire within its validity window, When `decideCatchUp` evaluates, Then it returns `enqueue-standalone`.
+- AS-019: Given a registry containing a cyclic dependency chain, When `hasCycle(taskId, registry)` runs, Then it returns true (and the scheduler refuses to arm the cycle).
+- AS-020: Given an active set of timers and a new desired registry, When `diffRegistry(active, desired)` runs, Then it returns disjoint `add`, `remove`, and `update` lists that fully reconcile active to desired.
+- AS-021: Given a task fired but did not complete, When `decideCatchUp` evaluates after restart, Then it returns `skip` (the in-flight worker handles it).
+- AS-022: Given a task fired and completed within the validity window but its dependents did not fire, When `decideCatchUp` evaluates, Then it returns `enqueue-dependents` listing the unfired dependent ids.
+- AS-023: Given a task did not fire within its validity window, When `decideCatchUp` evaluates, Then it returns `enqueue-standalone`.
 
 ### US6: [P2] Event-sourced replay
 
@@ -97,9 +97,9 @@ The "users" of this library are application authors (ai-summary, reclaw, future 
 **Why this priority:** Differentiates this runtime from the current in-memory executor; required by the brainstorm's durability goal.
 
 **Acceptance Scenarios:**
-- Given a successful transition, When the runtime checkpoints, Then it MUST also append the triggering event to a per-job event log.
-- Given a job's last checkpoint and its event log, When replay is invoked, Then applying events in order through the pure transition function yields the latest known state without invoking the executor.
-- Given a failed transition (terminal failed state), When the runtime processes it, Then the failed state is NOT checkpointed but the event that caused it MAY still be appended to the event log for diagnostics.
+- AS-024: Given a successful transition, When the runtime checkpoints, Then it MUST also append the triggering event to a per-job event log.
+- AS-025: Given a job's last checkpoint and its event log, When replay is invoked, Then applying events in order through the pure transition function yields the latest known state without invoking the executor.
+- AS-026: Given a failed transition (terminal failed state), When the runtime processes it, Then the failed state is NOT checkpointed but the event that caused it MAY still be appended to the event log for diagnostics.
 
 ### US7: [P3] Trace observability
 
@@ -110,9 +110,9 @@ The "users" of this library are application authors (ai-summary, reclaw, future 
 **Why this priority:** Useful for production but not required for correctness.
 
 **Acceptance Scenarios:**
-- Given an `onTrace` hook, When a transition completes, Then the hook fires exactly once with `{ state, timestamp, durationMs, outcome }`.
-- Given the executor takes T ms, When the trace fires, Then `durationMs` is within +/- 50ms of T.
-- Given a transition produces no state change (retry/noop), When the trace fires, Then `outcome` is `"retry"` (or `"skipped"` where applicable).
+- AS-027: Given an `onTrace` hook, When a transition completes, Then the hook fires exactly once with `{ state, timestamp, durationMs, outcome }`.
+- AS-028: Given the executor takes T ms, When the trace fires, Then `durationMs` is within +/- 50ms of T.
+- AS-029: Given a transition produces no state change (retry/noop), When the trace fires, Then `outcome` is `"retry"` (or `"skipped"` where applicable).
 
 ---
 
@@ -145,7 +145,7 @@ The "users" of this library are application authors (ai-summary, reclaw, future 
 - FR-027: The DAG runner MUST apply exponential backoff with jitter between retries, defaulting to 1s/2s/4s + jitter, and configurable per-node via `NodeDef.retry`.
 - FR-028: When a wave completes containing one or more `humanReview` nodes, the DAG transition MUST enter `awaiting-human` for each such node sequentially in ascending node-id order; the next review MUST NOT start until the prior is resolved.
 - FR-029: A `human-responded` event with action `approve` or `approve-with-edit` MUST advance the DAG to the next wave (or to `succeeded` if the reviewed wave is the last); `approve-with-edit` MUST replace the reviewed node's output in the outputs map.
-- FR-029a: When `onHumanReview` throws, the framework MUST treat this as a hook crash (NOT a node failure). The node's output and prompt are preserved across hook retries. The framework SHALL retry the hook using exponential backoff and jitter (same backoff parameters as node retry — see FR-027). Hook retry attempts consume from the same per-node retry counter as node execution retries; if the node already consumed N retries during execution, at most `retryLimit - N` hook retry attempts remain. When the counter is exhausted, the DAG MUST transition to terminal `failed` with `node-crash` carrying the nodeId and the latest hook error message. Hook retries MUST NOT re-execute the node.
+- FR-084: When `onHumanReview` throws, the framework MUST treat this as a hook crash (NOT a node failure). The node's output and prompt are preserved across hook retries. The framework SHALL retry the hook using exponential backoff and jitter (same backoff parameters as node retry — see FR-027). Hook retry attempts consume from the same per-node retry counter as node execution retries; if the node already consumed N retries during execution, at most `retryLimit - N` hook retry attempts remain. When the counter is exhausted, the DAG MUST transition to terminal `failed` with `node-crash` carrying the nodeId and the latest hook error message. Hook retries MUST NOT re-execute the node.
 - FR-030: A `human-responded` event with action `reject` MUST transition the DAG to `failed` with a `rejected` error carrying the supplied reason and node id.
 - FR-031: A `human-responded` event with action `reroute` to a node in the current or an earlier wave MUST transition the DAG back to `running` at that target wave with `completed` reset.
 - FR-032: A `human-responded` event with action `reroute` to a node in a later wave (forward reroute) MUST transition the DAG to `failed` with an `invalid-reroute` error.
@@ -226,14 +226,14 @@ The "users" of this library are application authors (ai-summary, reclaw, future 
 
 Explicitly NOT part of this spec (deferred to later work):
 
-- Phase 5: migrating ai-summary's `executor.ts` to consume the new `runDag` durability hooks.
-- Migrating reclaw's `research-handler.ts`, `worker.ts`, `scheduler.ts`, and queue infrastructure to depend on this library.
-- Phase 6: conditional branching primitives (`skipWhen` runtime evaluation, `branchOn` selectors, dynamic DAG restructuring).
-- Core-level human-review timeouts (callers handle externally via `abort`).
-- Forward reroutes (skipping ahead to a later wave) — explicitly rejected as `invalid-reroute`.
-- Parallel multi-review-per-wave UX (multiple human reviews always run sequentially in this version).
-- A separate npm package (`@peterstorm/durable-machine`); the work lives inside `packages/framework`.
-- A CLI / API for replay-based time-travel debugging (the event log is persisted, but the UX on top of it is future work).
+- OOS-001: Phase 5: migrating ai-summary's `executor.ts` to consume the new `runDag` durability hooks.
+- OOS-002: Migrating reclaw's `research-handler.ts`, `worker.ts`, `scheduler.ts`, and queue infrastructure to depend on this library.
+- OOS-003: Phase 6: conditional branching primitives (`skipWhen` runtime evaluation, `branchOn` selectors, dynamic DAG restructuring).
+- OOS-004: Core-level human-review timeouts (callers handle externally via `abort`).
+- OOS-005: Forward reroutes (skipping ahead to a later wave) — explicitly rejected as `invalid-reroute`.
+- OOS-006: Parallel multi-review-per-wave UX (multiple human reviews always run sequentially in this version).
+- OOS-007: A separate npm package (`@peterstorm/durable-machine`); the work lives inside `packages/framework`.
+- OOS-008: A CLI / API for replay-based time-travel debugging (the event log is persisted, but the UX on top of it is future work).
 
 ---
 

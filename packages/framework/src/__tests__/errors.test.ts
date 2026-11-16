@@ -3,11 +3,11 @@
  * and its total renderers — the blocks:
  *
  * - `checkpoint-write-failed` diagnostics (truthful branding + `invalid*` facets)
- * - `llm-budget-exceeded` (FR-W1-003)
- * - `infra-unreachable` / `policy-refusal` / `downstream-denied` (FR-X-001/002)
+ * - `llm-budget-exceeded` (FR-103)
+ * - `infra-unreachable` / `policy-refusal` / `downstream-denied` (FR-501/502)
  * - capability-broker taxonomy discriminability (SC-013)
  * - `retriabilityOf` — the single source of truth for the retry fast-fail fork
- * - `usageOfError` — the FR-W0-001 token-attribution contract (which kinds carry `usage`)
+ * - `usageOfError` — the FR-001 token-attribution contract (which kinds carry `usage`)
  * - `safeErrorMessage` hostile thrown-value matrix
  * - total Node errno diagnostics
  * - `messageOf` retry-exhausted lastError summariser
@@ -389,7 +389,7 @@ describe("FrameworkError: llm-budget-exceeded", () => {
 });
 
 // ───────────────────────────────────────────────────────────────────────────
-// Capability-broker failure taxonomy (FR-X-001 / FR-X-002 / SC-013).
+// Capability-broker failure taxonomy (FR-501 / FR-502 / SC-013).
 //
 // The three variants are a TAXONOMY: each models a categorically different
 // failure (transient infra outage vs. fail-closed local policy refusal vs. a
@@ -424,7 +424,7 @@ const downstreamError: FrameworkError = {
   reason: "FIC subject mismatch",
 };
 
-describe("FrameworkError: infra-unreachable (FR-X-001)", () => {
+describe("FrameworkError: infra-unreachable (FR-501)", () => {
   it("is constructible and discriminable on kind, carrying its payload", () => {
     expect(infraError.kind).toBe("infra-unreachable");
     if (infraError.kind === "infra-unreachable") {
@@ -449,7 +449,7 @@ describe("FrameworkError: infra-unreachable (FR-X-001)", () => {
   });
 });
 
-describe("FrameworkError: policy-refusal (FR-X-001)", () => {
+describe("FrameworkError: policy-refusal (FR-501)", () => {
   it("is constructible and discriminable on kind, carrying its payload", () => {
     expect(policyError.kind).toBe("policy-refusal");
     if (policyError.kind === "policy-refusal") {
@@ -484,7 +484,7 @@ describe("FrameworkError: policy-refusal (FR-X-001)", () => {
   });
 });
 
-describe("FrameworkError: downstream-denied (FR-X-002)", () => {
+describe("FrameworkError: downstream-denied (FR-502)", () => {
   it("is constructible and discriminable on kind, carrying its payload", () => {
     expect(downstreamError.kind).toBe("downstream-denied");
     if (downstreamError.kind === "downstream-denied") {
@@ -510,7 +510,7 @@ describe("Capability-broker taxonomy: discriminability (SC-013)", () => {
     expect(kinds).toEqual(["infra-unreachable", "policy-refusal", "downstream-denied"]);
   });
 
-  it("infra-unreachable is kept DISTINCT from downstream-denied (FR-X-002)", () => {
+  it("infra-unreachable is kept DISTINCT from downstream-denied (FR-502)", () => {
     // A transient outage and a settled denial must never collapse — retry
     // policy branches on this distinction.
     expect(infraError.kind).not.toBe(downstreamError.kind);
@@ -658,7 +658,7 @@ describe("retriabilityOf — single source of truth for the retry fast-fail fork
   });
 });
 
-describe("usageOfError — FR-W0-001 token-attribution contract", () => {
+describe("usageOfError — FR-001 token-attribution contract", () => {
   const nid = makeNodeId("node-u");
   const rid2 = makeRunId("run-u");
   const used = { ...tokensOnly(7, 3) };

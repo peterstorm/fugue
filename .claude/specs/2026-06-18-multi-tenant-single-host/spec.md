@@ -22,9 +22,9 @@ Today the fugue host is `host = team = trust boundary`: one tenant per process, 
 **Why this priority:** This is the core ops-pain driver. Without runtime onboarding the feature delivers no value over the status quo.
 
 **Acceptance Scenarios:**
-- Given a running supervisor and a tenant that reuses already-provisioned capabilities, When an admin registers the tenant and pushes its DAGs at runtime, Then the tenant can invoke its DAGs with no host redeploy and no IaC PR.
-- Given a tenant registration referencing only capabilities already provisioned for the host, When the registration is submitted, Then it succeeds without requiring any config-as-code change.
-- Given a tenant that requires a genuinely NEW downstream capability (new Keycloak agent client / new Entra permission or FIC), When onboarding is attempted, Then the system makes clear the new capability requires an additive config-as-code change, but the provisioning of that capability MUST be additive to the running host and MUST NOT require a host redeploy.
+- AS-001: Given a running supervisor and a tenant that reuses already-provisioned capabilities, When an admin registers the tenant and pushes its DAGs at runtime, Then the tenant can invoke its DAGs with no host redeploy and no IaC PR.
+- AS-002: Given a tenant registration referencing only capabilities already provisioned for the host, When the registration is submitted, Then it succeeds without requiring any config-as-code change.
+- AS-003: Given a tenant that requires a genuinely NEW downstream capability (new Keycloak agent client / new Entra permission or FIC), When onboarding is attempted, Then the system makes clear the new capability requires an additive config-as-code change, but the provisioning of that capability MUST be additive to the running host and MUST NOT require a host redeploy.
 
 ### US2: [P1] Hard cross-tenant isolation under compromise
 
@@ -35,9 +35,9 @@ Today the fugue host is `host = team = trust boundary`: one tenant per process, 
 **Why this priority:** Hard isolation is non-negotiable and is the central security premise of the whole approach.
 
 **Acceptance Scenarios:**
-- Given a worker executing arbitrary attacker-controlled code (hostile DAG, compromised dependency, prompt-injection RCE), When it attempts to read another tenant's secrets, filesystem, cache/checkpoint data, or in-memory state, Then it obtains zero bytes of another tenant's material.
-- Given any worker process, When its loaded configuration and secrets are inspected, Then it holds exactly one tenant's config/secrets/data and no other tenant's.
-- Given the supervisor process, When its memory and state are inspected at any point in its lifetime, Then it contains zero tenant secrets — only auth, routing, and registry metadata.
+- AS-004: Given a worker executing arbitrary attacker-controlled code (hostile DAG, compromised dependency, prompt-injection RCE), When it attempts to read another tenant's secrets, filesystem, cache/checkpoint data, or in-memory state, Then it obtains zero bytes of another tenant's material.
+- AS-005: Given any worker process, When its loaded configuration and secrets are inspected, Then it holds exactly one tenant's config/secrets/data and no other tenant's.
+- AS-006: Given the supervisor process, When its memory and state are inspected at any point in its lifetime, Then it contains zero tenant secrets — only auth, routing, and registry metadata.
 
 ### US3: [P1] Identity-to-tenant routing at the boundary
 
@@ -48,9 +48,9 @@ Today the fugue host is `host = team = trust boundary`: one tenant per process, 
 **Why this priority:** The supervisor's request boundary is what makes multi-tenancy on one listener possible; routing is foundational to every other scenario.
 
 **Acceptance Scenarios:**
-- Given an authenticated caller whose identity maps to a registered tenant, When a request arrives at the single HTTP listener, Then the supervisor resolves the `Tenant` principal at the boundary and routes to that tenant's owning worker.
-- Given a caller whose identity does not map to any registered tenant, When a request arrives, Then it is rejected as unknown/unauthorized (404/401) with no cross-tenant information leakage.
-- Given a resolved `Tenant` principal, When the worker evaluates `canAccessDag` and other authz, Then authz decisions are made against that tenant's principal and never against another tenant's data.
+- AS-007: Given an authenticated caller whose identity maps to a registered tenant, When a request arrives at the single HTTP listener, Then the supervisor resolves the `Tenant` principal at the boundary and routes to that tenant's owning worker.
+- AS-008: Given a caller whose identity does not map to any registered tenant, When a request arrives, Then it is rejected as unknown/unauthorized (404/401) with no cross-tenant information leakage.
+- AS-009: Given a resolved `Tenant` principal, When the worker evaluates `canAccessDag` and other authz, Then authz decisions are made against that tenant's principal and never against another tenant's data.
 
 ### US4: [P1] Worker lifecycle (spawn, crash-restart, graceful drain)
 
@@ -61,10 +61,10 @@ Today the fugue host is `host = team = trust boundary`: one tenant per process, 
 **Why this priority:** Lifecycle is required for the supervisor to serve tenants safely and to satisfy crash-containment isolation.
 
 **Acceptance Scenarios:**
-- Given a request for a registered tenant with no live worker, When the supervisor needs to serve it, Then it spawns a worker scoped to exactly that tenant.
-- Given a tenant worker crashes mid-run, When the supervisor detects the crash, Then no other tenant's worker or runs are affected, and the supervisor restarts the crashed tenant's worker.
-- Given a worker crashed mid-run, When the worker is restarted, Then the crashed tenant's in-flight run resumes from its last checkpoint on a best-effort basis (durable HITL runs survive). [DEFERRED TO ARCHITECTURE: run-resume vs fail-fast mechanism]
-- Given an operator initiates a graceful drain of a worker, When drain is requested, Then in-flight runs are allowed to complete (or checkpoint) before the worker is shut down. [DEFERRED TO ARCHITECTURE: operator drain trigger — the drain state machine (SIGTERM-only, drainComplete-on-exit) is implemented and unit-tested, but no operator-facing trigger is wired in this slice; reserved for the reconfigure-driven drain+respawn path (ADR-0070)]
+- AS-010: Given a request for a registered tenant with no live worker, When the supervisor needs to serve it, Then it spawns a worker scoped to exactly that tenant.
+- AS-011: Given a tenant worker crashes mid-run, When the supervisor detects the crash, Then no other tenant's worker or runs are affected, and the supervisor restarts the crashed tenant's worker.
+- AS-012: Given a worker crashed mid-run, When the worker is restarted, Then the crashed tenant's in-flight run resumes from its last checkpoint on a best-effort basis (durable HITL runs survive). [DEFERRED TO ARCHITECTURE: run-resume vs fail-fast mechanism]
+- AS-013: Given an operator initiates a graceful drain of a worker, When drain is requested, Then in-flight runs are allowed to complete (or checkpoint) before the worker is shut down. [DEFERRED TO ARCHITECTURE: operator drain trigger — the drain state machine (SIGTERM-only, drainComplete-on-exit) is implemented and unit-tested, but no operator-facing trigger is wired in this slice; reserved for the reconfigure-driven drain+respawn path (ADR-0070)]
 
 ### US5: [P1] Runtime tenant registry and admin lifecycle API
 
@@ -75,10 +75,10 @@ Today the fugue host is `host = team = trust boundary`: one tenant per process, 
 **Why this priority:** Runtime onboarding (US1) and routing (US3) depend on a live, mutable registry; lifecycle operations are P1.
 
 **Acceptance Scenarios:**
-- Given an admin-token-authenticated request, When it registers a new tenant with config (secrets source, fs root, Keycloak client mapping, etc.), Then the tenant becomes resolvable for routing and an audit record (actor, timestamp, tenant, action) is emitted.
-- Given a register or deregister request that has already been applied, When it is submitted again with the same parameters, Then the operation is idempotent and produces the same end state.
-- Given a non-admin token, When it attempts register/deregister/reconfigure, Then the request is rejected (unauthorized) and no lifecycle change occurs.
-- Given a reconfigure request for an existing tenant, When applied, Then the tenant's effective config is updated for subsequent runs and an audit record is emitted.
+- AS-014: Given an admin-token-authenticated request, When it registers a new tenant with config (secrets source, fs root, Keycloak client mapping, etc.), Then the tenant becomes resolvable for routing and an audit record (actor, timestamp, tenant, action) is emitted.
+- AS-015: Given a register or deregister request that has already been applied, When it is submitted again with the same parameters, Then the operation is idempotent and produces the same end state.
+- AS-016: Given a non-admin token, When it attempts register/deregister/reconfigure, Then the request is rejected (unauthorized) and no lifecycle change occurs.
+- AS-017: Given a reconfigure request for an existing tenant, When applied, Then the tenant's effective config is updated for subsequent runs and an audit record is emitted.
 
 ### US6: [P1] Tenant deregistration and data lifecycle
 
@@ -89,9 +89,9 @@ Today the fugue host is `host = team = trust boundary`: one tenant per process, 
 **Why this priority:** Deregistration is part of the P1 lifecycle and carries the strongest data-handling and access-revocation guarantees.
 
 **Acceptance Scenarios:**
-- Given a tenant is deregistered, When the operation completes, Then the tenant's worker is killed, its token is invalidated, and it can no longer be routed to or invoke DAGs.
-- Given a tenant has been deregistered, When the grace window (default 7 days, configurable) has not elapsed, Then the tenant's footprint (fs mount, secrets, cache/checkpoint keys) is retained.
-- Given a deregistered tenant whose grace window has elapsed, When the purge runs, Then the tenant's retained footprint is auto-purged.
+- AS-018: Given a tenant is deregistered, When the operation completes, Then the tenant's worker is killed, its token is invalidated, and it can no longer be routed to or invoke DAGs.
+- AS-019: Given a tenant has been deregistered, When the grace window (default 7 days, configurable) has not elapsed, Then the tenant's footprint (fs mount, secrets, cache/checkpoint keys) is retained.
+- AS-020: Given a deregistered tenant whose grace window has elapsed, When the purge runs, Then the tenant's retained footprint is auto-purged.
 
 ### US7: [P1] Supervisor restart with live workers
 
@@ -102,9 +102,9 @@ Today the fugue host is `host = team = trust boundary`: one tenant per process, 
 **Why this priority:** Supervisor availability semantics are core to the single-host reliability story.
 
 **Acceptance Scenarios:**
-- Given live workers serving runs, When the supervisor is restarted, Then existing workers keep serving their in-flight work.
-- Given the supervisor has restarted, When it comes back up, Then it re-adopts the still-live workers and resumes routing to them. [DEFERRED TO ARCHITECTURE: worker re-adoption mechanism]
-- Given in-flight runs at the moment of supervisor restart, When the supervisor returns, Then those runs survive the restart.
+- AS-021: Given live workers serving runs, When the supervisor is restarted, Then existing workers keep serving their in-flight work.
+- AS-022: Given the supervisor has restarted, When it comes back up, Then it re-adopts the still-live workers and resumes routing to them. [DEFERRED TO ARCHITECTURE: worker re-adoption mechanism]
+- AS-023: Given in-flight runs at the moment of supervisor restart, When the supervisor returns, Then those runs survive the restart.
 
 ### US8: [P2] Per-tenant resource admission / anti-starvation quota
 
@@ -115,9 +115,9 @@ Today the fugue host is `host = team = trust boundary`: one tenant per process, 
 **Why this priority:** Important for fairness and stability but the system can deliver isolated multi-tenancy before quotas are fully enforced; defers behind P1.
 
 **Acceptance Scenarios:**
-- Given a tenant at its admission/quota ceiling, When it submits additional work, Then the supervisor refuses the excess for that tenant only, returning over-quota (429) with a retry-after, and other tenants are unaffected.
-- Given the box is at its configured upper bound on live workers, When a new tenant would require a worker beyond that bound, Then the supervisor enforces the bound rather than over-committing the box.
-- Given one tenant generating heavy load, When other tenants submit work concurrently, Then other tenants' admission and latency are not degraded by the heavy tenant beyond their own fair share. [DEFERRED TO ARCHITECTURE: depth of resource enforcement (process-level admission only vs cgroup CPU/memory limits)]
+- AS-024: Given a tenant at its admission/quota ceiling, When it submits additional work, Then the supervisor refuses the excess for that tenant only, returning over-quota (429) with a retry-after, and other tenants are unaffected.
+- AS-025: Given the box is at its configured upper bound on live workers, When a new tenant would require a worker beyond that bound, Then the supervisor enforces the bound rather than over-committing the box.
+- AS-026: Given one tenant generating heavy load, When other tenants submit work concurrently, Then other tenants' admission and latency are not degraded by the heavy tenant beyond their own fair share. [DEFERRED TO ARCHITECTURE: depth of resource enforcement (process-level admission only vs cgroup CPU/memory limits)]
 
 ### US9: [P2] Additive config-as-code seam for a NEW downstream capability
 
@@ -128,8 +128,8 @@ Today the fugue host is `host = team = trust boundary`: one tenant per process, 
 **Why this priority:** Only a subset of onboardings need new capabilities; the common case (US1) needs no PR. Valuable but not blocking.
 
 **Acceptance Scenarios:**
-- Given a tenant needs a new downstream capability, When the additive config-as-code change is merged and applied, Then the running host can register/use that capability without a host redeploy.
-- Given a new capability has not yet been provisioned, When a tenant attempts to use it, Then the system fails clearly indicating the capability is unprovisioned, without leaking other tenants' capability config.
+- AS-027: Given a tenant needs a new downstream capability, When the additive config-as-code change is merged and applied, Then the running host can register/use that capability without a host redeploy.
+- AS-028: Given a new capability has not yet been provisioned, When a tenant attempts to use it, Then the system fails clearly indicating the capability is unprovisioned, without leaking other tenants' capability config.
 
 ### US10: [P3] Per-tenant cost attribution / metering
 
@@ -140,7 +140,7 @@ Today the fugue host is `host = team = trust boundary`: one tenant per process, 
 **Why this priority:** Observability-only nice-to-have; explicitly not billing. Lowest priority.
 
 **Acceptance Scenarios:**
-- Given tenants running workloads, When attribution is queried, Then per-tenant usage is reported as observability data, attributed correctly to the owning tenant.
+- AS-029: Given tenants running workloads, When attribution is queried, Then per-tenant usage is reported as observability data, attributed correctly to the owning tenant.
 
 ---
 
@@ -268,10 +268,10 @@ Measurable outcomes that define "done":
 
 Explicitly NOT part of this feature (YAGNI):
 
-- Dynamic Keycloak/Entra **provisioning APIs** (runtime creation of new clients/apps). New downstream capabilities stay PR-provisioned, additive to the running host.
-- Cross-host / multi-node supervisor **clustering**. One box, one supervisor.
-- A full per-tenant **billing** system. Per-tenant attribution/metering (observability only) MAY be included; billing is not.
-- **Re-architecting** the already-tenant-aware control plane (auth→team, `canAccessDag`, token store, capability broker, cache keys, HITL). It is reused and extended, not rebuilt.
+- OOS-001: Dynamic Keycloak/Entra **provisioning APIs** (runtime creation of new clients/apps). New downstream capabilities stay PR-provisioned, additive to the running host.
+- OOS-002: Cross-host / multi-node supervisor **clustering**. One box, one supervisor.
+- OOS-003: A full per-tenant **billing** system. Per-tenant attribution/metering (observability only) MAY be included; billing is not.
+- OOS-004: **Re-architecting** the already-tenant-aware control plane (auth→team, `canAccessDag`, token store, capability broker, cache keys, HITL). It is reused and extended, not rebuilt.
 
 ---
 

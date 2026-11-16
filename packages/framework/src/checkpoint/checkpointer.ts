@@ -222,15 +222,19 @@ export const parseRunMetaRecord = (
  * served as valid were `checkpoint-corrupt` on the file backend) and
  * `completedAt` must be canonical ISO. The file codec additionally verifies
  * its envelope (`nodeKey`, digest filename) and serializer-tagged `output`
- * around this gate; the Redis adapter passes `output` through.
+ * around this gate; the Redis adapters pass `output` through.
+ *
+ * Parse, don't validate: the result carries the record's `output` too, read
+ * off the same object this function proved to be a JSON object, so no caller
+ * re-reads the raw value through a second, unproven helper.
  */
 export const parseNodeStateRecord = (
   raw: unknown,
-): Result<{ readonly nodeId: NodeId; readonly completedAt: Date }, string> => {
+): Result<NodeStateRecord, string> => {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return err(`node entry must be a JSON object, got ${safeDiagnosticRender(raw)}`);
   }
-  const { nodeId, completedAt } = raw as Record<string, unknown>;
+  const { nodeId, completedAt, output } = raw as Record<string, unknown>;
   if (typeof nodeId !== "string" || !ID_PATTERN.test(nodeId)) {
     return err(`nodeId ${safeDiagnosticRender(nodeId)} does not match ${ID_PATTERN.source}`);
   }
@@ -240,7 +244,7 @@ export const parseNodeStateRecord = (
   const parsedCompletedAt = parseCanonicalIsoDate(completedAt, "completedAt");
   if (!parsedCompletedAt.ok) return err(parsedCompletedAt.error);
   // ID_PATTERN was just verified — the validating brand cannot reject.
-  return ok({ nodeId: __brandNodeId(nodeId), completedAt: parsedCompletedAt.value });
+  return ok({ nodeId: __brandNodeId(nodeId), output, completedAt: parsedCompletedAt.value });
 };
 
 // ── Guarded checkpoint-clock read (round-23 cs-2) ──────────────────────────
@@ -388,6 +392,18 @@ export interface NodeState {
   readonly output: unknown;
   readonly completedAt: Date;
 }
+
+/**
+ * A persisted node record whose grammar `parseNodeStateRecord` has proven:
+ * `nodeId` is in `ID_PATTERN` and `completedAt` was canonical ISO. Same shape
+ * as `NodeState` — declared once, as an alias — but a different ROLE: `output`
+ * is the record's STORED form, which that grammar does not constrain. The
+ * Redis backends store the output itself, so for them this record is the
+ * `NodeState`; the file codec stores serializer-tagged output and must decode
+ * it before it can become one. The name marks which side of that decode a
+ * value is on; the type system does not (both are `output: unknown`).
+ */
+export type NodeStateRecord = NodeState;
 
 export type CorruptCheckpointAddress =
   | { readonly kind: "node-key"; readonly nodeKey: string }

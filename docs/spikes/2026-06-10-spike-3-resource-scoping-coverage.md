@@ -1,6 +1,6 @@
 # Spike 3 — resource-scoping coverage
 
-> **Date:** 2026-06-10 · **Spec anchors:** FR-SPK-003, SC-014, US7 ·
+> **Date:** 2026-06-10 · **Spec anchors:** FR-603, SC-014, US7 ·
 > **Gates:** Phase 5 Entra bridge (wave 4) — resource-scoping policies as the
 > Entra-side bound on the union-permission token.
 > **Design:** [team-security-and-capabilities.md](../team-security-and-capabilities.md)

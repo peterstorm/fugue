@@ -1,7 +1,7 @@
 /**
  * Pass-through CapabilityBroker tests.
  *
- * Proves the zero-regression contract (US3, FR-W2-002/003, SC-005): the
+ * Proves the zero-regression contract (US3, FR-202/203, SC-005): the
  * pass-through broker hands back the EXACT client references it was constructed
  * with, independent of the invocation `origin` and the `requires` declaration,
  * and never produces an `Err`.

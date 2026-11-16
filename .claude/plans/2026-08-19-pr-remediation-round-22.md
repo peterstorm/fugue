@@ -31,7 +31,7 @@
 
 **pr-test-analyzer-1** (`keycloak-broker.ts:346` "zero tests") — REFUTED by all three panel lenses (reproduction/intent/security): `packages/host/src/adapters/__tests__/keycloak-broker.test.ts` exists (~1500 lines) and pins the no-egress gate (`:194`, `egressCount()===0 && wifCount()===0`), the FR-030 subject-token fail-closed refusal (`:658`), and the I2 early-refresh skew (`:457`). The "zero tests in the frozen scope" claim was a changed-path-union enumeration artifact (the test file predates the branch diff).
 
-**pr-test-analyzer-2** (`entra-wif.ts:1` "zero tests") — REFUTED by all three lenses: `packages/host/src/adapters/__tests__/entra-wif.test.ts` exists and pins the SC-011/FR-W4-004 `client_assertion` form construction (`:65`), the `downstream-denied` (FR-X-002, `:206`) and `infra-unreachable` (`:235`) classification, plus tenantId injection validation (`:108`).
+**pr-test-analyzer-2** (`entra-wif.ts:1` "zero tests") — REFUTED by all three lenses: `packages/host/src/adapters/__tests__/entra-wif.test.ts` exists and pins the SC-011/FR-404 `client_assertion` form construction (`:65`), the `downstream-denied` (FR-502, `:206`) and `infra-unreachable` (`:235`) classification, plus tenantId injection validation (`:108`).
 
 These are audited refutations against real test files; per the invariants they are never fixed.
 
@@ -63,7 +63,7 @@ These are audited refutations against real test files; per the invariants they a
 
 #### Dismissed (6)
 
-1. **pr-test-analyzer-3** (metered-llm "zero tests") — `packages/host/src/__tests__/metered-llm.test.ts` exists and pins pre-call budget refusal (FR-W1-002: "refuses with llm-budget-exceeded … without calling inner"), overshoot-by-one (SC-003), and accumulation; `llm-meter.test.ts` (31 tests) additionally pins `budgetDecision`/`admitWithReservation`. Same changed-path-union artifact the panel refuted for the criticals.
+1. **pr-test-analyzer-3** (metered-llm "zero tests") — `packages/host/src/__tests__/metered-llm.test.ts` exists and pins pre-call budget refusal (FR-102: "refuses with llm-budget-exceeded … without calling inner"), overshoot-by-one (SC-003), and accumulation; `llm-meter.test.ts` (31 tests) additionally pins `budgetDecision`/`admitWithReservation`. Same changed-path-union artifact the panel refuted for the criticals.
 2. **pr-test-analyzer-4** (circuit-breaker "zero tests") — `packages/host/src/__tests__/circuit-breaker.test.ts` (50 tests: closed→open at threshold, half-open→closed heal, open stays open on unexpected success, `consumeTestRequest`) and `circuit-guard.test.ts` (58 tests) exist.
 3. **pr-test-analyzer-5** (capability-scope "zero tests") — `packages/host/src/domain/__tests__/capability-scope.test.ts` exists (parse-don't-validate round-trips, malformed-name table, `handleKindForScope` exhaustive mapping, type-level narrowed-handle guarantee).
 4. **pr-test-analyzer-6** (dag-diff "zero tests") — `packages/host/src/__tests__/diff.property.test.ts` exists (9 property tests: added/removed/changed partitions, identity, empty cases, `hasChanges` iff non-empty).

@@ -94,7 +94,7 @@ export type DagPhase =
       /**
        * The `onHumanReview` hook threw. The gate payload (output, prompt,
        * pendingReviews, wave) is preserved across retries; the hook is retried up
-       * to the node's retry budget (shared with node retries). FR-029a:
+       * to the node's retry budget (shared with node retries). FR-084:
        * hook-crash retry semantics.
        */
       readonly kind: "retrying-hook";

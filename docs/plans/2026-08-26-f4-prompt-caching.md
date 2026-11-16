@@ -221,7 +221,7 @@ can silently omit one. No migration, no version bump of the checkpoint format.
 | FR-PC-003 | `conversation` additionally rolls one breakpoint onto the last content block of the most recently appended turn; total breakpoints per request never exceeds 2. |
 | FR-PC-004 | Absent/`none` policy produces a request byte-identical to today's. |
 | FR-PC-005 | `TokenUsage.tokensIn` counts every prompt token for every provider (`uncached + write + read`). |
-| FR-PC-006 | Cache figures are reported on success **and** on every usage-carrying error arm (extends FR-W0-001 attribution to cached tokens). |
+| FR-PC-006 | Cache figures are reported on success **and** on every usage-carrying error arm (extends FR-001 attribution to cached tokens). |
 | FR-PC-007 | The tool loop accumulates cache figures across turns via the `TokenUsage` monoid. |
 | FR-PC-008 | Cost weights cache-write by TTL (1.25× / 2×) and cache-read by 0.1×. |
 | FR-PC-009 | A requested-but-inert cache policy is logged once per node, never silent. |

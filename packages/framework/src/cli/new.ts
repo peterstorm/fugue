@@ -56,7 +56,19 @@ import { runGauntlet, type GauntletResult } from "./gauntlet.js";
 import { parseKebab, parseKebabIdent, type Kebab, type KebabIdent } from "./identifiers.js";
 import { resolveRoot } from "./paths.js";
 import { freshRegistryEntry, serializeRegistry, type RegistryEntry } from "./prompts.js";
-import { parseFlagValue } from "./arg-parsing.js";
+import {
+  accept,
+  all,
+  andThenChecked,
+  mapChecked,
+  noProblems,
+  refuse,
+  reject,
+  scanArgs,
+  type Checked,
+  type Rejected,
+  type ScannedArgs,
+} from "./arg-parsing.js";
 import { formatLintError, type LintAdvisory, type NewResult } from "./types.js";
 
 export interface NewOptions {
@@ -103,122 +115,90 @@ interface ParsedNewFromArgs {
   readonly root?: string;
   readonly force: boolean;
 }
-interface ParseNewError {
-  readonly ok: false;
-  readonly problems: readonly string[];
-}
+const NEW_FLAGS = {
+  valueFlags: ["--shape", "--owner", "--dir", "--from"],
+  switches: ["--llm", "--review", "--force"],
+} as const;
 
-/** Raw flag values as scanned — not yet validated into `NewOptions`. */
-interface ScannedNewArgs {
-  readonly target: string | undefined;
-  readonly shape: string | undefined;
-  readonly owner: string | undefined;
-  readonly root: string | undefined;
-  readonly from: string | undefined;
-  readonly llm: boolean;
-  readonly review: boolean;
-  readonly force: boolean;
-  readonly problems: string[];
-}
+type ScannedNewArgs = ScannedArgs<
+  (typeof NEW_FLAGS.valueFlags)[number],
+  (typeof NEW_FLAGS.switches)[number]
+>;
 
-const NEW_VALUE_FLAGS: ReadonlySet<string> = new Set(["--shape", "--owner", "--dir", "--from"]);
-const NEW_BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["--llm", "--review", "--force"]);
-
-/** Scan flags + the positional target, accumulating every scan problem. */
-const scanNewArgs = (args: readonly string[]): ScannedNewArgs => {
-  const problems: string[] = [];
-  // A value flag that fails to parse resets to `undefined` (last occurrence wins).
-  const values = new Map<string, string | undefined>();
-  const switches = new Set<string>();
-  let target: string | undefined;
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]!;
-    if (NEW_VALUE_FLAGS.has(arg)) {
-      const parsed = parseFlagValue(args, i, arg);
-      i = parsed.nextIndex;
-      if (!parsed.ok) problems.push(parsed.problem);
-      values.set(arg, parsed.ok ? parsed.value : undefined);
-    } else if (NEW_BOOLEAN_FLAGS.has(arg)) {
-      switches.add(arg);
-    } else if (arg.startsWith("--")) {
-      problems.push(`unknown flag: ${arg}`);
-    } else if (target === undefined) {
-      target = arg;
-    } else {
-      problems.push(`unexpected argument: ${arg}`);
-    }
-  }
-  return {
-    target,
-    shape: values.get("--shape"),
-    owner: values.get("--owner"),
-    root: values.get("--dir"),
-    from: values.get("--from"),
-    llm: switches.has("--llm"),
-    review: switches.has("--review"),
-    force: switches.has("--force"),
-    problems,
-  };
+/** `--owner` / `--dir` as optional `NewOptions` members (absent when not given). */
+const ownerAndRoot = (scanned: ScannedNewArgs): { readonly owner?: string; readonly root?: string } => {
+  const owner = scanned.value("--owner");
+  const root = scanned.value("--dir");
+  return { ...(owner !== undefined ? { owner } : {}), ...(root !== undefined ? { root } : {}) };
 };
 
 // `--from` mode: name/team/shape/nodes all come from the authored file —
 // the shape-mode arguments are contradictions, not extras. Reject loudly.
-const parseNewFromMode = (scanned: ScannedNewArgs, from: string): ParsedNewFromArgs | ParseNewError => {
-  const { target, shape, owner, root, llm, review, force, problems } = scanned;
-  if (target !== undefined) problems.push("--from takes no <team>/<name> argument (name/team come from the authored file)");
-  if (shape !== undefined) problems.push("--from and --shape are mutually exclusive (shape comes from the authored file)");
-  if (llm) problems.push("--from and --llm are mutually exclusive (LLM nodes come from the authored file)");
-  if (review) problems.push("--from and --review are mutually exclusive (review gates come from the authored file)");
-  if (problems.length > 0) return { ok: false, problems };
-  return { ok: true, mode: "from", from, force, ...(owner !== undefined ? { owner } : {}), ...(root !== undefined ? { root } : {}) };
+const parseNewFromMode = (scanned: ScannedNewArgs, from: string): ParsedNewFromArgs | Rejected => {
+  const checked = all(
+    noProblems(scanned.problems),
+    refuse(scanned.positional !== undefined, "--from takes no <team>/<name> argument (name/team come from the authored file)"),
+    refuse(scanned.value("--shape") !== undefined, "--from and --shape are mutually exclusive (shape comes from the authored file)"),
+    refuse(scanned.isSet("--llm"), "--from and --llm are mutually exclusive (LLM nodes come from the authored file)"),
+    refuse(scanned.isSet("--review"), "--from and --review are mutually exclusive (review gates come from the authored file)"),
+  );
+  if (!checked.ok) return checked;
+  return { ok: true, mode: "from", from, force: scanned.isSet("--force"), ...ownerAndRoot(scanned) };
 };
 
-/**
- * Parse the `<team>/<name>` target into its branded parts. A `null` part always
- * comes with a pushed problem (missing target, bad path shape, non-KEBAB team,
- * non-KEBAB_IDENT name).
- */
-const parseTeamAndName = (
-  target: string | undefined,
-  problems: string[],
-): { readonly team: Kebab | null; readonly name: KebabIdent | null } => {
-  if (target === undefined) {
-    problems.push("missing <team>/<name> argument (e.g. `fugue new leads/my-dag --shape sources`)");
-    return { team: null, name: null };
-  }
-  const parts = target.split("/");
-  if (parts.length !== 2 || parts[0] === "" || parts[1] === "") {
-    problems.push(`'${target}' is not a <team>/<name> path (exactly one '/', both non-empty)`);
-    return { team: null, name: null };
-  }
-  const [rawTeam, rawName] = parts as [string, string];
+const parseTeam = (rawTeam: string): Checked<Kebab> => {
   const team = parseKebab(rawTeam);
-  if (team === null) problems.push(`team '${rawTeam}' must be kebab-case (lowercase, digits, single dashes)`);
-  // The name feeds codegen'd identifiers (`create<Pascal>Dag`,
-  // `<Pascal>DagOpts`) — it must camelCase to a valid JS identifier, so
-  // the first segment cannot start with a digit (KEBAB_IDENT, the same
-  // rule the AuthoredDag schema enforces on `name` and node ids).
+  return team === null
+    ? reject(`team '${rawTeam}' must be kebab-case (lowercase, digits, single dashes)`)
+    : accept(team);
+};
+
+// The name feeds codegen'd identifiers (`create<Pascal>Dag`, `<Pascal>DagOpts`)
+// — it must camelCase to a valid JS identifier, so the first segment cannot
+// start with a digit (KEBAB_IDENT, the same rule the AuthoredDag schema
+// enforces on `name` and node ids).
+const parseName = (rawName: string): Checked<KebabIdent> => {
   const name = parseKebabIdent(rawName);
-  if (name === null) {
-    problems.push(
-      `name '${rawName}' must be kebab-case starting with a letter (lowercase, digits, single dashes — it becomes a JS identifier in the generated dag.ts, so a digit-leading name would not compile)`,
-    );
+  return name === null
+    ? reject(
+        `name '${rawName}' must be kebab-case starting with a letter (lowercase, digits, single dashes — it becomes a JS identifier in the generated dag.ts, so a digit-leading name would not compile)`,
+      )
+    : accept(name);
+};
+
+/** Parse the `<team>/<name>` target into its branded parts (team and name problems both reported). */
+const parseTarget = (
+  target: string | undefined,
+): Checked<{ readonly team: Kebab; readonly name: KebabIdent }> => {
+  if (target === undefined) {
+    return reject("missing <team>/<name> argument (e.g. `fugue new leads/my-dag --shape sources`)");
   }
-  return { team, name };
+  const [rawTeam, rawName, ...extra] = target.split("/");
+  if (rawTeam === undefined || rawName === undefined || extra.length > 0 || rawTeam === "" || rawName === "") {
+    return reject(`'${target}' is not a <team>/<name> path (exactly one '/', both non-empty)`);
+  }
+  return mapChecked(all(parseTeam(rawTeam), parseName(rawName)), ([team, name]) => ({ team, name }));
 };
 
 // `parseShape` is the single Shape producer (parse, don't validate) — the
 // membership check narrows, so the success arm never needs an `as Shape`.
-const parseShapeFlag = (shape: string | undefined, problems: string[]): Shape | null => {
-  if (shape === undefined) {
-    problems.push(`missing --shape (one of: ${DAG_SHAPES.join(", ")})`);
-    return null;
-  }
+const parseShapeFlag = (shape: string | undefined): Checked<Shape> => {
+  if (shape === undefined) return reject(`missing --shape (one of: ${DAG_SHAPES.join(", ")})`);
   const parsedShape = parseShape(shape);
-  if (parsedShape === null) problems.push(`unknown --shape '${shape}' (one of: ${DAG_SHAPES.join(", ")})`);
-  return parsedShape;
+  return parsedShape === null
+    ? reject(`unknown --shape '${shape}' (one of: ${DAG_SHAPES.join(", ")})`)
+    : accept(parsedShape);
 };
+
+// `--review` is a human-review gate (an aspect) — but the scaffold only knows
+// where to place it in a linear chain. For other shapes, gate a node by hand
+// with `withHumanReview`. Reject the combination fail-fast rather than silently
+// dropping the flag. Checked only against a parsed shape: a missing/unknown
+// shape is already its own problem.
+const checkReviewShape = (review: boolean, shape: Shape): Checked<Shape> =>
+  review && shape !== "linear"
+    ? reject("--review is currently supported only with --shape linear (gate a node in other shapes with withHumanReview)")
+    : accept(shape);
 
 /**
  * Parse `fugue new`'s arguments (everything after the `new` token) into
@@ -229,36 +209,23 @@ const parseShapeFlag = (shape: string | undefined, problems: string[]): Shape | 
  * problems rather than failing on the first, so an LLM author sees every fix
  * at once.
  */
-export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNewFromArgs | ParseNewError => {
-  const scanned = scanNewArgs(args);
-  if (scanned.from !== undefined) return parseNewFromMode(scanned, scanned.from);
+export const parseNewArgs = (args: readonly string[]): ParsedNewArgs | ParsedNewFromArgs | Rejected => {
+  const scanned = scanArgs(args, NEW_FLAGS);
+  const from = scanned.value("--from");
+  if (from !== undefined) return parseNewFromMode(scanned, from);
 
-  const { target, shape, owner, root, llm, review, force, problems } = scanned;
-  const { team, name } = parseTeamAndName(target, problems);
-  const parsedShape = parseShapeFlag(shape, problems);
-
-  // `--review` is a human-review gate (an aspect) — but the scaffold only knows
-  // where to place it in a linear chain. For other shapes, gate a node by hand
-  // with `withHumanReview`. Reject the combination fail-fast rather than silently
-  // dropping the flag. (A missing/unknown shape is already reported above.)
-  if (review && parsedShape !== null && parsedShape !== "linear") {
-    problems.push(
-      "--review is currently supported only with --shape linear " +
-        "(gate a node in other shapes with withHumanReview)",
-    );
-  }
-
-  // Every `name === null` / `team === null` / `parsedShape === null` path
-  // pushed a problem above (missing target, bad path shape, non-KEBAB team,
-  // non-KEBAB_IDENT name, missing/unknown shape), so the null checks are the
-  // same gate — and they also narrow the brands for the success arm below.
-  if (name === null || team === null || parsedShape === null || problems.length > 0) {
-    return { ok: false, problems };
-  }
+  const review = scanned.isSet("--review");
+  const checked = all(
+    noProblems(scanned.problems),
+    parseTarget(scanned.positional),
+    andThenChecked(parseShapeFlag(scanned.value("--shape")), (shape) => checkReviewShape(review, shape)),
+  );
+  if (!checked.ok) return checked;
+  const [, { team, name }, shape] = checked.value;
   return {
     ok: true,
     mode: "shape",
-    options: { team, name, shape: parsedShape, llm, review, force, ...(owner !== undefined ? { owner } : {}), ...(root !== undefined ? { root } : {}) },
+    options: { team, name, shape, llm: scanned.isSet("--llm"), review, force: scanned.isSet("--force"), ...ownerAndRoot(scanned) },
   };
 };
 
