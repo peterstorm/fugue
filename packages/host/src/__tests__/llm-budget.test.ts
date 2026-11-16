@@ -11,7 +11,7 @@ import { describe, it, expect } from "bun:test";
 import { usdToMicros } from "@fuguejs/framework";
 import { LlmBudgetConfigSchema, ceilingsOf } from "../domain/llm-budget.js";
 
-describe("ceilingsOf: no declaration means no enforcement (FR-W1-006)", () => {
+describe("ceilingsOf: no declaration means no enforcement (FR-106)", () => {
   it("returns undefined when nothing is declared", () => {
     expect(ceilingsOf({})).toBeUndefined();
     expect(ceilingsOf({ llmBudget: {} })).toBeUndefined();

@@ -48,7 +48,7 @@ genuinely parser artifacts or independently-confirmed-resolved.
 - `packages/framework/src/types/capability-handle.ts` — corrected `dependsOn` doc (`judgeLlm`/`cache` are built-in `NodeContext` fields, not in `SharedInfra`).
 
 **Wave 3 (T6/T7):**
-- **[was the blocking CRITICAL]** User `sub` no longer dead-ends. `createNodeContextForDag` now takes `identity: AuthIdentity` and builds `Invocation.origin` via `invocationOriginForIdentity(identity, dagId)` (`user` → `{kind:"user", sub, agentClientId: azp}`; `team`/`admin` → `{kind:"agent", agentClientId: dagId}`). `host.ts` `createContext` threads the identity through instead of discarding `_identity`. Satisfies FR-W3-007 (sub reaches NodeContext). Test in `node-context-factory.test.ts`.
+- **[was the blocking CRITICAL]** User `sub` no longer dead-ends. `createNodeContextForDag` now takes `identity: AuthIdentity` and builds `Invocation.origin` via `invocationOriginForIdentity(identity, dagId)` (`user` → `{kind:"user", sub, agentClientId: azp}`; `team`/`admin` → `{kind:"agent", agentClientId: dagId}`). `host.ts` `createContext` threads the identity through instead of discarding `_identity`. Satisfies FR-307 (sub reaches NodeContext). Test in `node-context-factory.test.ts`.
 - `jwt-validation.ts` — `validateRealmJwtClaims` rejects non-finite `now` (`NaN`/`Infinity`) → `err(malformed)` (was a latent fail-open: `exp <= NaN` is false → expired token would read valid).
 - `errors.ts` — `policy-refusal.agentClientId` made **optional** (was `""` sentinel = representable illegal state). `formatFrameworkError` renders both forms. `capability-scope.ts` omits the field at parse time.
 - `token-cache.ts` — corrected wave mislabel in module doc.

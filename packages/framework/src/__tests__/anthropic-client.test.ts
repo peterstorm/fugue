@@ -167,7 +167,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
         expect(result.error.message).toContain("BODY_MARKER_9f3a");
         expect(result.error.retriability).toBe("retriable");
         // Fb: the malformed success still burned tokens — the in-scope
-        // response.usage rides the error (FR-W0-001), mirroring the
+        // response.usage rides the error (FR-001), mirroring the
         // sendWithTools terminal arms. makeTextResponse uses baseUsage().
         expect(result.error.usage).toEqual({ ...tokensOnly(100, 50) });
       }
@@ -291,7 +291,7 @@ describe("AnthropicLlmClient.sendStructured", () => {
       expect(result.error.nodeId).toBe(N("schema-node"));
       expect(result.error.message).toMatch(/Schema validation failed/);
       // Fb: the failed validation still burned tokens — the in-scope
-      // response.usage rides the error (FR-W0-001).
+      // response.usage rides the error (FR-001).
       expect(result.error.usage).toEqual({ ...tokensOnly(12, 7) });
     }
   });

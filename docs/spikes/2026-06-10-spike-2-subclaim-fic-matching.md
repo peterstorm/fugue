@@ -1,6 +1,6 @@
 # Spike 2 — sub-claim mapper × FIC matching
 
-> **Date:** 2026-06-10 · **Spec anchors:** FR-SPK-002, SC-014, US7 ·
+> **Date:** 2026-06-10 · **Spec anchors:** FR-602, SC-014, US7 ·
 > **Gates:** Phase 5 Entra bridge (wave 4) — FIC subject wiring mechanism.
 > **Design:** [team-security-and-capabilities.md](../team-security-and-capabilities.md)
 > — "Verify before building" item #2; "Mechanics (both variants)".

@@ -10,13 +10,13 @@ Accepted
 
 The Wave-4 Entra bridge gives a node app-only access to Microsoft Graph / Dynamics
 without storing any Entra secret. A single Entra app registration, `fugue-agents`,
-holds the union of application permissions any agent needs (FR-W4-001), and trusts
+holds the union of application permissions any agent needs (FR-401), and trusts
 the `fugue-platform` Keycloak realm as an external OIDC issuer via Workload Identity
 Federation. The credential is the Keycloak service-account token itself, presented as
 the `client_assertion` in a `client_credentials` request to the tenant token endpoint
-(FR-W4-004, US7). Entra accepts the assertion only if its `iss` / `sub` / `aud` match a
+(FR-404, US7). Entra accepts the assertion only if its `iss` / `sub` / `aud` match a
 **federated identity credential (FIC)** declared on the `fugue-agents` app, case-
-sensitively (FR-W4-002).
+sensitively (FR-402).
 
 The open question this ADR settles is the *granularity* of those FIC entries — how many
 FICs the one app carries, and what each one trusts. The forces in tension:
@@ -33,12 +33,12 @@ FICs the one app carries, and what each one trusts. The forces in tension:
   minted. A service-account `sub` is a random UUID assigned at client creation, so FIC
   subjects can only be pre-written if the `sub` is made predictable.
 - **Replay containment.** The federation assertion must not be replayable against internal
-  services — it carries a dedicated `aud: api://AzureADTokenExchange` (FR-W4-003) minted by
+  services — it carries a dedicated `aud: api://AzureADTokenExchange` (FR-403) minted by
   the `entra-exchange` scope and pinned in every FIC's `audience`.
 
 Two of these forces are empirical and were carved out as MUST-PASS gating spikes ahead of
-this decision: **spike #1** (FR-SPK-001 — does the sign-in log name the matched FIC?) and
-**spike #2** (FR-SPK-002 — does Keycloak's `sub` mapper survive Entra's case-sensitive
+this decision: **spike #1** (FR-601 — does the sign-in log name the matched FIC?) and
+**spike #2** (FR-602 — does Keycloak's `sub` mapper survive Entra's case-sensitive
 match, enabling ahead-of-time FIC config?). The attribution argument for a fine-grained FIC
 scheme rests entirely on spike #1; its config-as-code feasibility rests on spike #2.
 
@@ -60,7 +60,7 @@ Concretely:
     written as config-as-code ahead of client creation (spike #2 PASS) or read-then-pinned
     after ClientStep if spike #2 records PARTIAL;
   - `audience` = the exact string `api://AzureADTokenExchange` (identical across all FICs),
-    minted by the `entra-exchange` scope (FR-W4-003) and not an array.
+    minted by the `entra-exchange` scope (FR-403) and not an array.
 - The FIC count tracks **agent types**, not dynamic instances — bounded and small, well
   under 20.
 - The runtime path is unchanged by this choice: `buildWifFormBody` in
@@ -93,7 +93,7 @@ default and is committed here; the runbook Step 3 is gated on the live spike run
 
 - Per-agent-*type* attribution is preserved at Entra's own sign-in-log level (which credential
   matched), independent of, and corroborating, host-side `sub`/`azp`/`runId` audit records
-  (FR-X-004). The app-only Graph token, which is otherwise indistinguishable across agents, is
+  (FR-504). The app-only Graph token, which is otherwise indistinguishable across agents, is
   traced back to a named agent type at the moment of mint.
 - Reinforces per-agent-type identity end to end: a distinct Keycloak service-account client and
   a distinct FIC per agent type, rather than a single shared funnel identity.
@@ -109,7 +109,7 @@ default and is committed here; the runbook Step 3 is gated on the live spike run
 
 - More Entra provisioning surface than the single-FIC alternative: one FIC entry to create,
   name, and keep in sync per agent type. Each addition is a manual/portal step captured in the
-  runbook (FR-W4-006), and each must match `issuer`/`subject`/`audience` exactly — a case or
+  runbook (FR-406), and each must match `issuer`/`subject`/`audience` exactly — a case or
   trailing-slash drift is a silent `AADSTS70021` reject.
 - The 20-FIC cap is a hard ceiling on agent *types* under one app. Exceeding it forces either a
   second trust-boundary app (AD-3) or a fallback to Variant B's single funnel FIC.

@@ -311,7 +311,7 @@ describe("validateCapabilities + mergeScopedCapabilities — seam invariant (pro
         if (!validated.ok) expect(validated.error.kind).toBe("validation");
 
         // …and the merge independently refuses the malformed minted output.
-        // If broker-minted built-ins land (FR-W2-009), both sides must change in
+        // If broker-minted built-ins land (FR-209), both sides must change in
         // the same commit.
         const base = makeNodeContext({ runId: "run-prop", dagId: "dag-prop" });
         const merged = mergeScopedCapabilities(

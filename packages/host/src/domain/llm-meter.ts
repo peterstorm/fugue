@@ -16,12 +16,12 @@
  * ceiling can be denominated in, and the framework's `spendOfCall` is the one
  * place a call is priced.
  *
- * @satisfies FR-W0-004 — aggregate consumption by runId; DAG/node attribution
+ * @satisfies FR-004 — aggregate consumption by runId; DAG/node attribution
  *   belongs to Run Spend Authority diagnostics
- * @satisfies FR-W1-002 — pre-call comparison of cumulative vs budget
- * @satisfies FR-W1-004 — sequential pre-call admission permits the crossing call
- * @satisfies FR-W1-005 — in-memory counter, no network
- * @satisfies FR-W1-006 — absent budget never refuses
+ * @satisfies FR-102 — pre-call comparison of cumulative vs budget
+ * @satisfies FR-104 — sequential pre-call admission permits the crossing call
+ * @satisfies FR-105 — in-memory counter, no network
+ * @satisfies FR-106 — absent budget never refuses
  * @satisfies SC-003 — concurrent admission accounts for a learned call estimate
  * @satisfies FR-B-002 — refuse when ANY declared ceiling is reached
  * @satisfies FR-B-013 — the refusal names the ceiling, basis, and observed figure
@@ -93,7 +93,7 @@ export const emptyMeter = (): LlmMeter => meterOf(new Map());
 /**
  * Spend settled for a run. An unmetered run reads as `NO_SPEND` rather than
  * `undefined` — the budget check and callers treat "never seen" and "seen, spent
- * nothing" identically (FR-W1-002).
+ * nothing" identically (FR-102).
  */
 export const spendFor = (meter: LlmMeter, runId: RunId): Spend =>
   meter.spendByRun.get(runId) ?? NO_SPEND;
@@ -112,7 +112,7 @@ export const spendFor = (meter: LlmMeter, runId: RunId): Spend =>
  * absent count and a non-finite one would poison every later sum (`NaN`
  * propagates, and `NaN >= limit` is false forever — a budget that fails OPEN).
  *
- * @satisfies FR-W0-004
+ * @satisfies FR-004
  */
 export const accumulate = (meter: LlmMeter, runId: RunId, delta: Spend): LlmMeter => {
   const next = addSpend(spendFor(meter, runId), delta);
@@ -204,14 +204,14 @@ const reserve = (state: ReservationState): ReservationState =>
 /**
  * Decide whether the NEXT call for `runId` may proceed under `limits`.
  *
- * The comparison is BEFORE the call, against settled-so-far (FR-W1-002). In a
+ * The comparison is BEFORE the call, against settled-so-far (FR-102). In a
  * sequential flow, while spend is below every ceiling the crossing call is
- * admitted and the following call is refused (FR-W1-004). Concurrent admission
+ * admitted and the following call is refused (FR-104). Concurrent admission
  * additionally projects `inFlight × maxObservedCall`; that estimate limits a
  * learned-size burst but cannot promise one-call overshoot for a first or larger
  * concurrent burst.
  *
- * Absent `limits` always admits (FR-W1-006: no budget means no enforcement,
+ * Absent `limits` always admits (FR-106: no budget means no enforcement,
  * though metering still happens). A ceiling of zero refuses the first call, as
  * a budget granting nothing should.
  *
@@ -222,7 +222,7 @@ const reserve = (state: ReservationState): ReservationState =>
  * one spend figure and told what it is, instead of a single check inferring
  * afterwards which figure drove it.
  *
- * @satisfies FR-W1-002 FR-W1-004 FR-W1-006 SC-003 FR-B-002 FR-B-013
+ * @satisfies FR-102 FR-104 FR-106 SC-003 FR-B-002 FR-B-013
  */
 export const admit = (
   meter: LlmMeter,

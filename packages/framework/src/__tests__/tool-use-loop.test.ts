@@ -131,7 +131,7 @@ describe("toolUseLoop", () => {
       if (result.error.kind === "node-crash") {
         expect(result.error.retriability).toBe("non-retriable");
         expect(result.error.message).toContain("iteration limit");
-        // FR-W0-001: tokens burned across all 3 turns are attributed on the Err.
+        // FR-001: tokens burned across all 3 turns are attributed on the Err.
         expect(result.error.usage).toEqual({ ...tokensOnly(15, 15) });
       }
     }
@@ -261,7 +261,7 @@ describe("toolUseLoop", () => {
     }
   });
 
-  test("mid-loop provider error carries prior-turn accumulated usage (FR-W0-001)", async () => {
+  test("mid-loop provider error carries prior-turn accumulated usage (FR-001)", async () => {
     // Turn 1: a tool-call turn that burns 10/15. Turn 2: the provider errors,
     // itself reporting 3/4 partial usage for the in-flight turn.
     let callCount = 0;
@@ -543,7 +543,7 @@ describe("toolUseLoop", () => {
     // in try/catch: the throw must surface as a typed err (not an escaping
     // exception), non-retriable (authoring errors are deterministic), and the
     // tokens burned producing the tool calls must still ride the error's
-    // `usage` channel (FR-W0-001).
+    // `usage` channel (FR-001).
     const provider: ToolLoopProvider = {
       call: async () =>
         ok({

@@ -26,11 +26,11 @@ This spec covers two deliverables in one feature:
 **Why this priority:** This is the core value proposition. The whole feature exists to serve this scenario.
 
 **Acceptance Scenarios:**
-- Given a customer identifier with at least one conversation in the CRM fixture set, When the support agent's UI requests the summary, Then the system returns a structured JSON overview within the latency budget (see SC-001) describing the customer's recent issues, sentiment, and topics.
-- Given a customer identifier with no conversation history, When the summary is requested, Then the system returns HTTP 200 with a discriminated-union body `{ status: "no_history" }` (not an error).
-- Given a customer identifier that does not exist in the CRM fixture set, When the summary is requested, Then the system returns HTTP 200 with `{ status: "not_found" }`, distinguishable from an internal failure.
-- Given a customer record present in the CRM fixture set but with no transcripts/messages at all, When the summary is requested, Then the system returns HTTP 200 with `{ status: "insufficient_data", missing_fields: string[] }`.
-- Given a transient failure during the synthesis call (e.g., LLM provider timeout), When the run was previously checkpointed at the extraction stage, Then a retry of the same request resumes from the last successful checkpoint rather than re-fetching and re-extracting.
+- AS-001: Given a customer identifier with at least one conversation in the CRM fixture set, When the support agent's UI requests the summary, Then the system returns a structured JSON overview within the latency budget (see SC-001) describing the customer's recent issues, sentiment, and topics.
+- AS-002: Given a customer identifier with no conversation history, When the summary is requested, Then the system returns HTTP 200 with a discriminated-union body `{ status: "no_history" }` (not an error).
+- AS-003: Given a customer identifier that does not exist in the CRM fixture set, When the summary is requested, Then the system returns HTTP 200 with `{ status: "not_found" }`, distinguishable from an internal failure.
+- AS-004: Given a customer record present in the CRM fixture set but with no transcripts/messages at all, When the summary is requested, Then the system returns HTTP 200 with `{ status: "insufficient_data", missing_fields: string[] }`.
+- AS-005: Given a transient failure during the synthesis call (e.g., LLM provider timeout), When the run was previously checkpointed at the extraction stage, Then a retry of the same request resumes from the last successful checkpoint rather than re-fetching and re-extracting.
 
 ### US2: [P1] Engineer runs the eval set to gate prompt or model changes
 
@@ -41,9 +41,9 @@ This spec covers two deliverables in one feature:
 **Why this priority:** Without this, prompt and model changes are unverifiable; quality regresses silently. P1 because the framework's value depends on being able to iterate safely.
 
 **Acceptance Scenarios:**
-- Given a curated eval set of CRM fixtures with reference summaries, When the engineer runs the eval command, Then each fixture is processed end-to-end and a per-fixture and aggregate score is produced.
-- Given an eval run, When it completes, Then the engineer can see which prompt version and model version were used for each fixture, alongside its score.
-- Given a prompt change that degrades aggregate quality below the configured threshold (aggregate mean < 4.0 across factuality, completeness, and conciseness), When eval runs in CI, Then the eval step fails (non-zero exit) so the change is blocked.
+- AS-006: Given a curated eval set of CRM fixtures with reference summaries, When the engineer runs the eval command, Then each fixture is processed end-to-end and a per-fixture and aggregate score is produced.
+- AS-007: Given an eval run, When it completes, Then the engineer can see which prompt version and model version were used for each fixture, alongside its score.
+- AS-008: Given a prompt change that degrades aggregate quality below the configured threshold (aggregate mean < 4.0 across factuality, completeness, and conciseness), When eval runs in CI, Then the eval step fails (non-zero exit) so the change is blocked.
 
 ### US3: [P1] Engineer inspects a single run's trace to debug a bad summary
 
@@ -54,9 +54,9 @@ This spec covers two deliverables in one feature:
 **Why this priority:** Debugging is impossible without per-node observability. The framework explicitly trades a small executor footprint for full traceability; this scenario validates that.
 
 **Acceptance Scenarios:**
-- Given a completed run, When the engineer opens the corresponding trace in the local observability UI, Then every node in the DAG appears with its inputs, outputs, duration, and (for LLM nodes) prompt version, model version, tokens-in, tokens-out, and USD cost.
-- Given a run that failed at a specific node, When viewed in the trace, Then the failing node is clearly marked and earlier nodes' outputs are still inspectable.
-- Given two runs of the same fixture with different prompt versions, When compared, Then prompt version is visible in both traces so the engineer can attribute output differences.
+- AS-009: Given a completed run, When the engineer opens the corresponding trace in the local observability UI, Then every node in the DAG appears with its inputs, outputs, duration, and (for LLM nodes) prompt version, model version, tokens-in, tokens-out, and USD cost.
+- AS-010: Given a run that failed at a specific node, When viewed in the trace, Then the failing node is clearly marked and earlier nodes' outputs are still inspectable.
+- AS-011: Given two runs of the same fixture with different prompt versions, When compared, Then prompt version is visible in both traces so the engineer can attribute output differences.
 
 ### US4: [P2] Engineer builds a new DAG-based workflow on the framework
 
@@ -67,8 +67,8 @@ This spec covers two deliverables in one feature:
 **Why this priority:** Reusability is a stated goal but no second consumer exists in v1; v1 only needs to ensure the contracts are clean enough to support this scenario in principle.
 
 **Acceptance Scenarios:**
-- Given the framework's published node-kind contracts (`fetch`, `transform`, `llm`), When an engineer defines a new DAG using only those primitives plus their own zod schemas, Then the framework executes it without requiring framework code changes.
-- Given a new DAG, When run, Then the same observer (MLflow) and the same checkpoint store work without per-DAG configuration changes beyond a DAG identifier.
+- AS-012: Given the framework's published node-kind contracts (`fetch`, `transform`, `llm`), When an engineer defines a new DAG using only those primitives plus their own zod schemas, Then the framework executes it without requiring framework code changes.
+- AS-013: Given a new DAG, When run, Then the same observer (MLflow) and the same checkpoint store work without per-DAG configuration changes beyond a DAG identifier.
 
 ### US5: [P2] Engineer resumes an interrupted run
 
@@ -79,8 +79,8 @@ This spec covers two deliverables in one feature:
 **Why this priority:** Resumability is a stated framework feature and a cost saver, but v1 customer-summary has only one LLM call so the practical savings are modest; mark as P2.
 
 **Acceptance Scenarios:**
-- Given a run that completed `fetch` and `transform` nodes but was interrupted before the synthesis LLM call, When the run is resumed by run identifier, Then it skips re-execution of completed nodes and proceeds from the checkpoint.
-- Given a run whose checkpoint has been evicted or expired (checkpoints have a 24-hour TTL in Redis), When resume is attempted, Then the system returns a clear error indicating the run cannot be resumed and the request must be reissued from scratch.
+- AS-014: Given a run that completed `fetch` and `transform` nodes but was interrupted before the synthesis LLM call, When the run is resumed by run identifier, Then it skips re-execution of completed nodes and proceeds from the checkpoint.
+- AS-015: Given a run whose checkpoint has been evicted or expired (checkpoints have a 24-hour TTL in Redis), When resume is attempted, Then the system returns a clear error indicating the run cannot be resumed and the request must be reissued from scratch.
 
 ### US6: [P3] Engineer benefits from prompt/semantic cache hits
 
@@ -91,8 +91,8 @@ This spec covers two deliverables in one feature:
 **Why this priority:** Nice-to-have for dev ergonomics and eval cost; not required for the support-agent scenario itself. P3.
 
 **Acceptance Scenarios:**
-- Given an LLM call with inputs, prompt version, and model version identical to a previously cached call, When invoked, Then the cached response is returned and the trace records a cache hit.
-- Given a cached entry past its 24-hour TTL, When invoked, Then the LLM is called fresh and the cache entry is replaced. Cache key is an exact-input hash (prompt version + model version + structured-input hash); no semantic-similarity matching in v1.
+- AS-016: Given an LLM call with inputs, prompt version, and model version identical to a previously cached call, When invoked, Then the cached response is returned and the trace records a cache hit.
+- AS-017: Given a cached entry past its 24-hour TTL, When invoked, Then the LLM is called fresh and the cache entry is replaced. Cache key is an exact-input hash (prompt version + model version + structured-input hash); no semantic-similarity matching in v1.
 
 ---
 
@@ -230,21 +230,21 @@ Measurable outcomes that define "done":
 
 Explicitly NOT part of this feature (do not interpret silence as "maybe"):
 
-- Multi-tenancy, row-level security, per-tenant rate limits.
-- Multi-provider LLM gateway, provider failover, cross-provider abstraction. Claude Agent SDK only; an outage is tolerated.
-- Canary deploys, shadow deploys, feature flags. There is no production deployment in v1.
-- Kill switch, circuit breakers, automated HITL approvals.
-- Tools/actions invoked from inside the DAG; output is read-only advice for an internal employee. Blast-radius tagging is therefore also out.
-- Indirect prompt-injection mitigation beyond the structural guarantee that no tool acts on CRM-derived text.
-- PII redaction at the trace boundary. Deferred until real CRM data ever enters traces; v1 is fixtures only.
-- Authentication/authorization on the HTTP API.
-- A UI for the support agent. Only the JSON API is in scope; the UI is a separate consumer.
-- Embedding + clustering of conversation content. v1 uses deterministic parsing and recency-only subset selection.
-- Real CRM connectors (Salesforce, HubSpot, Zendesk, etc.). v1 is fixtures only via the adapter interface.
-- Token-level LLM streaming. Per-node progress events only; this is a batch lookup, not a chat.
-- Production deployment, hosting, on-call, SLOs.
-- Any node kinds beyond `fetch`, `transform`, `llm`.
-- Multiple LLM calls per customer-summary run (e.g. map-reduce summarization). v1 is one synthesis call.
+- OOS-001: Multi-tenancy, row-level security, per-tenant rate limits.
+- OOS-002: Multi-provider LLM gateway, provider failover, cross-provider abstraction. Claude Agent SDK only; an outage is tolerated.
+- OOS-003: Canary deploys, shadow deploys, feature flags. There is no production deployment in v1.
+- OOS-004: Kill switch, circuit breakers, automated HITL approvals.
+- OOS-005: Tools/actions invoked from inside the DAG; output is read-only advice for an internal employee. Blast-radius tagging is therefore also out.
+- OOS-006: Indirect prompt-injection mitigation beyond the structural guarantee that no tool acts on CRM-derived text.
+- OOS-007: PII redaction at the trace boundary. Deferred until real CRM data ever enters traces; v1 is fixtures only.
+- OOS-008: Authentication/authorization on the HTTP API.
+- OOS-009: A UI for the support agent. Only the JSON API is in scope; the UI is a separate consumer.
+- OOS-010: Embedding + clustering of conversation content. v1 uses deterministic parsing and recency-only subset selection.
+- OOS-011: Real CRM connectors (Salesforce, HubSpot, Zendesk, etc.). v1 is fixtures only via the adapter interface.
+- OOS-012: Token-level LLM streaming. Per-node progress events only; this is a batch lookup, not a chat.
+- OOS-013: Production deployment, hosting, on-call, SLOs.
+- OOS-014: Any node kinds beyond `fetch`, `transform`, `llm`.
+- OOS-015: Multiple LLM calls per customer-summary run (e.g. map-reduce summarization). v1 is one synthesis call.
 
 ---
 

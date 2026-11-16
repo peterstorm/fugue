@@ -34,7 +34,7 @@ The cross-repo `@fugue-integrity` coupling was verified **byte-for-byte sound**
 
 ## Advisory Fixes (applied)
 
-### Fix 2: `usageOfError` made exhaustive (FR-W0-001 attribution)
+### Fix 2: `usageOfError` made exhaustive (FR-001 attribution)
 - **Source:** silent-failure-hunter / type-design-analyzer
 - **File:** `packages/framework/src/types/errors.ts:325`
 - **Issue:** `.otherwise(() => undefined)` meant a future `usage?`-carrying

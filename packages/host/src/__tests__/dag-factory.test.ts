@@ -115,7 +115,7 @@ describe("loadResultToRegisteredDag", () => {
     expect(reg.config.checkpointTtlMs).toBe(2_000);
   });
 
-  test("llmBudgetTokens from registration config is carried onto RegisteredDag.config untouched (FR-W1-001)", () => {
+  test("llmBudgetTokens from registration config is carried onto RegisteredDag.config untouched (FR-101)", () => {
     const reg = loadResultToRegisteredDag(
       makeLoadResult("d", "/repo/dags/t/d/dag.ts", { llmBudgetTokens: 50_000 }),
       SHA,
@@ -125,7 +125,7 @@ describe("loadResultToRegisteredDag", () => {
     expect(reg.config.llmBudgetTokens).toBe(50_000); // no host default applied, no clamp
   });
 
-  test("absent llmBudgetTokens stays absent — no key materialised, no host default (FR-W1-006)", () => {
+  test("absent llmBudgetTokens stays absent — no key materialised, no host default (FR-106)", () => {
     const reg = loadResultToRegisteredDag(makeLoadResult("d", "/repo/dags/t/d/dag.ts"), SHA, NOW, defaults);
     expect(reg.config.llmBudgetTokens).toBeUndefined();
     // The key itself is absent, not present-with-undefined — "no budget" is

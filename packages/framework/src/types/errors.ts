@@ -79,7 +79,7 @@ export type MissingCapability = {
  * `sendStructured`'s `status:"failed"` arm, which attaches usage via
  * `responseFailedError` outside any loop) so that the partial usage burned
  * across already-completed turns — or a single non-looping call — is
- * representable on the `Err` path and can be metered UNCONDITIONALLY (FR-W0-001:
+ * representable on the `Err` path and can be metered UNCONDITIONALLY (FR-001:
  * 100% attribution). Absent (`undefined`) means the failure consumed no
  * attributable tokens (e.g. an upfront validation error before any turn ran).
  *
@@ -184,7 +184,7 @@ export type FrameworkError =
        * Tokens already consumed by the failed call. The tool-use loop populates
        * this from its accumulated cross-turn totals so a crash (iteration limit,
        * schema mismatch, JSON parse failure) still attributes the burned tokens
-       * (FR-W0-001) and counts them toward the per-run budget. Absent when no
+       * (FR-001) and counts them toward the per-run budget. Absent when no
        * tokens were consumed before the failure.
        */
       readonly usage?: PartialTokenUsage;
@@ -280,9 +280,9 @@ export type FrameworkError =
     }
   | {
       /**
-       * Emitted by the host's metered LLM decorator (FR-W1-003) when a per-run
+       * Emitted by the host's metered LLM decorator (FR-103) when a per-run
        * budget is reached. The admission check runs BEFORE the call, so at most
-       * one call passes a reached ceiling (FR-W1-004); the first parallel burst
+       * one call passes a reached ceiling (FR-104); the first parallel burst
        * may overshoot by its call count while the per-call reservation estimate
        * is still unlearned, and the reservation bounds it thereafter.
        *
@@ -305,7 +305,7 @@ export type FrameworkError =
        * endpoint to mint or exchange a token — a TRANSIENT infrastructure
        * failure (Keycloak down, DNS/socket error, 5xx from the mint endpoint),
        * NOT an authorization decision. Callers may retry. Kept deliberately
-       * DISTINCT from `downstream-denied` (FR-X-002): a denial is a settled
+       * DISTINCT from `downstream-denied` (FR-502): a denial is a settled
        * authorization answer ("no"), whereas `infra-unreachable` is "we never
        * got an answer". Conflating the two would make a retry loop hammer a
        * provider that has already said no, or fail-closed on a blip that a
@@ -324,7 +324,7 @@ export type FrameworkError =
        *   - `downstream` — the final resource request (e.g. Graph/Dynamics).
        * `hop` carries the host-specific hop name for audit/diagnostics
        * (free-form: each embedder names its own topology), and `message` the
-       * diagnostic detail (status line, socket error). (FR-X-001)
+       * diagnostic detail (status line, socket error). (FR-501)
        */
       readonly kind: "infra-unreachable";
       readonly operation: "mint" | "exchange" | "federation" | "downstream";
@@ -336,7 +336,7 @@ export type FrameworkError =
        * A required scope is not assigned to the agent's client in the identity
        * provider's policy — an AUTHORIZATION refusal raised FAIL-CLOSED by the
        * broker's local policy check BEFORE any downstream (Entra) call is made
-       * (FR-X-001). This is the cheap, deterministic gate: if the agent client
+       * (FR-501). This is the cheap, deterministic gate: if the agent client
        * was never granted `scope`, there is no point minting or exchanging a
        * token, so the broker refuses up front. Because it precedes any network
        * call it is never transient and must never be retried — distinct from
@@ -362,7 +362,7 @@ export type FrameworkError =
        *     unassigned): the field is PRESENT and names that client.
        * Modelling absence as an absent field (not an empty string) keeps the
        * "unknown client" state honest rather than representable-but-illegal.
-       * (FR-X-001)
+       * (FR-501)
        */
       readonly kind: "policy-refusal";
       readonly scope: string;
@@ -374,7 +374,7 @@ export type FrameworkError =
        * Federated Identity Credential (FIC) subject/issuer mismatch, a Workload
        * Identity Federation (WIF) rejection, or a resource-scoping denial.
        * These are deliberately COLLAPSED into one authorization category
-       * (FR-X-002): from the node's perspective they are all "the downstream
+       * (FR-502): from the node's perspective they are all "the downstream
        * said no", and a settled "no" is handled identically (fail-closed, no
        * retry) regardless of which mechanism produced it. Kept DISTINCT from
        * `infra-unreachable` — a denial is an answer, not an outage — so retry
@@ -383,7 +383,7 @@ export type FrameworkError =
        * `resource` is the downstream resource/audience that was refused (e.g. a
        * Graph or Dynamics resource id); `reason` carries the provider's stated
        * cause (FIC mismatch, audience not permitted) for the audit record.
-       * (FR-X-002)
+       * (FR-502)
        */
       readonly kind: "downstream-denied";
       readonly resource: string;
@@ -880,7 +880,7 @@ export const asFrameworkError = (value: unknown): FrameworkError | undefined => 
  * tool-use-loop error variants (`node-crash`, `transient`, `aborted`) carry
  * usage; every other kind reads as `undefined` (no attributable tokens). Lets
  * the metering shell attribute consumed tokens on the `Err` path without
- * widening every call site to know which variants carry usage (FR-W0-001).
+ * widening every call site to know which variants carry usage (FR-001).
  */
 export const usageOfError = (e: FrameworkError): PartialTokenUsage | undefined =>
   match(e)
@@ -890,7 +890,7 @@ export const usageOfError = (e: FrameworkError): PartialTokenUsage | undefined =
     // Every other kind carries no attributable tokens. Listed exhaustively (not
     // `.otherwise`) so adding a new `usage?`-carrying variant without extending
     // the three arms above is a COMPILE error here — it can never silently drop
-    // burned tokens and regress FR-W0-001's 100% attribution.
+    // burned tokens and regress FR-001's 100% attribution.
     .with(
       { kind: "validation" },
       { kind: "retry-exhausted" },

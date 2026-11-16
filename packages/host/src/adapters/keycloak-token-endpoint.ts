@@ -4,11 +4,11 @@
  * in tests, *records*) I/O. Keeping it a port — never a hardcoded `fetch` — is
  * what makes the two headline security invariants provable in a unit test:
  *
- *   - SC-006 / FR-W3-003 (fail-closed, zero Entra egress): a refusal must occur
+ *   - SC-006 / FR-303 (fail-closed, zero Entra egress): a refusal must occur
  *     BEFORE this port is ever asked to reach Entra. A test injects a fake whose
  *     methods push to a call log; the no-egress assertion is simply "the call log
  *     is empty after a refusal".
- *   - SC-010 / FR-W3-009 (agent hops do 0 exchanges): the agent path calls
+ *   - SC-010 / FR-309 (agent hops do 0 exchanges): the agent path calls
  *     `mintClientCredentials` only; the user path calls `exchangeV2` only. A fake
  *     that records which method ran proves the exchange count per origin.
  *
@@ -90,7 +90,7 @@ export interface KeycloakTokenEndpoint {
   /**
    * Agent-initiated authority: `client_credentials` grant minted AS the agent's
    * Keycloak client, narrowed to exactly `scope`/`audience`. No token exchange,
-   * no user subject (FR-W3-009).
+   * no user subject (FR-309).
    */
   readonly mintClientCredentials: (
     req: ClientCredentialsRequest,
@@ -99,7 +99,7 @@ export interface KeycloakTokenEndpoint {
   /**
    * User-initiated authority: Standard Token Exchange V2 of the user's token for
    * this hop. The exchanged token keeps `sub = userSub` and sets `azp =
-   * agentClientId`, narrowed to `scope`/`audience` (FR-W3-008).
+   * agentClientId`, narrowed to `scope`/`audience` (FR-308).
    */
   readonly exchangeV2: (
     req: ExchangeV2Request,

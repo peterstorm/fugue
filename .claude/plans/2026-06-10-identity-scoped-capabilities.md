@@ -57,8 +57,8 @@ today's design." A token cache keyed on `(identity, audience, scope)` with TTL
 safely under token lifetime lives in the host shell next to the minting.
 **Why:** Authority must vary per node/run/identity while pools must not churn per
 call. Separating the two axes preserves the proven boot lifecycle while adding
-the new one. **Rejected:** per-invocation pool creation (network cost, FR-W2-005
-violation); silently editing the `extractClients` comment (FR-W2-008 / SC-005
+the new one. **Rejected:** per-invocation pool creation (network cost, FR-205
+violation); silently editing the `extractClients` comment (FR-208 / SC-005
 require an ADR, not a patch). **This is the headline ADR amending ADR-0051.**
 
 ### AD-2: `CapabilityBroker` port + pass-through default in `@fuguejs/framework`; Keycloak/Entra impl in the host
@@ -69,7 +69,7 @@ broker** that hands back the statically-configured clients (today's behavior
 exactly) — the default broker *is* the migration path. The Keycloak/Entra
 implementation lives only in the host. **Why:** Framework-only embedders bring
 their own identity substrate; the flagship security feature must not be
-host-exclusive. The pass-through default guarantees zero regression (FR-W2-002/003,
+host-exclusive. The pass-through default guarantees zero regression (FR-202/203,
 SC-005). **Rejected:** growing `mintFor` machinery host-side only (leaves
 framework consumers without the feature, forces a painful extraction later).
 **Rule of Three:** extract to an optional `@fuguejs/keycloak-broker` adapter
@@ -122,7 +122,7 @@ union gains a `user` variant carrying `sub`. The user `sub` threads through the
 run and `NodeContext` so the broker can perform a per-hop V2 token exchange
 (`sub` stays user, `azp` becomes agent). Agent-initiated (cron/autonomous) runs
 use direct `client_credentials` with no exchange. **Why:** Enables user-identity
-preservation downstream without a separate frontend migration (FR-W3-010).
+preservation downstream without a separate frontend migration (FR-310).
 **Rejected:** depending on an external frontend migration to deliver the inbound
 path (this effort owns it); `act`-claim in-token delegation (Keycloak roadmap,
 out of scope — `sub`+`azp`+traces is the v1 substitute).
@@ -137,9 +137,9 @@ and added to `formatFrameworkError`'s `.exhaustive()`:
   before any Entra call**.
 - `downstream-denied` (Phase 5) — Entra FIC mismatch / WIF rejection /
   resource-scoping denial collapsed into one authorization category, distinct
-  from `infra-unreachable` (FR-X-002 permits this collapse for v1).
+  from `infra-unreachable` (FR-502 permits this collapse for v1).
 
-A token-cache miss is **not** an error (FR-X-003) — it triggers a mint. **Why:**
+A token-cache miss is **not** an error (FR-503) — it triggers a mint. **Why:**
 Callers must distinguish a transient retry-worthy failure from an authorization
 refusal from a budget stop. **Rejected:** a single generic `capability-error`
 (loses the retry/authorization distinction SC-013 requires).
@@ -232,7 +232,7 @@ packages/host/src/adapters/__tests__/broker-audit.test.ts — NEW: 100% mint+ref
 ### Phase 5 — Entra bridge (manual ops + host WIF + capabilities) [fugue] + [kc] + Entra
 
 ```
-[fugue] docs/runbooks/2026-06-10-fugue-agents-entra-provisioning.md — NEW: manual Azure-portal runbook (app registration, admin consent, FIC entries, Sites.Selected, Exchange app access policies) with explicit acceptance per step (FR-W4-006)
+[fugue] docs/runbooks/2026-06-10-fugue-agents-entra-provisioning.md — NEW: manual Azure-portal runbook (app registration, admin consent, FIC entries, Sites.Selected, Exchange app access policies) with explicit acceptance per step (FR-406)
 [fugue] packages/host/src/adapters/entra-wif.ts        — NEW: present Keycloak SA token as client_assertion → Entra client_credentials → app-only Graph/Dynamics token (no stored secret)
 [fugue] packages/host/src/adapters/__tests__/entra-wif.test.ts — NEW: assertion audience pinned; downstream-denied mapping
 [fugue] packages/host/src/adapters/graph-capability.ts  — NEW: operation-narrowed Graph handle (sendMail, sites.read) over the WIF token
@@ -262,7 +262,7 @@ createMeteredLlm(inner: LlmClient, deps: { dagId, runId, meterRef, budget?, log 
 //   sendStructured / sendWithTools: pre-check budget → Err llm-budget-exceeded; post-call accumulate + emit structured log line
 ```
 **Depends on:** the new `llm-budget-exceeded` error variant. **Overshoot rule
-(FR-W1-004):** check is *before* the call against cumulative-so-far; an in-flight
+(FR-104):** check is *before* the call against cumulative-so-far; an in-flight
 call may overshoot by at most one; the next is refused.
 
 ### CapabilityBroker port + pass-through (Phase 2)
@@ -378,7 +378,7 @@ Key transformation: `Invocation.origin` (agent vs user) selects
 - Build the `metered-llm` decorator; wire it into `createNodeContextForDag`.
 - Add `llmBudgetTokens` to the fugue.yaml Zod schema + `RegisteredDag` config.
 - **Sensitive:** no. **Agents:** ts-test for the meter/decorator.
-- **Files:** see Phase 1 file list. **Satisfies:** FR-W0-*, FR-W1-*, SC-001..004, FR-W2-009 (LLM as first invocation-scoped capability).
+- **Files:** see Phase 1 file list. **Satisfies:** FR-0xx, FR-1xx, SC-001..004, FR-209 (LLM as first invocation-scoped capability).
 
 ### Phase 2: CapabilityBroker port + pass-through default + ADR-0052 (depends on Phase 1 pattern)
 
@@ -388,7 +388,7 @@ Key transformation: `Invocation.origin` (agent vs user) selects
 - Thread an `Invocation` through `host.ts` `createContext`.
 - Write ADR-0052 amending ADR-0051; update the `extractClients` doc-comment.
 - **Sensitive:** boundary-shaping (no live auth yet) — flag for security-agent review of the port shape. **Agents:** general + ts-test; ADR seed → ADR-writing task.
-- **Files:** see Phase 2 list. **Satisfies:** FR-W2-001..008, SC-005, SC-008.
+- **Files:** see Phase 2 list. **Satisfies:** FR-201..208, SC-005, SC-008.
 
 ### Phase 3: fugue-platform realm + verification spikes (depends on Phase 2 only for scope-name vocabulary; runs parallel to Phase 4 setup)
 
@@ -399,8 +399,8 @@ Key transformation: `Invocation.origin` (agent vs user) selects
 - Execute the 4 verification spikes; document each pass/fail outcome (gating).
 - **Sensitive:** YES (auth config + spikes are auth-critical). **Agents:**
   java-test (golden test); security-agent for the realm config + spikes.
-- **Files:** see Phase 3 list. **Satisfies:** FR-W3-001, FR-W3-011, FR-W4-003,
-  FR-SPK-001..004, SC-012, SC-014.
+- **Files:** see Phase 3 list. **Satisfies:** FR-301, FR-311, FR-403,
+  FR-601..604, SC-012, SC-014.
 - **GATE:** spike #4 (identity-chaining e2e) is a HARD GATE for the Phase 4
   user-initiated path; spikes #1–#3 gate Phase 5.
 
@@ -416,7 +416,7 @@ Key transformation: `Invocation.origin` (agent vs user) selects
 - Add V2 token exchange for user-initiated origins; `client_credentials` for agent.
 - **Sensitive:** YES — highest-risk surface (inbound JWT validation, token mint,
   exchange). **Agents:** security-agent (mandatory) + ts-test.
-- **Files:** see Phase 4 list. **Satisfies:** FR-W3-002..010, FR-X-001/003/004,
+- **Files:** see Phase 4 list. **Satisfies:** FR-302..310, FR-501/503/504,
   SC-006, SC-007, SC-008, SC-009, SC-010, SC-013.
 
 ### Phase 5: Entra bridge (depends on Phase 4 + Phase 3 spikes #1–#3 PASSED)
@@ -430,7 +430,7 @@ Key transformation: `Invocation.origin` (agent vs user) selects
 - `[kc]`: confirm/assert `entra-exchange` mints `aud: api://AzureADTokenExchange`.
 - **Sensitive:** YES — WIF is auth-critical. **Agents:** security-agent + ts-test;
   runbook → doc/ops task with acceptance.
-- **Files:** see Phase 5 list. **Satisfies:** FR-W4-001..006, SC-011, SC-009 (Entra-path audit), SC-012 (audience mapper).
+- **Files:** see Phase 5 list. **Satisfies:** FR-401..406, SC-011, SC-009 (Entra-path audit), SC-012 (audience mapper).
 
 ---
 
@@ -442,7 +442,7 @@ Key transformation: `Invocation.origin` (agent vs user) selects
 | `metered-llm` | attribution stamp; no-budget passthrough; pre-call refuse | — | — |
 | `passthrough-broker` | byte-identical clients vs direct injection (SC-005) | — | — |
 | `CapabilityBroker` port | fake/pass-through impl drives 90%+ without mocks | — | — |
-| `token-cache` | freshness, TTL boundary, miss-is-not-error (FR-X-003) | — | ≤1 mint per (identity,audience,scope)/TTL (SC-008) |
+| `token-cache` | freshness, TTL boundary, miss-is-not-error (FR-503) | — | ≤1 mint per (identity,audience,scope)/TTL (SC-008) |
 | `capability-scope` | parse `requires`→scope; **type-level: no raw-client/no-token field reachable (SC-007)** | — | — |
 | `keycloak-broker` | policy-refusal mapping | fail-closed **no-egress network assertion (SC-006)**; mint happy path | — |
 | `jwt-validation` | iss/aud/exp/sub extraction; reject malformed | — | — |

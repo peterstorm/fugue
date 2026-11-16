@@ -15,12 +15,12 @@
  *      the broker mints precisely what its `provides()` claims and everything
  *      else stays run-start-validated against the base context.
  *   2. `scope-not-assigned` — the agent client was never assigned the scope
- *      (SC-006 / FR-W3-003). Checked before any cache read or egress.
+ *      (SC-006 / FR-303). Checked before any cache read or egress.
  *   3. `dynamics-org-host-unset` — a `dynamics:read` scope with no configured
  *      `DYNAMICS_ORG_HOST` has no audience (FR-042). Checked AFTER the
  *      assignment check, so an unassigned scope is always reported as such.
  *
- * @satisfies SC-006 FR-W3-003 FR-042
+ * @satisfies SC-006 FR-303 FR-042
  */
 
 import {

@@ -39,7 +39,7 @@ import type { CapabilityRegistry } from "@fuguejs/framework";
 
 declare module "@fuguejs/framework" {
   interface CapabilityRegistry {
-    /** `msgraph:mail.send` → the `sendMail`-only narrowed handle (FR-W3-004). */
+    /** `msgraph:mail.send` → the `sendMail`-only narrowed handle (FR-304). */
     readonly "msgraph:mail.send": MailSendHandle;
     /** `msgraph:sites.read` → the `readSite`-only narrowed handle. */
     readonly "msgraph:sites.read": SitesReadHandle;

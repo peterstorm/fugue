@@ -1,6 +1,6 @@
 # Spike 1 — FIC sign-in attribution
 
-> **Date:** 2026-06-10 · **Spec anchors:** FR-SPK-001, SC-014, US7 ·
+> **Date:** 2026-06-10 · **Spec anchors:** FR-601, SC-014, US7 ·
 > **Gates:** Phase 5 Entra bridge (wave 4) — FIC wiring **variant A vs B** decision.
 > **Design:** [team-security-and-capabilities.md](../team-security-and-capabilities.md)
 > — "Verify before building" item #1; "FIC wiring — two variants".

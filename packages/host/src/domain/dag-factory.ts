@@ -124,8 +124,8 @@ export const loadResultToRegisteredDag = (
       maxConcurrency: effectiveConcurrency,
       cacheTtlMs,
       checkpointTtlMs,
-      // Per-run LLM budget (FR-W1-001) — preserved untouched (no host default);
-      // absent means no enforcement (FR-W1-006).
+      // Per-run LLM budget (FR-101) — preserved untouched (no host default);
+      // absent means no enforcement (FR-106).
       ...carryLlmBudget(regConfig ?? {}),
       // Per-DAG circuit-breaker override is only set when the DAG declares one;
       // run-dag merges it over the host-level CIRCUIT_BREAKER_* config (a partial

@@ -228,7 +228,7 @@ describe("HostConfig — derived Keycloak token URL must be https (NFR-014)", ()
   });
 });
 
-describe("HostConfig — REALM_JWT_AUDIENCE (non-empty, FR-W3-006)", () => {
+describe("HostConfig — REALM_JWT_AUDIENCE (non-empty, FR-306)", () => {
   it("defaults to fugue-host when unset", () => {
     const result = parseHostConfig(baseEnv());
     expect(result.ok).toBe(true);

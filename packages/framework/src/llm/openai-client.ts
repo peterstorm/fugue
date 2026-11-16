@@ -138,7 +138,7 @@ const recordResponseAttributes = (response: ResponsesApiResponse): void => {
  * non-retriable. The turn's usage — threaded by callers only when the failed
  * body actually reports one ("absent means no attributable tokens", see
  * types/errors.ts) — rides along on EVERY arm so a failed turn's burned
- * tokens never escape budget accounting (FR-W0-001).
+ * tokens never escape budget accounting (FR-001).
  */
 function responseFailedError(
   body: ResponsesBody,
@@ -395,7 +395,7 @@ export class OpenAILlmClient implements LlmClient {
 
       // The turn's usage rides along on every terminal error arm below so a
       // malformed success / parse failure still attributes the burned tokens
-      // (FR-W0-001) — threaded only when the body actually reports one
+      // (FR-001) — threaded only when the body actually reports one
       // ("absent means no attributable tokens", types/errors.ts).
       const usage = response.usage ? openAiUsage(response.usage) : undefined;
 

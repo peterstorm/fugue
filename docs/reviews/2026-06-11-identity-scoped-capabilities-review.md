@@ -47,7 +47,7 @@ The criticals concentrate in **wiring** and **one Keycloak API semantic**, not i
 
 **Location:** `packages/host/src/host.ts:171-199`, `packages/host/src/adapters/node-context-factory.ts:317`
 
-The only production call site is `broker.mintFor(invocation, [])` — per-node `requires` is never threaded, so the entire 365-line `keycloak-broker.ts` (fail-closed gate, dual-egress caching, operation narrowing, audit — the headline of this feature, FR-W3-002/US4) is unreachable production code. The tripwire comment at `node-context-factory.ts:319-329` admits it.
+The only production call site is `broker.mintFor(invocation, [])` — per-node `requires` is never threaded, so the entire 365-line `keycloak-broker.ts` (fail-closed gate, dual-egress caching, operation narrowing, audit — the headline of this feature, FR-302/US4) is unreachable production code. The tripwire comment at `node-context-factory.ts:319-329` admits it.
 
 Worse: when `REALM_JWT_ISSUER` is set, `createKeycloakBroker` fully **replaces** `createPassthroughBroker(extractClients(...))`. With empty `requires` the live broker resolves `{}`, so **every statically-configured capability client (http, db, custom adapters) vanishes from NodeContext**. Any DAG whose nodes declare `requires` fails at run start with `missing-capability` — a loud but *misattributed* error (the operator will hunt the DAG's capability wiring, not the JWT issuer env var). Meanwhile the feature the env var ostensibly enables — JWT inbound auth — is also silently inert because `verifyRealmJwt` is deliberately unwired (`host.ts:243-247`).
 
@@ -203,7 +203,7 @@ A pre-existing scope short-circuits creation, mapper attachment, and registratio
 ## Strengths (keep exactly as-is)
 
 - **FC/IS split is exemplary** — `token-cache`, `jwt-validation`, `llm-meter`, `capability-scope` are time-injected, I/O-free, ADT-modelled, property-tested. Zero mocking framework usage in 9k lines; fakes are object literals at injected ports.
-- **The CapabilityBroker port is deep** (Ousterhout sense): one method hides parse, policy gate, two caches, two egresses, narrowing, and audit. Framework stays fully host-agnostic (FR-W2-004 verified — no Keycloak/Entra names or literals in framework).
+- **The CapabilityBroker port is deep** (Ousterhout sense): one method hides parse, policy gate, two caches, two egresses, narrowing, and audit. Framework stays fully host-agnostic (FR-204 verified — no Keycloak/Entra names or literals in framework).
 - **SC-007 enforcement is the strongest available in TS** — the bearer lives only in the `buildGraphHandle` closure; handle interfaces structurally contain no `client`/`token` member; forgery is harmless because a forged handle carries no authority.
 - **No-egress-on-refusal proof** — the SC-006 assertion is literally an empty call log on both egresses, behavioral and refactor-resilient.
 - **Fail-closed thoroughness** — non-finite-clock rejection in `jwt-validation.ts:99-101`; verifier-without-iss/aud → 503; JWT-shaped tokens never fall through to the team path; the policy gate fires before any cache read; the U+001F cache-key delimiter claim verified by hex dump.

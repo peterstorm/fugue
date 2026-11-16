@@ -14,7 +14,7 @@
 //   FR-021  → ADR-0021 (single-path runtime, pure transitions)
 //   FR-026–033 → ADR-0013, ADR-0015, ADR-0029 (HITL, conditional edges, routing)
 //   FR-027  → ADR-0005 (retry backoff with jitter)
-//   FR-029a → ADR-0013 (onHumanReview hook crash retry)
+//   FR-084 → ADR-0013 (onHumanReview hook crash retry)
 
 import { match, P } from "ts-pattern";
 import type { Executor } from "../state-machine/types.js";
@@ -379,7 +379,7 @@ export const buildDagExecutor = (
 
       // -----------------------------------------------------------------------
       // retrying-hook: sleep with jitter then re-call the onHumanReview hook.
-      // The node is NOT re-run — only the hook is retried (FR-029a).
+      // The node is NOT re-run — only the hook is retried (FR-084).
       // -----------------------------------------------------------------------
       .with({ kind: "retrying-hook" }, (p) =>
         handleHumanGate("retrying-hook", p.nodeId, p.output, p.prompt, machineCtx, p.nextDelayMs))

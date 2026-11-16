@@ -1,7 +1,7 @@
 # Spike #4 — Identity-chaining end-to-end on Keycloak 26.6 (user → agent → Entra)
 
 > **Date:** 2026-06-10 · **Wave:** 1 · **Task:** T3 (verification spike, docs only)
-> **Spec anchors:** FR-SPK-004, SC-014, US5, FR-W3-008
+> **Spec anchors:** FR-604, SC-014, US5, FR-308
 > **Status / Outcome:** **`PENDING-LIVE-VERIFICATION`** — no live Keycloak 26.6
 > + `fugue-platform` realm was reachable from this environment (evidence in
 > [§4](#4-outcome)). The procedure below is complete and ready to run the moment

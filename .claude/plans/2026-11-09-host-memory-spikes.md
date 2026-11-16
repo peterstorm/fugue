@@ -1,6 +1,6 @@
 # Plan: Eliminate fugue-host Memory Spikes from the Direct-Sales DAGs
 
-**Spec:** /Users/hansen142/dev/agentic/fugue/.claude/specs/2026-11-09-host-memory-spikes/spec.md
+**Specs:** this plan predates the 2026-11-10 scope split and cites requirement ids from both halves of the original spec. The fugue half is `.claude/specs/2026-11-09-host-memory-spikes/spec.md` (FR-030 to FR-040, FR-042, FR-043, FR-060, AS-009 to AS-015, AS-017). The fugue-dags half is `fugue-dags/.claude/specs/2026-11-10-host-memory-spikes-dags/spec.md` (FR-001 to FR-022, FR-041, FR-050 to FR-053, FR-061 to FR-063, AS-001 to AS-008, AS-016, AS-018 to AS-038).
 **Created:** 2026-11-09
 
 ## Summary

@@ -283,7 +283,7 @@ describe("OpenAILlmClient.sendStructured", () => {
         // status incomplete = truncation — deterministic, non-retriable.
         expect(result.error.retriability).toBe("non-retriable");
         // Fb: the malformed success still burned tokens — the in-scope
-        // response.usage must ride the error (FR-W0-001), not be dropped.
+        // response.usage must ride the error (FR-001), not be dropped.
         expect(result.error.usage).toEqual({ ...tokensOnly(3, 0) });
       }
     }
@@ -313,7 +313,7 @@ describe("OpenAILlmClient.sendStructured", () => {
         expect(result.error.message).toContain("error.code: invalid_prompt");
         expect(result.error.message).toContain("prompt was rejected");
         // The failed body reported usage — it rides the error so the burned
-        // tokens stay attributable (FR-W0-001).
+        // tokens stay attributable (FR-001).
         expect(result.error.usage).toEqual({ ...tokensOnly(3, 0) });
       }
     }
@@ -369,7 +369,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       expect(result.error.kind).toBe("transient");
       if (result.error.kind === "transient") {
         // A rate-limited turn still burned tokens — the transient arm must
-        // carry them so budget settlement sees them (FR-W0-001).
+        // carry them so budget settlement sees them (FR-001).
         expect(result.error.usage).toEqual({ ...tokensOnly(5, 1) });
       }
     }
@@ -612,7 +612,7 @@ describe("OpenAILlmClient.sendStructured", () => {
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.message).toMatch(/Not valid JSON/);
       // Fb: the failed parse still burned tokens — the in-scope
-      // response.usage rides the error (FR-W0-001).
+      // response.usage rides the error (FR-001).
       expect(result.error.usage).toEqual({ ...tokensOnly(1, 1) });
     }
 
@@ -650,7 +650,7 @@ describe("OpenAILlmClient.sendStructured", () => {
       expect(result.error.nodeId).toBe(N("schema-node"));
       expect(result.error.message).toMatch(/Schema validation failed/);
       // Fb: the failed validation still burned tokens — the in-scope
-      // response.usage rides the error (FR-W0-001).
+      // response.usage rides the error (FR-001).
       expect(result.error.usage).toEqual({ ...tokensOnly(1, 1) });
     }
   });
@@ -920,7 +920,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
       if (result.error.kind === "transient") {
         expect(result.error.message).toContain("error.code: rate_limit_exceeded");
         // The rate-limited turn's tokens must not escape budget accounting —
-        // the transient arm carries them through the loop (FR-W0-001).
+        // the transient arm carries them through the loop (FR-001).
         expect(result.error.usage).toEqual({ ...tokensOnly(4, 1) });
       }
     }
@@ -950,7 +950,7 @@ describe("OpenAILlmClient.sendWithTools", () => {
         expect(result.error.message).toContain("response.status: cancelled");
         // The truncated body snapshot rides along for diagnosis…
         expect(result.error.message).toContain('"status":"cancelled"');
-        // …and the turn's usage stays attributed (FR-W0-001).
+        // …and the turn's usage stays attributed (FR-001).
         expect(result.error.usage).toEqual({ ...tokensOnly(3, 0) });
       }
     }

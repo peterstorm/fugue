@@ -12,7 +12,7 @@ The Wave 4 Entra bridge lets a fugue node reach Microsoft Graph and Dynamics
 through a narrowly-scoped capability handle, with **no static Entra secret**: the
 host presents a Keycloak service-account token as a `client_assertion` to Entra
 via workload identity federation (WIF) and receives an app-only downstream token
-(US7, FR-W4-001..006, SC-011). To do this Entra needs at least one **app
+(US7, FR-401..406, SC-011). To do this Entra needs at least one **app
 registration** that (a) trusts the `fugue-platform` realm as an external OIDC
 issuer and (b) holds the *application* (app-only) permissions the agents exercise
 (Mail.Send, Sites.Selected, the Dynamics/Dataverse read grant).
@@ -25,7 +25,7 @@ integration. That instinct collides with two facts about this system. First,
 there is no static app credential to leak — the only credential on the path is
 the Keycloak-minted assertion (SC-011), and that assertion is minted *per agent
 client* upstream of Entra, governed by Keycloak optional client scopes (AD-5,
-FR-W3-001) that fail closed at the Keycloak hop with **zero Entra egress** when a
+FR-301) that fail closed at the Keycloak hop with **zero Entra egress** when a
 scope is unassigned. Per-agent least privilege is therefore already enforced
 *before* the Entra hop. Second — and decisively — the thing that would actually
 compromise these federation paths is a compromise of the **deployed host
@@ -86,7 +86,7 @@ the deployed host process, not the agent.**
 - **One app, union permissions, consented once.** `fugue-agents` holds the union
   of *application* (app-only) permissions across all agents the host serves —
   today Mail.Send, Sites.Selected, and the Dynamics/Dataverse read grant —
-  granted via a single tenant-admin consent (FR-W4-001). No per-agent app
+  granted via a single tenant-admin consent (FR-401). No per-agent app
   registration exists; fugue-agent-mail / fugue-agent-sites exist **only** as
   Keycloak clients, never as Entra app registrations.
 
@@ -98,7 +98,7 @@ the deployed host process, not the agent.**
 
 - **Per-agent least privilege is enforced *before* the Entra hop.** Each agent's
   authority is its assigned Keycloak optional client scope (`msgraph:mail.send`,
-  `msgraph:sites.read`, `dynamics:read`; AD-5, FR-W3-001). The broker
+  `msgraph:sites.read`, `dynamics:read`; AD-5, FR-301). The broker
   (`packages/host/src/adapters/keycloak-broker.ts`) requests exactly the scopes a
   node's `requires` names; an unassigned scope fails the token request at the
   Keycloak hop and the broker never reaches Entra (fail-closed, zero Entra
@@ -127,7 +127,7 @@ the deployed host process, not the agent.**
   steps — register `fugue-agents`, add the union, admin-consent once, add the
   variant-A FICs, apply Sites.Selected and Exchange access policies, confirm
   zero secrets/certs — live in
-  `docs/team-security-and-capabilities.md (Appendix A)` (FR-W4-006), each
+  `docs/team-security-and-capabilities.md (Appendix A)` (FR-406), each
   step with an explicit, checkable acceptance and gated by the Wave 4 spikes.
 
 ### Escalation rule
@@ -146,7 +146,7 @@ unit, not on agent identity.
   so the model is honest: no false sense of containment from app multiplication.
 - Admin consent happens **once** for the union — agents roll out without a fresh
   app-registration and consent ceremony each time; no mint-time consent prompt is
-  ever possible on the app-only path (FR-W4-001).
+  ever possible on the app-only path (FR-401).
 - Per-agent least privilege is genuinely enforced where it is cheapest and
   fail-closed — at the Keycloak hop, before any Entra egress (AD-5).
 - Variant-A FICs (AD-4) preserve per-agent-*type* forensic attribution in Entra

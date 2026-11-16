@@ -21,8 +21,8 @@ The config-as-code and pure-core halves of the Keycloak↔Entra bridge are **mer
 | Concern | What exists | Provenance |
 |---|---|---|
 | Host capability broker | `entra-wif` / `keycloak-broker` adapters; fail-closed scope gate consulted **before** any Entra call; live transports select per-leg by config presence (FR-011) | `packages/host/src/adapters/keycloak-broker.ts`, `graph-capability.ts`; spec FR-010..FR-012 |
-| Realm package | `fugue-platform` realm: `entra-exchange` optional scope (single hardcoded-audience mapper, `aud: api://AzureADTokenExchange`, access-token-only, FR-W4-003); agent-type clients fugue-agent-mail / fugue-agent-sites (confidential service-account, client-credentials only) | `~/dev/java/keycloakConfigAsCode`; Appendix A.8 |
-| Golden test | FuguePlatformRealmGoldenTest.java asserts both client types present (SC-012) and the `entra-exchange` scope mints exactly `aud: api://AzureADTokenExchange` (FR-W4-003) | Appendix A.8 |
+| Realm package | `fugue-platform` realm: `entra-exchange` optional scope (single hardcoded-audience mapper, `aud: api://AzureADTokenExchange`, access-token-only, FR-403); agent-type clients fugue-agent-mail / fugue-agent-sites (confidential service-account, client-credentials only) | `~/dev/java/keycloakConfigAsCode`; Appendix A.8 |
+| Golden test | FuguePlatformRealmGoldenTest.java asserts both client types present (SC-012) and the `entra-exchange` scope mints exactly `aud: api://AzureADTokenExchange` (FR-403) | Appendix A.8 |
 | Config + `.env.example` | every Entra/Keycloak/Bot/HITL var documented, validated at boot (FR-001, FR-005) | `packages/host/.env.example` |
 
 ### What only a live operator can prove (this runbook)
@@ -75,8 +75,8 @@ Entra matches FIC `issuer`/`subject`/`audience` **exactly and case-sensitively**
 
 | Constant | Value | Source of truth |
 |---|---|---|
-| Entra app | `fugue-agents` — **one** app (the deployed host is the trust boundary, ADR-0055) | AD-3 / FR-W4-001 |
-| Federation audience | `api://AzureADTokenExchange` — every FIC's `audience`; minted by the `entra-exchange` Keycloak scope | FR-W4-003 |
+| Entra app | `fugue-agents` — **one** app (the deployed host is the trust boundary, ADR-0055) | AD-3 / FR-401 |
+| Federation audience | `api://AzureADTokenExchange` — every FIC's `audience`; minted by the `entra-exchange` Keycloak scope | FR-403 |
 | Issuer | `https://<kc-host>/realms/fugue-platform` (**no trailing slash**) — every FIC's `issuer` | the `fugue-platform` realm |
 | Agent-type clients | fugue-agent-mail, fugue-agent-sites (Keycloak clients only — there is **no** per-agent Entra app) | `fugue-platform` ClientStep |
 | FIC `subject` | the agent client's service-account `sub`: `service-account-<client_id>` if the predictable-`sub` mapper is in use (spike #2 PASS), else the UUID **read after** ClientStep | Keycloak-minted assertion `sub` |
@@ -174,7 +174,7 @@ Each spike's outcome must be a recorded **PASS** (with observed token/log eviden
 
 Every step has an **explicit, checkable Acceptance** verified *before moving on*. A failed Acceptance is a **hard stop**. Source: [`team-security-and-capabilities.md` Appendix A](../team-security-and-capabilities.md).
 
-### A.1 — Register `fugue-agents` with the union of application permissions (FR-W4-001 / AD-3)
+### A.1 — Register `fugue-agents` with the union of application permissions (FR-401 / AD-3)
 
 1. Entra admin center → App registrations → New registration. Name `fugue-agents`. **Single tenant**, **no redirect URI** (it never does interactive auth). Register.
 2. Record **Application (client) ID** (`<fugue-agents app id>`) + **Directory (tenant) ID** — these feed the host's `ENTRA_CLIENT_ID` / `ENTRA_TENANT_ID` (inseparable pair).
@@ -190,13 +190,13 @@ Every step has an **explicit, checkable Acceptance** verified *before moving on*
 
 **Acceptance:** exactly **one** app `fugue-agents` (no per-agent app — `fugue-agent-*` exist only as *Keycloak* clients); the permission list is **exactly the union** (no broader sibling, no extra); all are **Application** (app-only), not Delegated.
 
-### A.2 — Grant admin consent once (FR-W4-001)
+### A.2 — Grant admin consent once (FR-401)
 
 App → API permissions → **Grant admin consent** → confirm each row **Granted for `<tenant>`**. For Dynamics, confirm the application user's security role is assigned in the target environment (Graph consent does not cover the Dataverse role).
 
 **Acceptance:** every union permission Granted; consent recorded **once** at app level; no per-agent consent; no runtime consent prompt possible on the app-only path.
 
-### A.3 — Add Federated Identity Credentials — Variant A (FR-W4-002 / AD-4)
+### A.3 — Add Federated Identity Credentials — Variant A (FR-402 / AD-4)
 
 For each agent-type client (fugue-agent-mail, then fugue-agent-sites):
 
@@ -221,7 +221,7 @@ Expect **HTTP 200** with an app-only token (both agents); `iss`/`sub`/`aud` matc
 
 **Acceptance:** exactly **two** FICs (under the 20-cap), no FIC for any other issuer; positive exchange → 200 for both agents; **negative (mandatory, per spike #2)** — flip one char's CASE in a FIC subject, re-exchange, confirm `AADSTS70021`, **then revert**.
 
-### A.4 — Resource-scoping policies (FR-W4-005 / AD-3)
+### A.4 — Resource-scoping policies (FR-405 / AD-3)
 
 The app-only `.default` token carries the full union every call and **cannot be downscoped per request** — these two mechanisms are the *only* Entra-side containment. **Spike #3 must prove both coverage AND denial.**
 
@@ -251,7 +251,7 @@ Test-ApplicationAccessPolicy -Identity control-mbx@<tenant> -AppId <fugue-agents
 
 > A green positive path alone does **not** satisfy this step — the value is what these policies *deny*. Both coverage and containment must pass.
 
-### A.5 — Confirm zero stored secret/certificate (FR-W4-004 / NFR-012 / SC-011)
+### A.5 — Confirm zero stored secret/certificate (FR-404 / NFR-012 / SC-011)
 
 App → Certificates & secrets: **Client secrets** empty, **Certificates** empty, **Federated credentials** = only the two FICs. The host's `entra-wif` config references **no** Entra secret/cert (only `ENTRA_CLIENT_ID`/`ENTRA_TENANT_ID` + the Keycloak assertion as `client_assertion`).
 
@@ -313,10 +313,10 @@ clients (the **outbound** WIF surface this runbook depends on) without it.
 > inbound human SSO will work. The **outbound** WIF surface (agent path) needs no
 > such change. See scripts/README.md in that repo.
 
-- The realm mints the federation assertion's audience via the **`entra-exchange`** optional client scope — a single hardcoded-audience protocol mapper stamping `aud: api://AzureADTokenExchange` on the **access token only** (FR-W4-003). Every FIC's `audience` must equal this.
+- The realm mints the federation assertion's audience via the **`entra-exchange`** optional client scope — a single hardcoded-audience protocol mapper stamping `aud: api://AzureADTokenExchange` on the **access token only** (FR-403). Every FIC's `audience` must equal this.
 - Agent-type clients **fugue-agent-mail** / **fugue-agent-sites** are confidential service-account clients (client-credentials only; ROPC/standard-flow disabled), each carrying the optional scope mapping to its Entra permission. **Assigning the scope in ClientStep IS the policy grant (AD-5);** the broker fails closed at the Keycloak hop with zero Entra egress if unassigned.
 - Realm issuer URL `https://<kc-host>/realms/fugue-platform` — the exact string each FIC's `issuer` must equal.
-- FuguePlatformRealmGoldenTest.java already asserts both client types present (SC-012) and the `entra-exchange` scope mints exactly `aud: api://AzureADTokenExchange`, access-token-only, single mapper (FR-W4-003).
+- FuguePlatformRealmGoldenTest.java already asserts both client types present (SC-012) and the `entra-exchange` scope mints exactly `aud: api://AzureADTokenExchange`, access-token-only, single mapper (FR-403).
 
 ---
 

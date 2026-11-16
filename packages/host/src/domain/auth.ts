@@ -221,7 +221,7 @@ export interface TokenGrant {
  * - `admin` — root of trust (ADMIN_TOKEN env var), full access.
  * - `team`  — opaque `fug_` team token, scoped to the team's DAGs.
  * - `user`  — a human authenticated via a fugue-platform realm OIDC JWT
- *   (FR-W3-006/FR-W3-007). `sub` is the user's subject; `azp` is the
+ *   (FR-306/FR-307). `sub` is the user's subject; `azp` is the
  *   authorized party (the OIDC client that minted the token). This identity
  *   is established at the inbound boundary so the user's subject can be threaded
  *   through the run and exchanged per-hop by the capability broker (sub stays

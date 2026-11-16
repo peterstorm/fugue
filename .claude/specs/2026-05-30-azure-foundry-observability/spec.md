@@ -43,14 +43,14 @@ of my Azure observability estate.
 observability. It must ship in this iteration.
 
 **Acceptance Scenarios:**
-- Given Foundry is selected as the (only) trace backend, When a complete DAG run finishes, Then
+- AS-001: Given Foundry is selected as the (only) trace backend, When a complete DAG run finishes, Then
   every persisted span for that run is visible in the Foundry portal's Tracing tab.
-- Given an LLM node executed in the run, When I inspect its span in Foundry, Then I can see the
+- AS-002: Given an LLM node executed in the run, When I inspect its span in Foundry, Then I can see the
   GenAI attributes (system, request/response model, input/output token usage) and the
   framework-owned cost and node-identity attributes.
-- Given Foundry is selected as the trace backend, When I inspect a node span, Then it carries the
+- AS-003: Given Foundry is selected as the trace backend, When I inspect a node span, Then it carries the
   node identity (node id and node kind) so the trace can be correlated to the DAG topology.
-- Given the existing tail-sampling persistence policy would discard a trace, When the run finishes,
+- AS-004: Given the existing tail-sampling persistence policy would discard a trace, When the run finishes,
   Then that trace is not sent to Foundry (volume is gated exactly as it is for MLflow today).
 
 ### US2: [P1] Run evaluations through the Foundry-native path
@@ -64,14 +64,14 @@ the same tool I use for traces.
 without evals would leave the feature half-delivered against its stated goal.
 
 **Acceptance Scenarios:**
-- Given the Foundry evaluation backend is selected, When I run the evaluation suite, Then all
+- AS-005: Given the Foundry evaluation backend is selected, When I run the evaluation suite, Then all
   existing evaluation cases are scored through the Foundry-native path.
-- Given an evaluation run has completed on the Foundry path, When I open the Foundry Evaluations
+- AS-006: Given an evaluation run has completed on the Foundry path, When I open the Foundry Evaluations
   view, Then per-case and aggregate scores are visible.
-- Given the same evaluation cases are run on both the MLflow path and the Foundry path, When I
+- AS-007: Given the same evaluation cases are run on both the MLflow path and the Foundry path, When I
   compare aggregate per-scorer scores, Then they agree within an agreed tolerance (no systematic
   divergence).
-- Given I want to choose the evaluation backend, When I select it at run time (environment and/or
+- AS-008: Given I want to choose the evaluation backend, When I select it at run time (environment and/or
   command-line selector), Then the suite uses the chosen backend without any code change.
 
 ### US3: [P1] Run traces to MLflow and Foundry side-by-side
@@ -85,11 +85,11 @@ during the transition.
 is fan-out capable. Exclusive single-backend export is the one-element case of the same mechanism.
 
 **Acceptance Scenarios:**
-- Given both MLflow and Foundry are selected as trace backends, When a DAG run finishes, Then the
+- AS-009: Given both MLflow and Foundry are selected as trace backends, When a DAG run finishes, Then the
   same run's traces appear in both MLflow and Foundry.
-- Given a run was dual-exported, When I correlate the run across both backends, Then the run, DAG,
+- AS-010: Given a run was dual-exported, When I correlate the run across both backends, Then the run, DAG,
   and node identities are consistent between them.
-- Given both backends are selected and one backend becomes unavailable mid-run, When the run
+- AS-011: Given both backends are selected and one backend becomes unavailable mid-run, When the run
   finishes, Then the other backend still receives the run's traces and the DAG run still succeeds.
 
 ### US4: [P1] Switch observability backends without code changes
@@ -103,13 +103,13 @@ modifying the application.
 driven selection is a defining property of the feature.
 
 **Acceptance Scenarios:**
-- Given a configuration that selects one trace backend, When the application starts, Then traces
+- AS-012: Given a configuration that selects one trace backend, When the application starts, Then traces
   go only to that backend.
-- Given a configuration that selects two trace backends, When the application starts, Then traces
+- AS-013: Given a configuration that selects two trace backends, When the application starts, Then traces
   fan out to both.
-- Given configuration selects the evaluation backend, When the suite runs, Then it uses the
+- AS-014: Given configuration selects the evaluation backend, When the suite runs, Then it uses the
   configured backend.
-- Given I change the backend selection in configuration and restart, When the next run occurs,
+- AS-015: Given I change the backend selection in configuration and restart, When the next run occurs,
   Then signals follow the new selection with no code change.
 
 ### US5: [P2] See DAG domain events and aggregated metrics in Foundry
@@ -124,17 +124,17 @@ already delivers the primary "see my runs in Foundry" outcome. Domain events and
 that view rather than gate it.
 
 **Acceptance Scenarios:**
-- Given the domain-events layer is enabled with Foundry, When a DAG run completes, Then a run-level
+- AS-016: Given the domain-events layer is enabled with Foundry, When a DAG run completes, Then a run-level
   summary event is recorded with at least run duration, status, node count, retry count,
   cache-hit count, and total cost.
-- Given a routing decision occurred during a run, When the run completes, Then a route-decision
+- AS-017: Given a routing decision occurred during a run, When the run completes, Then a route-decision
   event is recorded identifying the chosen and pruned targets.
-- Given a branch was pruned during a run, When the run completes, Then a node-pruned event is
+- AS-018: Given a branch was pruned during a run, When the run completes, Then a node-pruned event is
   recorded with the reason.
-- Given runs have completed, When I view Foundry metrics, Then pre-aggregated metrics for cost,
+- AS-019: Given runs have completed, When I view Foundry metrics, Then pre-aggregated metrics for cost,
   token consumption, run latency, node latency, and cache-hit rate are available with run/node
   dimensions.
-- Given the same persistence policy that gates trace export, When a trace is discarded by that
+- AS-020: Given the same persistence policy that gates trace export, When a trace is discarded by that
   policy, Then its domain events are gated consistently (domain-event volume is governed by the
   same policy as spans).
 
@@ -149,13 +149,13 @@ and never slows or fails DAG runs
 down execution or corrupt the existing backend is not shippable.
 
 **Acceptance Scenarios:**
-- Given Foundry is not enabled, When the existing test suites run, Then they all pass unchanged and
+- AS-021: Given Foundry is not enabled, When the existing test suites run, Then they all pass unchanged and
   MLflow behavior is identical to today.
-- Given any selected observability backend fails or is slow, When a DAG run executes, Then the run
+- AS-022: Given any selected observability backend fails or is slow, When a DAG run executes, Then the run
   is neither failed nor delayed by the backend, and the export error is logged rather than
   propagated.
-- Given two backends are selected, When one backend errors, Then the other backend is unaffected.
-- Given Foundry is enabled (alone or alongside MLflow), When I measure DAG run completion time,
+- AS-023: Given two backends are selected, When one backend errors, Then the other backend is unaffected.
+- AS-024: Given Foundry is enabled (alone or alongside MLflow), When I measure DAG run completion time,
   Then there is no measurable increase attributable to export, because export happens off the
   run's critical path.
 
@@ -165,88 +165,88 @@ down execution or corrupt the existing backend is not shippable.
 
 ### Backend selection & configuration
 
-- **FR-001:** The system MUST allow the trace backend(s) to be selected through configuration
+- FR-001: The system MUST allow the trace backend(s) to be selected through configuration
   (environment variables and the application configuration file), without code changes.
-- **FR-002:** The system MUST support selecting **one or more** trace backends simultaneously.
+- FR-002: The system MUST support selecting **one or more** trace backends simultaneously.
   Selecting one backend MUST result in exclusive export to that backend; selecting two MUST result
   in the same signals being sent to both.
-- **FR-003:** The system MUST keep MLflow as the **default** trace backend when no Foundry selection
+- FR-003: The system MUST keep MLflow as the **default** trace backend when no Foundry selection
   is configured, with behavior identical to current behavior.
-- **FR-004:** The system MUST allow the evaluation backend to be selected at run time through a
+- FR-004: The system MUST allow the evaluation backend to be selected at run time through a
   run-time selector (environment variable and/or command-line flag), without code changes.
-- **FR-005:** The system MUST keep the existing MLflow evaluation path as the default evaluation
+- FR-005: The system MUST keep the existing MLflow evaluation path as the default evaluation
   backend.
-- **FR-006:** Configuration MUST be validated at startup so that an invalid or contradictory backend
+- FR-006: Configuration MUST be validated at startup so that an invalid or contradictory backend
   selection is reported clearly rather than silently ignored.
 
 ### Trace export to Foundry
 
-- **FR-007:** The system MUST export DAG execution traces to Azure AI Foundry such that a completed
+- FR-007: The system MUST export DAG execution traces to Azure AI Foundry such that a completed
   run's persisted spans are visible in the Foundry portal's Tracing tab.
-- **FR-008:** Exported spans MUST carry the existing vendor-neutral GenAI semantic attributes
+- FR-008: Exported spans MUST carry the existing vendor-neutral GenAI semantic attributes
   (GenAI system/operation, request and response model, and input/output token usage) without any
   per-node instrumentation changes.
-- **FR-009:** Exported spans MUST carry the framework-owned enrichment attributes — at minimum LLM
+- FR-009: Exported spans MUST carry the framework-owned enrichment attributes — at minimum LLM
   cost, node identity (node id and node kind), and DAG/run identity — so traces can be correlated
   to the DAG topology and to cost.
-- **FR-010:** The existing tail-sampling persistence policy MUST continue to gate which traces are
+- FR-010: The existing tail-sampling persistence policy MUST continue to gate which traces are
   exported, applying equally to Foundry and to MLflow, so that ingestion volume (and the associated
   billing) remains controlled.
-- **FR-011:** When two trace backends are selected, the same run's spans MUST be delivered to both
+- FR-011: When two trace backends are selected, the same run's spans MUST be delivered to both
   with consistent run, DAG, and node identities.
-- **FR-012:** The existing content-capture / PII gating that governs whether prompt and completion
+- FR-012: The existing content-capture / PII gating that governs whether prompt and completion
   text are included in spans MUST continue to apply when exporting to Foundry.
 
 ### Foundry-native evaluation
 
-- **FR-013:** The system MUST provide a Foundry-native evaluation path that scores the **same**
+- FR-013: The system MUST provide a Foundry-native evaluation path that scores the **same**
   evaluation cases used by the existing MLflow evaluation path.
-- **FR-014:** The Foundry-native evaluation path MUST record per-case and aggregate scores such that
+- FR-014: The Foundry-native evaluation path MUST record per-case and aggregate scores such that
   they are visible in the Foundry Evaluations view.
-- **FR-015:** The Foundry-native evaluation path MUST reuse the existing Azure OpenAI judge-model
+- FR-015: The Foundry-native evaluation path MUST reuse the existing Azure OpenAI judge-model
   credentials already used for evaluation today.
-- **FR-016:** The MLflow evaluation path MUST remain fully functional and selectable alongside the
+- FR-016: The MLflow evaluation path MUST remain fully functional and selectable alongside the
   Foundry path; selecting one MUST NOT alter the behavior of the other.
-- **FR-017:** Aggregate per-scorer scores produced by the Foundry path MUST be comparable to the
+- FR-017: Aggregate per-scorer scores produced by the Foundry path MUST be comparable to the
   MLflow path within a defined tolerance (see SC-005), so a backend switch does not silently change
   what "good" means.
 
 ### Domain events & metrics layer
 
-- **FR-018:** The system MUST be able to record DAG domain events to Foundry, including at minimum:
+- FR-018: The system MUST be able to record DAG domain events to Foundry, including at minimum:
   run-level completion summaries, routing decisions (chosen and pruned targets), and pruned
   branches (with reason).
-- **FR-019:** Run-level completion summaries MUST include at minimum run duration, status, node
+- FR-019: Run-level completion summaries MUST include at minimum run duration, status, node
   count, retry count, cache-hit count, and total cost.
-- **FR-020:** The system MUST emit pre-aggregated metrics covering cost, token consumption, run
+- FR-020: The system MUST emit pre-aggregated metrics covering cost, token consumption, run
   latency, node latency, and cache-hit rate, dimensioned by DAG and node identity, such that they
   are available in Foundry monitoring.
-- **FR-021:** Domain-event and metric emission MUST be governed by the same persistence policy that
+- FR-021: Domain-event and metric emission MUST be governed by the same persistence policy that
   gates trace export, so that a discarded trace does not produce orphaned domain events.
 
 ### Authentication
 
-- **FR-022:** The system MUST support, as the default authentication method, an Application Insights
+- FR-022: The system MUST support, as the default authentication method, an Application Insights
   connection string supplied via configuration.
-- **FR-023:** The system MUST support, as an opt-in alternative, Entra ID authentication via the
+- FR-023: The system MUST support, as an opt-in alternative, Entra ID authentication via the
   standard default Azure credential mechanism.
-- **FR-024:** Project-endpoint auto-discovery of the connection string MUST NOT be required; it is
+- FR-024: Project-endpoint auto-discovery of the connection string MUST NOT be required; it is
   out of scope this iteration (see Out of Scope).
 
 ### Fault isolation & non-regression
 
-- **FR-025:** A failing or slow observability backend MUST NOT fail or delay DAG execution. Export
+- FR-025: A failing or slow observability backend MUST NOT fail or delay DAG execution. Export
   errors MUST be logged, not propagated to the run.
-- **FR-026:** A failure in one selected backend MUST NOT affect any other selected backend.
-- **FR-027:** With Foundry not enabled, all existing framework, host, and customer-summary tests
+- FR-026: A failure in one selected backend MUST NOT affect any other selected backend.
+- FR-027: With Foundry not enabled, all existing framework, host, and customer-summary tests
   MUST pass unchanged, and MLflow behavior MUST be unchanged.
-- **FR-028:** Trace, domain-event, and metric export MUST occur off the DAG run's critical path
+- FR-028: Trace, domain-event, and metric export MUST occur off the DAG run's critical path
   (asynchronous / batched, consistent with the existing post-run tail-sampling flush model), so
   that enabling export adds no measurable latency to run completion.
 
 ### Dependencies
 
-- **FR-029:** The Azure / Foundry SDK packages required for trace export, evaluation, and domain-
+- FR-029: The Azure / Foundry SDK packages required for trace export, evaluation, and domain-
   event/metric emission MUST be treated as **hard dependencies that are always installed**. This is
   a deliberate decision: every application carries the dependency weight in exchange for simpler,
   unconditional wiring. (This supersedes any earlier notion of optional/lazy loading.)
@@ -294,15 +294,37 @@ down execution or corrupt the existing backend is not shippable.
 
 Explicitly NOT part of this feature:
 
-- Replacing, deprecating, or removing MLflow. MLflow remains the default for traces and evaluations.
-- Building Foundry portal UI, dashboards, or visualizations. The framework emits signals; the
+- OOS-001: Replacing, deprecating, or removing MLflow. MLflow remains the default for traces and evaluations.
+- OOS-002: Building Foundry portal UI, dashboards, or visualizations. The framework emits signals; the
   Foundry portal performs visualization.
-- Foundry prompt-flow integration. Standard OTel traces are emitted, not prompt-flow execution data.
-- Automatic evaluation on trace ingest / scheduled scorers. This is managed-service-only and not
+- OOS-003: Foundry prompt-flow integration. Standard OTel traces are emitted, not prompt-flow execution data.
+- OOS-004: Automatic evaluation on trace ingest / scheduled scorers. This is managed-service-only and not
   available in the open-source environment used here.
-- Project-endpoint connection-string auto-discovery. Auto-discovering the Application Insights
+- OOS-005: Project-endpoint connection-string auto-discovery. Auto-discovering the Application Insights
   connection string from a Foundry project endpoint is deferred to a future iteration; this
   iteration uses a connection string (default) or Entra ID (opt-in).
-- Per-node instrumentation changes. The existing semantic conventions are already vendor-neutral and
+- OOS-006: Per-node instrumentation changes. The existing semantic conventions are already vendor-neutral and
   consumed natively by Foundry; no node, LLM-client, or span-emission changes are required to make
   Foundry render traces.
+
+---
+
+## Appendix: Glossary
+
+| Term | Definition |
+|------|------------|
+| Azure AI Foundry | Azure's AI platform whose portal shows traces (Tracing tab) and evaluation results (Evaluations view); its observability is OpenTelemetry-based |
+| Application Insights | The Azure store that Foundry traces land in and that the Foundry portal reads from |
+| MLflow | The existing, default backend for traces and evaluations; never removed or degraded by this feature |
+| Trace backend | A destination for DAG execution traces (MLflow, Foundry, or both), selected through configuration |
+| Evaluation backend | The path that scores and records evaluation cases (MLflow or Foundry-native), selected at run time |
+| Run-time selector | The environment variable and/or command-line flag that chooses the evaluation backend without code changes |
+| Foundry-native evaluation path | The new evaluation path that scores the same evaluation cases as the MLflow path and records per-case and aggregate scores in the Foundry Evaluations view |
+| Tail-sampling persistence policy | The existing post-run policy that decides which traces are kept; it gates trace, domain-event and metric export equally for every backend |
+| GenAI semantic attributes | The vendor-neutral span attributes for GenAI system/operation, request and response model, and input/output token usage |
+| Enrichment attributes | The framework-owned span attributes: LLM cost, node identity (node id and node kind), and DAG/run identity |
+| Domain events | DAG-level records sent to Foundry: run-level completion summaries, routing decisions (chosen and pruned targets), and pruned branches with reason |
+| Pre-aggregated metrics | Cost, token, run-latency, node-latency and cache-hit-rate metrics dimensioned by DAG and node identity, available in Foundry monitoring |
+| Content-capture / PII gating | The existing gate that decides whether prompt and completion text are included in spans |
+| Connection string | The Application Insights connection string supplied via configuration; the default authentication method |
+| Entra ID authentication | The opt-in alternative authentication through the standard default Azure credential mechanism |

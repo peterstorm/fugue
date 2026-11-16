@@ -28,12 +28,12 @@ broker and get the same authority discipline.
 
 Two forces are in tension. (1) The seam (the port and its default) must live in
 the framework, the same layer `CapabilityHandle` occupies, so any embedder can
-target it — and it must reference no concrete identity provider (FR-W2-004). (2)
+target it — and it must reference no concrete identity provider (FR-204). (2)
 The concrete Keycloak/Entra implementation is large, provider-specific, and
 operationally coupled to the deployed process; it belongs in the host
-(FR-W2-006). And cutting across both: the migration to this new seam must be
+(FR-206). And cutting across both: the migration to this new seam must be
 **zero-regression** — every DAG and embedder that compiles and runs today must
-keep byte-identical capability behavior with no migration step (FR-W2-003,
+keep byte-identical capability behavior with no migration step (FR-203,
 SC-005, US3).
 
 ## Options Considered
@@ -42,7 +42,7 @@ SC-005, US3).
    - Pros: One place to write it; no new framework surface; the host already
      owns `extractClients` and all provider config.
    - Cons: Framework-only embedders get nothing — the flagship security feature
-     becomes host-exclusive, contradicting the reason it exists (FR-W2-006, US3).
+     becomes host-exclusive, contradicting the reason it exists (FR-206, US3).
      The seam never gets defined in the layer that owns capabilities, so a later
      "lift it into the framework" extraction is forced — a painful refactor of a
      shipped, security-critical authority path with live token flows, done under
@@ -62,7 +62,7 @@ SC-005, US3).
 3. **Ship the Keycloak broker in the framework directly (or in a mandatory adapter).**
    - Pros: Every embedder gets the live broker out of the box.
    - Cons: Forces a concrete identity provider on every framework consumer,
-     violating FR-W2-004 and defeating the whole point of a substrate-agnostic
+     violating FR-204 and defeating the whole point of a substrate-agnostic
      seam. Couples the framework to Keycloak/Entra operational concerns. Rejected.
 
 ## Decision
@@ -77,7 +77,7 @@ the same layer as `CapabilityHandle`. The two axes are deliberately orthogonal:
 
 - `CapabilityHandle` owns **lifecycle** (`connect`/`close`/`healthCheck`,
   connection pools) — BOOT-scoped, opened once, shared across runs. The broker
-  does not touch it (FR-W2-005).
+  does not touch it (FR-205).
 - `CapabilityBroker` owns **authority** — per node / run / identity.
 
 The port is two methods over named types — a required `mintFor` and an
@@ -116,7 +116,7 @@ interface CapabilityBroker {
   host's Keycloak broker implements it to claim the well-formed
   `"<provider>:<operation>"` scope names it resolves at dispatch.
 
-**Invariant — provider-agnostic boundary (FR-W2-004):** neither the port nor the
+**Invariant — provider-agnostic boundary (FR-204):** neither the port nor the
 pass-through default references Keycloak or Entra — no import, no type name, no
 string literal. Verified: a grep for `keycloak`/`entra` across
 `capability-broker.ts` and `passthrough-broker.ts` returns nothing.
@@ -145,9 +145,9 @@ into `runDag` (no `REALM_JWT_ISSUER`), minting is skipped entirely — the host
 never constructs a pass-through broker. `createPassthroughBroker` is retained as
 an embedder convenience (a drop-in `CapabilityBroker` over a fixed client set),
 not production wiring; every DAG/embedder compiling today keeps working with no
-migration step because the unbrokered path is unchanged (FR-W2-002/003, US3).
+migration step because the unbrokered path is unchanged (FR-202/203, US3).
 
-### The live broker (host only — FR-W2-006)
+### The live broker (host only — FR-206)
 
 `packages/host/src/adapters/keycloak-broker.ts` implements the same
 `CapabilityBroker` port against Keycloak + Entra WIF. It dispatches on
@@ -172,15 +172,15 @@ speculative generality maintained on faith.
 
 - The flagship security feature is available to every framework consumer, not
   just the host: any embedder supplies its own `CapabilityBroker` over the same
-  port (US3, FR-W2-006).
+  port (US3, FR-206).
 - Zero-regression is guaranteed *by construction*, not by test diligence — with
   no broker wired, `runDag` skips minting and the unchanged path is literally
   unchanged; the pass-through default offers the same byte-identical guarantee
-  to embedders that do wire the broker seam (FR-W2-002/003, SC-005).
+  to embedders that do wire the broker seam (FR-202/203, SC-005).
 - The framework stays substrate-agnostic: no Keycloak/Entra coupling crosses the
-  boundary (FR-W2-004), so non-Keycloak embedders are first-class.
+  boundary (FR-204), so non-Keycloak embedders are first-class.
 - Lifecycle and authority are cleanly separated — pools stay boot-scoped and
-  untouched while authority becomes per-invocation (FR-W2-005).
+  untouched while authority becomes per-invocation (FR-205).
 - The painful "lift host code into the framework later" extraction is avoided:
   the seam is defined correctly the first time.
 
@@ -191,7 +191,7 @@ speculative generality maintained on faith.
   touches all three.
 - The provider-agnostic boundary is enforced by convention and a grep, not by the
   type system — a future contributor could import a provider type into the
-  framework broker files. Mitigated by the explicit FR-W2-004 markers in both
+  framework broker files. Mitigated by the explicit FR-204 markers in both
   files and this ADR's stated invariant.
 - A framework-only embedder that wants live identity-scoped capabilities must
   supply its own broker; the framework ships only the pass-through default. This
@@ -201,7 +201,7 @@ speculative generality maintained on faith.
 ## Amendment — residual vendor-literal leak removed (2026-06-12)
 
 **Status:** Accepted. Refines the provider-agnostic-boundary invariant
-(FR-W2-004) above.
+(FR-204) above.
 
 One residual vendor-literal leak remained in the framework: the
 `infra-unreachable.operation` union in the framework error taxonomy named

@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-05-08
-**Spec ref:** FR-029a (`.claude/specs/2026-05-08-durable-state-machine-runtime/spec.md`)
+**Spec ref:** FR-084 (`.claude/specs/2026-05-08-durable-state-machine-runtime/spec.md`)
 **Related:** ADR 0001 (single-package layout), AD-2 (rundag back-compat).
 
 ## Context
@@ -76,7 +76,7 @@ The hook retry budget is shared with the node retry budget (one counter per `nod
 
 2. **Add a pendingHookRetry counter to `awaiting-human` itself; no new phase.** Rejected: `awaiting-human` would then need to encode "currently waiting for input" vs. "scheduled to re-call hook in N ms" — overloading the same kind. A separate variant cleanly carries `nextDelayMs`.
 
-3. **Separate hook retry budget.** Rejected for now (explicit shared-budget call in FR-029a). Easy to extend later if needed.
+3. **Separate hook retry budget.** Rejected for now (explicit shared-budget call in FR-084). Easy to extend later if needed.
 
 ## Test coverage
 

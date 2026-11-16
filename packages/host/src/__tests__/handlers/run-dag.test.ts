@@ -460,7 +460,7 @@ describe("run-dag handler", () => {
     expect(body.details).toBeDefined();
   });
 
-  describe("identity threading into the run (FR-W3-007)", () => {
+  describe("identity threading into the run (FR-307)", () => {
     // The user `sub`/`azp` must reach `createContext` so T8 can build
     // `Invocation.origin`. We capture the identity arg to prove the seam works,
     // and confirm admin/team runs pass their identity through unchanged.

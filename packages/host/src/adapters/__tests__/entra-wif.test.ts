@@ -5,12 +5,12 @@
  * The security-critical invariants under test:
  *   - SC-011 — NO static Entra secret/certificate: the request carries the
  *     Keycloak SA token as the `client_assertion` and NO `client_secret`/cert.
- *   - FR-W4-004 — the assertion is presented in a `client_credentials` request;
+ *   - FR-404 — the assertion is presented in a `client_credentials` request;
  *     the assertion type is the jwt-bearer URN; the assertion audience is PINNED
  *     to `api://AzureADTokenExchange`.
- *   - FR-W4-005 — the requested scope targets the resource's `.default`, narrowing
+ *   - FR-405 — the requested scope targets the resource's `.default`, narrowing
  *     where the app-only token can act.
- *   - FR-X-002 — FIC mismatch / WIF rejection / resource-scoping denial collapse
+ *   - FR-502 — FIC mismatch / WIF rejection / resource-scoping denial collapse
  *     into one `downstream-denied`; a transient reach failure is `infra-unreachable`,
  *     kept DISTINCT.
  *
@@ -60,9 +60,9 @@ const recordingHttp = (response: HttpPostResponse | (() => never)) => {
   return { http, calls };
 };
 
-// ── Request shape: audience pin, assertion type, NO secret (SC-011/FR-W4-004) ─
+// ── Request shape: audience pin, assertion type, NO secret (SC-011/FR-404) ─
 
-describe("entra-wif — request shape pins the WIF assertion (SC-011/FR-W4-004)", () => {
+describe("entra-wif — request shape pins the WIF assertion (SC-011/FR-404)", () => {
   it("the assertion audience constant is pinned to api://AzureADTokenExchange", () => {
     expect(AZURE_AD_TOKEN_EXCHANGE_AUDIENCE).toBe("api://AzureADTokenExchange");
   });
@@ -87,7 +87,7 @@ describe("entra-wif — request shape pins the WIF assertion (SC-011/FR-W4-004)"
     expect(body.toLowerCase()).not.toContain("certificate");
   });
 
-  it("the requested scope is the resource .default (FR-W4-005 narrowing)", () => {
+  it("the requested scope is the resource .default (FR-405 narrowing)", () => {
     const body = buildWifFormBody(cfg, req({ audience: "https://graph.microsoft.com" }));
     const params = new URLSearchParams(body);
     expect(params.get("scope")).toBe("https://graph.microsoft.com/.default");
@@ -209,9 +209,9 @@ describe("entra-wif — success maps to an app-only token", () => {
   });
 });
 
-// ── Denial mapping (FR-X-002): FIC mismatch / WIF rejection / resource denial ─
+// ── Denial mapping (FR-502): FIC mismatch / WIF rejection / resource denial ─
 
-describe("entra-wif — denials collapse into downstream-denied (FR-X-002)", () => {
+describe("entra-wif — denials collapse into downstream-denied (FR-502)", () => {
   it.each([
     [400, "interaction_required", "FIC subject/issuer mismatch"],
     [401, "invalid_client", "WIF assertion rejected"],
@@ -238,7 +238,7 @@ describe("entra-wif — denials collapse into downstream-denied (FR-X-002)", () 
   });
 });
 
-// ── Transient mapping (FR-X-002): kept DISTINCT from a denial ─────────────────
+// ── Transient mapping (FR-502): kept DISTINCT from a denial ─────────────────
 
 describe("entra-wif — transient reach failures are infra-unreachable (distinct from denial)", () => {
   it("a 5xx → infra-unreachable (retriable), NOT downstream-denied", () => {

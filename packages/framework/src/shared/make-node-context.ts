@@ -117,7 +117,7 @@ export const makeNodeContext = (init: NodeContextInit): NodeContext => {
  * from run-start validation must survive this merge. Because the guard below
  * rejects BUILT-IN capability keys, `validateCapabilities` also REJECTS a
  * broker that claims `provides()` for one. If broker-minted built-ins ever land
- * (FR-W2-009),
+ * (FR-209),
  * change this guard to filter only `RESERVED_NON_CAPABILITY_KEYS` in the same
  * commit that lifts that rejection. Custom broker-delivered LLM capabilities
  * are supported separately: run-node parses their explicit metadata and applies

@@ -1155,7 +1155,7 @@ describe("dagTransition — full round-trip", () => {
 // dagTransition: awaiting-human + node-failed / ERROR (hook-crash retry)
 // ---------------------------------------------------------------------------
 
-describe("dagTransition — awaiting-human hook-crash retry (FR-029a)", () => {
+describe("dagTransition — awaiting-human hook-crash retry (FR-084)", () => {
   const awaitingWithPrompt = (
     nodeId: string,
     pendingReviews: string[] = [],
@@ -1267,7 +1267,7 @@ describe("dagTransition — awaiting-human hook-crash retry (FR-029a)", () => {
 // dagTransition: retrying-hook transitions
 // ---------------------------------------------------------------------------
 
-describe("dagTransition — retrying-hook (FR-029a)", () => {
+describe("dagTransition — retrying-hook (FR-084)", () => {
   const retryingHookPhase = (
     attempt = 1,
     pendingReviews: string[] = [],

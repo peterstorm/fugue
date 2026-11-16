@@ -13,8 +13,8 @@
  * Everything here is PURE: no I/O, no Date.now (the caller injects `now`), no
  * crypto. Errors are returned as a typed `AuthError` via `Result` — never thrown.
  *
- * @satisfies FR-W3-006 — validates fugue-platform OIDC JWTs (iss=realm, aud=fugue-host).
- * @satisfies FR-W3-007 — extracts user `sub` (and `azp`) from a valid token.
+ * @satisfies FR-306 — validates fugue-platform OIDC JWTs (iss=realm, aud=fugue-host).
+ * @satisfies FR-307 — extracts user `sub` (and `azp`) from a valid token.
  */
 
 import { ok, err } from "@fuguejs/framework";

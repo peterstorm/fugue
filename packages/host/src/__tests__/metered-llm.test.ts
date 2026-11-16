@@ -3,7 +3,7 @@
  *
  * Covers: attribution stamp present on every call, no-budget passthrough,
  * spend aggregation across calls, pre-call refusal once a ceiling is reached,
- * the sequential crossing-call allowance (FR-W1-004), learned concurrent
+ * the sequential crossing-call allowance (FR-104), learned concurrent
  * reservation accounting (SC-003, with no one-call claim for cold/larger
  * bursts), cost ceilings, structured logs, and zero provider egress on refusal.
  */
@@ -159,7 +159,7 @@ const createMeteredLlmWithDeps = (
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-describe("metered-llm: no budget (FR-W1-006 passthrough)", () => {
+describe("metered-llm: no budget (FR-106 passthrough)", () => {
   it("delegates and never refuses when budget is undefined", async () => {
     const { inner, calls } = fakeInner(1_000_000, 0);
     const { logger } = collectLogs();
@@ -443,7 +443,7 @@ describe("metered-llm: diagnostic failures never replace LLM outcomes", () => {
   });
 });
 
-describe("metered-llm: attribution stamp (FR-W0-001 / SC-001)", () => {
+describe("metered-llm: attribution stamp (FR-001 / SC-001)", () => {
   it("emits a structured metering log with (dagId, runId, nodeId) on every successful call", async () => {
     const { inner } = fakeInner(100, 50);
     const { logger, logs } = collectLogs();
@@ -465,7 +465,7 @@ describe("metered-llm: attribution stamp (FR-W0-001 / SC-001)", () => {
     expect(metered_logs[1]!.data?.operation).toBe("sendWithTools");
   });
 
-  it("aggregates cumulative tokens across calls (FR-W0-004)", async () => {
+  it("aggregates cumulative tokens across calls (FR-004)", async () => {
     const { inner } = fakeInner(100, 50); // 150/call
     const { logger, logs } = collectLogs();
     const metered = createMeteredLlm(inner, { logger });
@@ -478,7 +478,7 @@ describe("metered-llm: attribution stamp (FR-W0-001 / SC-001)", () => {
   });
 });
 
-describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
+describe("metered-llm: pre-call refusal (FR-102 / FR-103)", () => {
   it("refuses with llm-budget-exceeded once cumulative >= budget, without calling inner", async () => {
     // budget 200; each call costs 150. Call 1 → cumulative 0 < 200 allow → 150.
     // Call 2 → cumulative 150 < 200 allow → 300 (the single overshoot).
@@ -504,12 +504,12 @@ describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
       }
     }
 
-    // SC-004 / FR-W1-005: the refused call NEVER reached the inner client (no round trip).
+    // SC-004 / FR-105: the refused call NEVER reached the inner client (no round trip).
     expect(calls.length).toBe(2);
     expect(logs.some((l) => l.level === "warn" && l.msg.includes("budget exceeded"))).toBe(true);
   });
 
-  it("allows one sequential crossing call (FR-W1-004), then refuses the next", async () => {
+  it("allows one sequential crossing call (FR-104), then refuses the next", async () => {
     const { inner, calls } = fakeInner(1000, 0); // one call exceeds any small budget
     const { logger } = collectLogs();
     const metered = createMeteredLlm(inner, { limits: tokenBudget(500), logger });
@@ -563,7 +563,7 @@ describe("metered-llm: pre-call refusal (FR-W1-002 / FR-W1-003)", () => {
   });
 });
 
-describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-W0-001)", () => {
+describe("metered-llm: failed calls still burn budget (CRITICAL-1 / FR-001)", () => {
   // A failing inner client whose error carries partial usage — emulates a
   // multi-turn `sendWithTools` loop that consumed real tokens across turns
   // before crashing (iteration-limit / parse failure / deadline).

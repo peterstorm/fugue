@@ -1216,7 +1216,7 @@ describe("runDagStateful — onHumanReview throws", () => {
   });
 
   it("hook fails twice then succeeds: node.run called once, hook called 3 times, final result ok", async () => {
-    // FR-029a regression guard: hook retries MUST NOT re-run the node.
+    // FR-084 regression guard: hook retries MUST NOT re-run the node.
     let nodeRunCount = 0;
     let hookCallCount = 0;
     const nodeErrorEvents: string[] = [];

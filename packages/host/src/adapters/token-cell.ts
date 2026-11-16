@@ -31,7 +31,7 @@
  * pure `token-cache` functions; only the closure cell mutates and the clock is
  * injected.
  *
- * @satisfies SC-008 FR-X-003
+ * @satisfies SC-008 FR-503
  */
 
 import type { Result } from "@fuguejs/framework";

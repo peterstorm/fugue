@@ -6,7 +6,7 @@
  * `nodeId`, and the requested `scope`.
  *
  * @satisfies US6 — every mint and every refusal emits a correlated record.
- * @satisfies FR-X-004 — mint AND refusal each emit a record with sub/azp/runId/
+ * @satisfies FR-504 — mint AND refusal each emit a record with sub/azp/runId/
  *   nodeId/scope; 100% coverage.
  * @satisfies SC-009 — 100% of mints and 100% of refusals produce a correlated
  *   record with those five fields.

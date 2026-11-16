@@ -16,10 +16,10 @@
  * @satisfies US4 — a node declaring `requires:["msgraph:mail.send"]` receives a
  *   narrowed handle; the functional core can NEVER reach a raw downstream
  *   client or token (the handle types below expose neither).
- * @satisfies FR-W3-004 — operation narrowing: the handle exposes only the named
+ * @satisfies FR-304 — operation narrowing: the handle exposes only the named
  *   operation(s); the raw client is unreachable, enforced by the type with no
  *   escape hatch (no `client` member exists to widen to).
- * @satisfies FR-W3-005 — no raw token or vendor API key is reachable from
+ * @satisfies FR-305 — no raw token or vendor API key is reachable from
  *   node-executed code: the handle interfaces declare no `token`/`apiKey` field.
  * @satisfies SC-007 — 0 raw-client and 0 token/key fields reachable from a
  *   node's capability handle (type-level test in capability-scope.test.ts).
@@ -67,7 +67,7 @@ export type DownstreamScope =
   | { readonly provider: "dynamics"; readonly operation: DynamicsOperation };
 
 // ───────────────────────────────────────────────────────────────────────────
-// Operation-narrowed handle types (FR-W3-004 / FR-W3-005 / SC-007)
+// Operation-narrowed handle types (FR-304 / FR-305 / SC-007)
 //
 // Each handle interface carries ONLY operation methods. There is deliberately
 // NO `client`, `token`, or `apiKey` member: a node holding one of these handles
@@ -159,7 +159,7 @@ export type KnownScopesCoverProviders = [_ProvidersCovered];
  * system is one of the recognised names.
  *
  * A name that is not a recognised downstream scope reads as `undefined` —
- * first-class ABSENCE, not an error (the same FR-X-003 shape as
+ * first-class ABSENCE, not an error (the same FR-503 shape as
  * `token-cache.ts`'s `lookup`). Every caller (the broker's `mintFor` skip and
  * `provides`, the boot-time `AGENT_CLIENT_SCOPES` validation) asks "is this a
  * downstream scope?", a classification with a routine negative case: plain

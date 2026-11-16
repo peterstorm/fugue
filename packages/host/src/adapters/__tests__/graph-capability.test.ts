@@ -5,9 +5,9 @@
  * The security-critical invariants under test:
  *   - SC-007 — a handle exposes ONLY its named operation; NO raw client/token/
  *     apiKey field is reachable (type-level + runtime own-keys check).
- *   - FR-W4-005 — the operation presents the app-only WIF token as the bearer and
+ *   - FR-405 — the operation presents the app-only WIF token as the bearer and
  *     targets the specific Graph resource/operation.
- *   - FR-X-002 — a Graph 4xx is a settled `downstream-denied`; a transport
+ *   - FR-502 — a Graph 4xx is a settled `downstream-denied`; a transport
  *     rejection / 5xx is `infra-unreachable`, kept DISTINCT.
  *
  * All HTTP egress goes through an injected fake transport — NO live network.
@@ -87,9 +87,9 @@ describe("graph-capability — SC-007: only the operation is reachable, no raw c
   });
 });
 
-// ── FR-W4-005: the app-only token is presented as the bearer at egress ────────
+// ── FR-405: the app-only token is presented as the bearer at egress ────────
 
-describe("graph-capability — presents the WIF token as the bearer (FR-W4-005)", () => {
+describe("graph-capability — presents the WIF token as the bearer (FR-405)", () => {
   it("sendMail POSTs to /users/{from}/sendMail (app-only — NOT /me) with the WIF token as Authorization bearer", async () => {
     const { http, requests } = recordingHttp({ status: 202, json: {} });
     const handle = buildMailSendHandle("app-only-xyz", http);
@@ -173,9 +173,9 @@ describe("graph-capability — presents the WIF token as the bearer (FR-W4-005)"
   });
 });
 
-// ── FR-X-002: 4xx → downstream-denied; transient → infra-unreachable ──────────
+// ── FR-502: 4xx → downstream-denied; transient → infra-unreachable ──────────
 
-describe("graph-capability — error mapping (FR-X-002)", () => {
+describe("graph-capability — error mapping (FR-502)", () => {
   it.each([400, 401, 403, 404])("a Graph %p → downstream-denied with the resource + Graph reason", async (status) => {
     const { http } = recordingHttp({ status, json: { error: { code: "denied", message: "insufficient privileges" } } });
     const handle = buildMailSendHandle("tok", http);

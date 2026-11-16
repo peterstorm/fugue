@@ -70,7 +70,7 @@ export interface RunDagDeps {
   readonly circuitConfig: CircuitConfig;
   /**
    * Build the base NodeContext for a run, plus the run `origin`. The resolved
-   * inbound `AuthIdentity` is threaded in (FR-W3-007) so a user-initiated run
+   * inbound `AuthIdentity` is threaded in (FR-307) so a user-initiated run
    * carries the user's `sub` into the `origin`, which is handed to `executeDag`
    * so the broker can authorize each node's per-dispatch mint against it.
    */

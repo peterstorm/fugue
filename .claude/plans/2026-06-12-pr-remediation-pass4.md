@@ -95,10 +95,10 @@
 - **File:** packages/framework/src/types/errors.ts:226
 - **Fix:** Mention boot-time AGENT_CLIENT_SCOPES validator fails the boot.
 
-### Fix A16: FR-W2-009 @satisfies overstates
+### Fix A16: FR-209 @satisfies overstates
 - **Source:** comment-analyzer
 - **File:** packages/host/src/adapters/metered-llm.ts:19; node-context-factory.ts:307
-- **Fix:** Reword to "FR-W2-009 groundwork — pending migration onto the mintFor seam".
+- **Fix:** Reword to "FR-209 groundwork — pending migration onto the mintFor seam".
 
 ### Fix A17: "single accepted overshoot" contradicts generalised bound
 - **Source:** comment-analyzer

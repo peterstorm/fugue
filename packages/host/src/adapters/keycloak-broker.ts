@@ -7,15 +7,15 @@
  * Authority strategy is selected by the invocation's `origin.kind`, exhaustively:
  *   - `agent`  → `client_credentials` minted AS the agent's Keycloak client,
  *     requesting EXACTLY the scopes `requires` names. NO token exchange
- *     (FR-W3-009 / SC-010).
+ *     (FR-309 / SC-010).
  *   - `user`   → Standard Token Exchange V2 per hop: `sub` stays the user, `azp`
- *     becomes the agent, same scope/audience narrowing (FR-W3-008 / SC-010).
+ *     becomes the agent, same scope/audience narrowing (FR-308 / SC-010).
  *
  * THE HEADLINE INVARIANT — fail closed BEFORE any Entra call. The pure capability
  * gate (`domain/capability-gate.ts`) refuses an unassigned scope (`policy-refusal`)
  * BEFORE the token endpoint is ever asked to reach Entra, and before either cache
  * is read. The no-egress test proves the endpoint's mint/exchange methods were
- * never called on a refusal (SC-006 / FR-W3-003).
+ * never called on a refusal (SC-006 / FR-303).
  *
  * Caching: two single-flight token cells (`token-cell.ts`), one per egress — the
  * Keycloak SA token and the Entra app-only token — both keyed on the
@@ -28,10 +28,10 @@
  * Narrowing: on success the minted authority is wrapped in the operation-narrowed
  * handle types from `capability-scope.ts` (`MailSendHandle` / `SitesReadHandle` /
  * `DynamicsReadHandle`). The node sees ONLY the named operation — no raw client,
- * no token field is reachable from the handle (US4 / FR-W3-004/005 / SC-007).
+ * no token field is reachable from the handle (US4 / FR-304/305 / SC-007).
  *
- * @satisfies US4 US5 US6 US7 FR-W3-002 FR-W3-003 FR-W3-008 FR-W3-009 FR-W4-004
- *   FR-X-004 SC-006 SC-007 SC-009 SC-010 SC-011
+ * @satisfies US4 US5 US6 US7 FR-302 FR-303 FR-308 FR-309 FR-404
+ *   FR-504 SC-006 SC-007 SC-009 SC-010 SC-011
  */
 
 import { match } from "ts-pattern";
@@ -105,7 +105,7 @@ interface KeycloakBrokerDeps {
   /**
    * The injected Entra Workload Identity Federation exchange — the SECOND egress.
    * The Keycloak SA token minted by `endpoint` is presented to this as the
-   * `client_assertion` to obtain an app-only Graph/Dynamics token (FR-W4-004).
+   * `client_assertion` to obtain an app-only Graph/Dynamics token (FR-404).
    * Reached ONLY after the fail-closed gate AND a successful Keycloak mint, so a
    * refusal records zero calls here too (the no-egress guarantee extends to it).
    */
@@ -356,7 +356,7 @@ const mintSaToken = (
 /**
  * Acquire the app-only token on an app-only-cache MISS: obtain the SA token (its
  * own cell — reused while fresh, its lifetime is independent of the WIF
- * token's), then present it to the WIF exchange (the SECOND egress, FR-W4-004 —
+ * token's), then present it to the WIF exchange (the SECOND egress, FR-404 —
  * no static Entra secret, SC-011). Reached only AFTER the fail-closed gate.
  */
 const acquireAppOnlyToken = async (

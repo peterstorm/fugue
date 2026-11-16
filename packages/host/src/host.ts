@@ -407,7 +407,7 @@ const assignedScopesFor = (config: HostConfig): AssignedScopes => (agentClientId
  * is wired into `runDag`, so the framework skips per-node minting entirely and
  * every node runs against the boot-scoped static client set, byte-identical to
  * today (SC-005), zero regression. Pools stay boot-scoped either way
- * (FR-W2-005); only authority resolution moves behind the broker.
+ * (FR-205); only authority resolution moves behind the broker.
  *
  * AD-3 config-presence gating (FR-011): each authority leg is wired LIVE only
  * when ITS OWN config is present — there is no single global enable flag.
@@ -1025,7 +1025,7 @@ interface RunAuthority {
 
 /**
  * Build the per-run NodeContext factory. The resolved inbound identity is
- * threaded through to the factory (FR-W3-007), which derives `Invocation.origin`
+ * threaded through to the factory (FR-307), which derives `Invocation.origin`
  * from it: an OIDC `user` carries its `sub` (with the DAG's agent-type client as
  * `agentClientId`) so the run is correctly attributed to the user instead of
  * being silently re-labelled `agent`. The origin is returned alongside the base

@@ -390,7 +390,7 @@ Any node can declare `humanReview: { prompt: "Review this summary for accuracy" 
 // The onHumanReview hook (e.g., Slack integration) throws due to a network blip.
 // The entire run fails. The human never gets the review request.
 
-// ✅ WITH HOOK CRASH RETRY (FR-029a):
+// ✅ WITH HOOK CRASH RETRY (FR-084):
 // Phase: awaiting-human → retrying-hook (separate retry budget)
 // The hook is retried; the node's output is preserved across retries.
 ```

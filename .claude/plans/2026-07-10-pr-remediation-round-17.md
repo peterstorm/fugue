@@ -13,7 +13,7 @@
 - **Issue:** `if (!result.ok && result.error.kind === "node-crash")` silently skips both assertions when the kind regresses. Every sibling round-16 test uses the hard pattern; only this one regressed to the soft guard round-15 Fix 9 eliminated.
 - **Fix:** Hard-assert `expect(result.error.kind).toBe("node-crash")` before narrowing, matching siblings.
 
-### Fix 2: responseFailedError transient arm drops the failed turn's usage (FR-W0-001 under-count)
+### Fix 2: responseFailedError transient arm drops the failed turn's usage (FR-001 under-count)
 - **Source:** type-design-analyzer (critical) + silent-failure-hunter + architecture-tech-lead + code-reviewer (advisory) — 4/6 agents, verified by execution
 - **File:** packages/framework/src/llm/openai-client.ts:74-78
 - **Issue:** The `rate_limit_exceeded → transient` arm discards the `usage` parameter though the transient variant carries `usage?: PartialTokenUsage`, `withAccumulatedUsage` sums it, and host metered-llm settles budget from `usageOfError` on failures. A failed rate-limited turn's tokens escape budget accounting on a live consumed path.

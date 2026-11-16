@@ -2,7 +2,7 @@
  * Tests for the pure token cache (domain/token-cache.ts).
  *
  * Covers: the half-open freshness boundary (`now < expiresAt`), the
- * miss-is-not-an-error contract (FR-X-003), and the SC-008 property — within a
+ * miss-is-not-an-error contract (FR-503), and the SC-008 property — within a
  * TTL window a key resolves to the SAME cached token, so the broker mints at
  * most once per (identity,audience,scope) per window.
  */
@@ -67,7 +67,7 @@ describe("isFresh — half-open boundary [storedAt, expiresAt)", () => {
   });
 });
 
-describe("lookup — miss is NOT an error (FR-X-003)", () => {
+describe("lookup — miss is NOT an error (FR-503)", () => {
   it("an absent key reads as undefined, never an Err", () => {
     const result = lookup(emptyCache, cacheKey("a", "b", "c"), 0);
     expect(result).toBeUndefined();

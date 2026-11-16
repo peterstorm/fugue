@@ -3,7 +3,7 @@
  * tokens. The functional core of the Keycloak-backed broker
  * (`adapters/keycloak-broker.ts`, which holds two cache cells over this module
  * and is selected at boot when `REALM_JWT_ISSUER` is set; the cache itself is
- * mandated by FR-W2-007): this
+ * mandated by FR-207): this
  * module decides WHETHER a cached token may be reused and HOW its lookup key is
  * built, with zero I/O and zero ambient clock — `now` is always injected so the
  * decision is a deterministic function of its inputs (Constraint: functional
@@ -11,14 +11,14 @@
  *
  * Two invariants live here in TYPES, not comments:
  *   - A cache MISS is the absence of a value (`undefined`), never an `Err`
- *     (FR-X-003) — a miss is a normal control-flow signal to mint, not a
+ *     (FR-503) — a miss is a normal control-flow signal to mint, not a
  *     failure. `lookup` returns `CachedToken | undefined`; there is no error
  *     channel to misuse.
  *   - A `CachedToken` carries its OWN absolute expiry (`expiresAt`), so
  *     freshness is the entry's property, not a separate TTL the caller must
  *     remember to thread. `isFresh` therefore needs only `(entry, now)`.
  *
- * @satisfies FR-X-003 — token cache miss is NOT an error; it triggers a mint
+ * @satisfies FR-503 — token cache miss is NOT an error; it triggers a mint
  * @satisfies SC-008 — ≤ 1 token request per (identity,audience,scope) per TTL
  *   window: a key resolves to the same cached token for every lookup inside its
  *   freshness window, so the broker mints at most once per window (property-
@@ -128,7 +128,7 @@ export const emptyCache: TokenCache = { entries: {} };
 /**
  * Look up a key in the cache, returning the FRESH entry or `undefined`.
  *
- * "Miss" is first-class absence, NOT an error (FR-X-003): an absent key and an
+ * "Miss" is first-class absence, NOT an error (FR-503): an absent key and an
  * expired-but-present key both read as `undefined`, because to the caller they
  * mean the same thing — "no reusable token, go mint". The return type has no
  * error channel, so a miss can never be mistaken for a failure.
