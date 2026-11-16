@@ -81,7 +81,7 @@ import { join } from "node:path";
 import { readCheckpointFile, listJsonFileNames } from "./event-log.js";
 import type { RawCheckpointJson } from "./event-log.js";
 import { atomicWriteFile, withFileLock } from "./atomic.js";
-import { isAlreadyCommitted, planAppend } from "./append-plan.js";
+import { isAlreadyCommitted, planAppend, stampRecordedAt } from "./append-plan.js";
 import {
   APPEND_LOCK,
   CHECKPOINT_FILE,
@@ -89,7 +89,7 @@ import {
   PROGRESS_FILE,
   parseEventFileName,
 } from "./layout.js";
-import { parseOptionalDedupKey, parseRecordedAtMs } from "./event-record.js";
+import { parseOptionalDedupKey } from "./event-record.js";
 import type { DedupKey, RecordedAtMs } from "./event-record.js";
 import { isFileCheckpointCommit } from "./checkpoint-record.js";
 import type { FileCheckpointCommit } from "./checkpoint-record.js";
@@ -99,7 +99,6 @@ import { safeDiagnosticRender } from "../types/safe-error.js";
 import { parseFileFactoryClock } from "./options.js";
 import {
   fileOperationError,
-  fileThrownValueMessage,
   isFileBackendPathString,
   type FileOperation,
 } from "./boundary-error.js";
@@ -308,30 +307,18 @@ export const createFileJournal = (
     return parsedKey.value;
   };
 
-  // The injected clock is stamped inside the append critical section and
-  // is the one dependency that can fail without touching the filesystem —
-  // name it explicitly so a throwing or non-finite clock is diagnosed as a
-  // clock failure, not misattributed to the lock machinery or the record
-  // codec (parity with the checkpointer and freshness-index clock guards).
-  // The stamp is minted through `parseRecordedAtMs` — the record codec's
-  // single finiteness clause — so the journal can never hand the
-  // serializer a value the strict reader would reject.
-  const stampRecordedAt = (): RecordedAtMs => {
-    try {
-      const parsedStamp = parseRecordedAtMs(now());
-      if (!parsedStamp.ok) throw new Error(parsedStamp.error);
-      return parsedStamp.value;
-    } catch (error) {
-      // Deterministic: a clock that throws or stamps non-finite fails
-      // identically on every retry of the same append — the same class
-      // the other code-constructed invariant rejections pin "permanent".
-      throw fileOperationError(
-        "appendEvent",
-        `run directory ${directory}`,
-        `clock failed while stamping the append: ${fileThrownValueMessage(error)}`,
-        "permanent",
-      );
-    }
+  // The injected clock is stamped inside the append critical section and is
+  // the one dependency that can fail without touching the filesystem. The
+  // decision (`stampRecordedAt`, pure, in the append core) names it; this
+  // shell only lifts its `err` into the typed channel (parity with the
+  // checkpointer and freshness-index clock guards).
+  const stampUnderLock = (): RecordedAtMs => {
+    const stamp = stampRecordedAt(now);
+    if (stamp.ok) return stamp.value;
+    // Deterministic: a clock that throws or stamps non-finite fails
+    // identically on every retry of the same append — the same class
+    // the other code-constructed invariant rejections pin "permanent".
+    throw fileOperationError("appendEvent", `run directory ${directory}`, stamp.error, "permanent");
   };
 
   // The lock body: list, dedup, stamp, plan, commit.
@@ -342,7 +329,7 @@ export const createFileJournal = (
     // cannot fail on a clock it never needed (SC-003 / FR-015).
     if (isAlreadyCommitted(existing, key)) return;
 
-    const recordedAtMs = stampRecordedAt();
+    const recordedAtMs = stampUnderLock();
 
     // Both the plan and `atomicWriteFile` throw ALREADY-TYPED failures
     // (they name their own operation, location, and inferred failureClass)

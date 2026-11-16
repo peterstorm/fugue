@@ -6,11 +6,13 @@
  * assignment and the 6-digit lexicographic ceiling, the canonical-bytes
  * filename digest) used to be reachable only through a real temp directory and
  * a real file lock. They are decisions, not I/O, so they are tested here as
- * decisions: no `mkdtempSync`, no lock, no clock.
+ * decisions: no `mkdtempSync`, no lock, no wall clock (the clock stamp is
+ * tested against literal clock functions).
  */
 
 import { describe, it, expect } from "bun:test";
-import { isAlreadyCommitted, planAppend, journalCapacityError } from "../file/append-plan.js";
+import * as fc from "fast-check";
+import { isAlreadyCommitted, planAppend, journalCapacityError, stampRecordedAt } from "../file/append-plan.js";
 import { parseOptionalDedupKey, parseRecordedAtMs } from "../file/event-record.js";
 import type { DedupKey, RecordedAtMs } from "../file/event-record.js";
 import { keyDigest, MAX_LEXICOGRAPHIC_SEQUENCE, JOURNAL_SCHEMA_VERSION } from "../file/layout.js";
@@ -118,5 +120,65 @@ describe("planAppend — sequence, record, canonical bytes and durable name", ()
     const lastOk = new Array<string>(MAX_LEXICOGRAPHIC_SEQUENCE);
     const plan = planAppend({ existing: lastOk, dedupKey: KEYLESS, recordedAtMs: stamp(1), event: { type: "A" }, directory: DIR });
     expect(plan.fileName.startsWith("999999-")).toBe(true);
+  });
+});
+
+describe("stampRecordedAt — the clock-validation core, total over any clock", () => {
+  const PREFIX = "clock failed while stamping the append: ";
+
+  it("a finite reading becomes the stamp verbatim (no rounding, no clamp)", () => {
+    fc.assert(
+      fc.property(fc.double({ noNaN: true, noDefaultInfinity: true }), (ms) => {
+        expect(stampRecordedAt(() => ms)).toEqual({ ok: true, value: stamp(ms) });
+      }),
+    );
+  });
+
+  it("a non-finite or non-number reading is an err naming the clock, never a throw", () => {
+    const nonFinite = fc.constantFrom(Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY);
+    const nonNumber = fc.anything().filter((v) => typeof v !== "number");
+    fc.assert(
+      fc.property(fc.oneof(nonFinite, nonNumber), (reading) => {
+        const stamped = stampRecordedAt(() => reading);
+        expect(stamped.ok).toBe(false);
+        if (!stamped.ok) {
+          expect(stamped.error.startsWith(PREFIX)).toBe(true);
+          expect(stamped.error).toContain("recordedAtMs must be a finite number");
+        }
+      }),
+    );
+  });
+
+  it("a clock that throws any value is an err naming the clock, never a throw", () => {
+    fc.assert(
+      fc.property(fc.anything(), (thrown) => {
+        const stamped = stampRecordedAt(() => {
+          throw thrown;
+        });
+        expect(stamped.ok).toBe(false);
+        if (!stamped.ok) expect(stamped.error.startsWith(PREFIX)).toBe(true);
+      }),
+    );
+  });
+
+  it("carries the thrown error's message, and survives a value whose rendering itself throws", () => {
+    const boom = stampRecordedAt(() => {
+      throw new Error("clock boom");
+    });
+    expect(boom).toEqual({ ok: false, error: `${PREFIX}clock boom` });
+
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const hostile = stampRecordedAt(() => {
+      throw revoked.proxy;
+    });
+    expect(hostile.ok).toBe(false);
+    if (!hostile.ok) expect(hostile.error).toMatch(/unprintable|Proxy|revoked/i);
+  });
+
+  it("reads the clock exactly once per stamp", () => {
+    let reads = 0;
+    stampRecordedAt(() => ++reads);
+    expect(reads).toBe(1);
   });
 });
