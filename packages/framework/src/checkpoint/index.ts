@@ -4,6 +4,7 @@ export {
   type CorruptCheckpointAddress,
   type RunMeta,
   type NodeState,
+  type NodeStateRecord,
   type RunState,
   type SaveNodeOpts,
   type InMemoryStoredMeta,

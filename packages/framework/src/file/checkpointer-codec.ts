@@ -770,7 +770,9 @@ export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict 
   if (!parsedNodeFields.ok) {
     return corruptNode(nodeKeyAddress(nodeKey), parsedNodeFields.error);
   }
-  const { nodeId, completedAt } = parsedNodeFields.value;
+  // `output` here is the record's STORED (serializer-tagged) form — the shared
+  // grammar passes it through untouched; this codec decodes it below.
+  const { nodeId, completedAt, output: rawOutput } = parsedNodeFields.value;
   if (envelope.nodeIdOfKey !== nodeId) {
     return corruptNode(
       nodeKeyAddress(nodeKey),
@@ -778,7 +780,6 @@ export const parseNodeFile = (fileName: string, text: string): NodeEntryVerdict 
     );
   }
 
-  const rawOutput = raw.output;
   const outputValidation = validateRawSerializedOutput(rawOutput);
   if (!outputValidation.ok) {
     return corruptNode(

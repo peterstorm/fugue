@@ -88,11 +88,6 @@ const serializeNode = (
   };
 };
 
-// `parseNodeStateRecord` has already proven `stored` is a JSON object; the
-// `output` field is adapter-side pass-through, so it stays `unknown`.
-const outputOf = (stored: unknown): unknown =>
-  typeof stored === "object" && stored !== null && "output" in stored ? stored.output : undefined;
-
 const deserializeNode = (raw: string): NodeState => {
   const stored: unknown = JSON.parse(raw);
   // ONE encoding with the file codec (round-23 atl-1): the record grammar
@@ -100,16 +95,13 @@ const deserializeNode = (raw: string): NodeState => {
   // or `ID_PATTERN`-violating nodeId, or a non-canonical completedAt, from
   // corrupt/drifted bytes must fail as corrupt HERE — per-entry, dropping the
   // row into `corruptNodeAddresses` — never flow a number/object into the node map
-  // and node dispatch. (The `output` field stays adapter-side pass-through.)
+  // and node dispatch. This backend stores `output` itself, so the parsed
+  // record — pass-through `output` included — IS the node state.
   const parsedNode = parseNodeStateRecord(stored);
   if (!parsedNode.ok) {
     throw new Error(parsedNode.error);
   }
-  return {
-    nodeId: parsedNode.value.nodeId,
-    output: outputOf(stored),
-    completedAt: parsedNode.value.completedAt,
-  };
+  return parsedNode.value;
 };
 
 /**
