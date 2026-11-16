@@ -189,6 +189,91 @@ describe("createInMemoryBackend", () => {
     expect(entries![1].data).toEqual({ state: 99, context: undefined });
   });
 
+  it("backend.close() releases every worker's handlers — a worker re-registered after close never fires them", async () => {
+    // Regression: close() used to clear queues/workers/jobs but keep the
+    // per-queue handler lists, and createWorker reused a surviving list. A
+    // reused backend therefore fired handlers from its previous lifecycle
+    // (and retained their closures for as long as the backend lived).
+    const errors: string[] = [];
+    setFrameworkLogger({
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: (msg) => { errors.push(msg); },
+    });
+    try {
+      const backend = createInMemoryBackend();
+      const stale: string[] = [];
+      const first = backend.createWorker<unknown, unknown>("reuse-queue", async () => {});
+      first.onExhausted((id) => { stale.push(`exhausted:${id}`); });
+      first.onFailed((id) => { stale.push(`failed:${id}`); });
+      first.onError((e) => { stale.push(`error:${e.message}`); });
+
+      await backend.close();
+
+      const queue = backend.createQueue<string, undefined>("reuse-queue");
+      backend.createWorker<unknown, unknown>("reuse-queue", async () => {
+        throw new Error("second lifecycle boom");
+      });
+      await queue.enqueue("j-after-close", { state: "x", context: undefined }, { attempts: 2 });
+      await queue.drain();
+
+      expect(stale).toEqual([]);
+      // With no handler of its own the new worker's failures are logged, not lost.
+      expect(errors).toHaveLength(2);
+      expect(errors[0]).toContain('Job "j-after-close" failed (attempt 1/2, exhausted=false) with no handler');
+      expect(errors[1]).toContain('Job "j-after-close" failed (attempt 2/2, exhausted=true) with no handler');
+    } finally {
+      __resetFrameworkLogger();
+    }
+  });
+
+  it("handlers belong to the worker they were registered on, not to the queue name", async () => {
+    const backend = createInMemoryBackend();
+    const seen: string[] = [];
+    const queue = backend.createQueue<string, undefined>("replaced-queue");
+    const first = backend.createWorker<unknown, unknown>("replaced-queue", async () => {});
+    first.onExhausted((id) => { seen.push(`first:${id}`); });
+
+    const second = backend.createWorker<unknown, unknown>("replaced-queue", async () => {
+      throw new Error("boom");
+    });
+    second.onExhausted((id) => { seen.push(`second:${id}`); });
+
+    await queue.enqueue("j1", { state: "x", context: undefined });
+    await queue.drain();
+
+    expect(seen).toEqual(["second:j1"]);
+  });
+
+  it("closing a superseded worker handle leaves the current worker registered", async () => {
+    const backend = createInMemoryBackend();
+    const processed: string[] = [];
+    const queue = backend.createQueue<string, undefined>("superseded-queue");
+    const first = backend.createWorker<unknown, unknown>("superseded-queue", async () => {
+      processed.push("first");
+    });
+    backend.createWorker<unknown, unknown>("superseded-queue", async () => {
+      processed.push("second");
+    });
+
+    await first.close();
+    await queue.enqueue("j1", { state: "x", context: undefined });
+    await queue.drain();
+
+    expect(processed).toEqual(["second"]);
+  });
+
+  it("registering a handler on a closed worker handle is inert, not a crash", async () => {
+    const backend = createInMemoryBackend();
+    const worker = backend.createWorker<unknown, unknown>("closed-handle-queue", async () => {});
+    await worker.close();
+
+    expect(() => worker.onFailed(() => {})).not.toThrow();
+    expect(() => worker.onExhausted(() => {})).not.toThrow();
+    expect(() => worker.onError(() => {})).not.toThrow();
+  });
+
   it("_events is empty after drain (entries consumed)", async () => {
     const backend = createInMemoryBackend();
     const queue = backend.createQueue<string, undefined>("drain-ev-queue");
