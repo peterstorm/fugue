@@ -13,7 +13,7 @@ const describeRedis = redisUrl ? describe : describe.skip;
 
 From the repository root, use `bun run verify`, not a package-only Redis helper. Its prerequisite phase fails closed unless:
 
-- Bun exactly matches the production Dockerfile (currently 1.4.2);
+- Bun exactly matches the production Dockerfile (currently 1.4.4);
 - `redis-server` is available in `PATH`;
 - `REDIS_URL` is a valid, non-blank `redis://` or `rediss://` URL whose connection is authorized, returns `PONG`, and supports `ACL CAT`.
 

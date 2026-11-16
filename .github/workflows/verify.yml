@@ -10,7 +10,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - run: bun install --frozen-lockfile
       - name: Start disposable Redis
         run: |
@@ -33,7 +33,7 @@ jobs:
   original-image-oracle-smoke:
     runs-on: ubuntu-latest
     container:
-      image: oven/bun:1.4.2-alpine
+      image: oven/bun:1.4.4-alpine
     steps:
       - uses: actions/checkout@v5
       - run: bun install --frozen-lockfile

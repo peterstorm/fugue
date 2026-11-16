@@ -26,7 +26,7 @@ The nine public packages version in lockstep (currently **0.5.1**) and publish u
 Repository contributors use the fail-closed root gate:
 
 ```bash
-# Bun must exactly match packages/host/Dockerfile (currently 1.4.2).
+# Bun must exactly match packages/host/Dockerfile (currently 1.4.4).
 # REDIS_URL must target an authorized, disposable, ACL-capable test server;
 # the canonical CONTRIBUTING setup proves password auth. redis-server must be in PATH.
 bun install --frozen-lockfile

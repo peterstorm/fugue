@@ -41,12 +41,12 @@ Note the linter measures a function only when its signature opens on one line, s
 
 The local gate fails closed unless all of the following are true:
 
-- **Bun 1.4.2 exactly.** The production source of truth is [`packages/host/Dockerfile`](packages/host/Dockerfile). A different patch, including Bun 1.3.13, is rejected before verification starts.
+- **Bun 1.4.4 exactly.** The production source of truth is [`packages/host/Dockerfile`](packages/host/Dockerfile). A different patch, including Bun 1.3.13, is rejected before verification starts.
 - **Bash** is available for the thin, sequential verification shell.
 - **`redis-server` is in `PATH`.** One host test starts its own isolated Unix-socket Redis process, so a remote Redis URL does not replace the executable.
 - **`REDIS_URL` is a valid, non-blank `redis://` or `rediss://` URL pointing to a reachable, ACL-capable disposable test server that authorizes the connection.** Server authentication is an optional Redis policy: credentials are required when the server requires them, while an enabled default user may authorize an uncredentialed URL. The preflight proves connection authorization, `PING`, and `ACL CAT` before any Redis-gated suite can silently skip. The canonical setup below and CI deliberately prove the password-authenticated shape.
 
-Install Bun 1.4.2 with the official installer or your version manager, then confirm `bun --version` prints `1.4.2`. Do not substitute `latest`: runtime drift is the defect this gate prevents.
+Install Bun 1.4.4 with the official installer or your version manager, then confirm `bun --version` prints `1.4.4`. Do not substitute `latest`: runtime drift is the defect this gate prevents.
 
 ### Start a disposable local Redis
 
@@ -103,7 +103,7 @@ Package-only tests are intentionally narrower. Redis-gated suites can skip when 
 
 ## Production-image Oracle control
 
-`bun run verify` alone does **not** prove that the Oracle thin driver loads in the original production base image. CI and release require a second job that runs `scripts/oracle-driver-smoke.ts` in exactly `oven/bun:1.4.2-alpine`. The smoke is secret-free and deliberately connects only to an unreachable loopback target; success proves driver load and network-path entry, not live database connectivity.
+`bun run verify` alone does **not** prove that the Oracle thin driver loads in the original production base image. CI and release require a second job that runs `scripts/oracle-driver-smoke.ts` in exactly `oven/bun:1.4.4-alpine`. The smoke is secret-free and deliberately connects only to an unreachable loopback target; success proves driver load and network-path entry, not live database connectivity.
 
 To reproduce that one image-specific control manually without changing the host Bun or host `node_modules`, create a source-only snapshot, mount it read-only, copy it into the container's temporary filesystem, and install there:
 
@@ -117,7 +117,7 @@ git ls-files --cached --others --exclude-standard -z \
 
 docker run --rm \
   --mount "type=bind,src=$snapshot,dst=/checkout,readonly" \
-  oven/bun:1.4.2-alpine \
+  oven/bun:1.4.4-alpine \
   sh -eu -c '
     work=$(mktemp -d)
     cp -R /checkout/. "$work/repo"
@@ -136,7 +136,7 @@ The real Oracle proof is separate: the OpenShift Argo PostSync Job in [`packages
 Both [CI](.github/workflows/ci.yml) and [release](.github/workflows/release.yaml) call the same reusable [`verify.yml`](.github/workflows/verify.yml). Its two required jobs are:
 
 - **`workspace-gate`** — frozen install, disposable Redis setup, then exactly `bun run verify`;
-- **`original-image-oracle-smoke`** — frozen install and the secret-free Oracle smoke in the original Bun 1.4.2 Alpine image.
+- **`original-image-oracle-smoke`** — frozen install and the secret-free Oracle smoke in the original Bun 1.4.4 Alpine image.
 
 A caller succeeds only when both jobs succeed. Release-specific version, tarball, registry, OIDC, and publication logic remains in `release.yaml`; it is not part of the local repository command.
 
@@ -164,7 +164,7 @@ Before an authorized release:
 
 1. keep all nine public `package.json` versions identical to the intended `v<version>` tag;
 2. update the workspace `version` records in `bun.lock` as well — `bun install` does not reliably refresh those records after a package-version-only bump;
-3. run the frozen install and full verification against Bun 1.4.2;
+3. run the frozen install and full verification against Bun 1.4.4;
 4. use the dry run to validate GitHub's reusable-workflow graph and every tarball.
 
 `bun pm pack` rewrites `workspace:*` dependencies from lockfile workspace metadata. A stale lockfile can therefore produce valid-looking tarballs pinned to an old sibling version; version 0.1.4 was published with that defect. The release workflow extracts every tarball and refuses stale `@fuguejs/*` pins before any package can publish.
