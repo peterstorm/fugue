@@ -21,13 +21,13 @@ Two failures reproduce on **both** versions and are container artifacts rather t
 
 ## Decision
 
-**Pin the Bun version, and pin CI and production to the same one.** As of this ADR that is `1.4.2`. The current direct pins are in three files that must be bumped together:
+**Pin the Bun version, and pin CI and production to the same one.** As of this ADR that was `1.4.2`; since 2026-11-16 it is `1.4.4`. The current direct pins are in three files that must be bumped together:
 
 | Where | Setting |
 |---|---|
-| `packages/host/Dockerfile` | `FROM oven/bun:1.4.2-alpine` — production source of truth |
-| `.github/workflows/verify.yml` | workspace `bun-version: 1.4.2` and Oracle `container.image: oven/bun:1.4.2-alpine` |
-| `.github/workflows/release.yaml` | packaging `bun-version: 1.4.2`; shared verification is called separately |
+| `packages/host/Dockerfile` | `FROM oven/bun:1.4.4-alpine` — production source of truth |
+| `.github/workflows/verify.yml` | workspace `bun-version: 1.4.4` and Oracle `container.image: oven/bun:1.4.4-alpine` |
+| `.github/workflows/release.yaml` | packaging `bun-version: 1.4.4`; shared verification is called separately |
 
 An exact patch tag, not a `1.4` or `latest` floating tag: a floating tag reintroduces exactly the drift this ADR exists to remove, and the failure mode is silent.
 
@@ -49,4 +49,4 @@ This moves production **forward** (1.2.23 → 1.4.2) rather than pinning CI back
 
 ## Current enforcement note (2026-09-08)
 
-CI and release now call the same reusable `.github/workflows/verify.yml`. Its repository job performs a frozen install, starts disposable Redis, and invokes the root `bun run verify`; that command delegates to all 12 workspace typecheck/test scripts (including the framework CLI compiler tier), the deliberately scoped root-script compiler/tests, and shipped-doc checks. Its second required job preserves the Oracle driver smoke in the original `oven/bun:1.4.2-alpine` image. Local `bun run verify` proves the repository/runtime/Redis gate but does not claim that independent image proof or the credentialed OpenShift PostSync `SELECT 1 FROM DUAL` check.
+CI and release now call the same reusable `.github/workflows/verify.yml`. Its repository job performs a frozen install, starts disposable Redis, and invokes the root `bun run verify`; that command delegates to all 12 workspace typecheck/test scripts (including the framework CLI compiler tier), the deliberately scoped root-script compiler/tests, and shipped-doc checks. Its second required job preserves the Oracle driver smoke in the original `oven/bun:1.4.4-alpine` image. Local `bun run verify` proves the repository/runtime/Redis gate but does not claim that independent image proof or the credentialed OpenShift PostSync `SELECT 1 FROM DUAL` check.

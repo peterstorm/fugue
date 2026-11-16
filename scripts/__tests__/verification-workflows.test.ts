@@ -226,7 +226,7 @@ describe("reusable verification workflow", () => {
   it("preserves the original production-image Oracle smoke", () => {
     const oracle = jobOf(workflow("verify.yml"), "original-image-oracle-smoke");
     const container = record(oracle.container, "oracle.container");
-    expect(container.image).toBe("oven/bun:1.4.2-alpine");
+    expect(container.image).toBe("oven/bun:1.4.4-alpine");
     expect(stepsOf(oracle).some((step) => step.run === "bun scripts/oracle-driver-smoke.ts")).toBe(true);
   });
 

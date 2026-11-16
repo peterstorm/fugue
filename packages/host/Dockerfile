@@ -4,7 +4,7 @@
 # Pinned to an exact patch, and ci.yml pins `bun-version` + the oracle-smoke
 # container to the SAME version — a CI run is only evidence about production if it
 # executed production's runtime. Bump all three together (see ADR-0084).
-FROM oven/bun:1.4.2-alpine
+FROM oven/bun:1.4.4-alpine
 
 # Git is required for DAG repository sync (AD-5: raw git via Bun.spawn).
 # openssh-client is required because DAGS_REPO_URL is an ssh:// stash URL

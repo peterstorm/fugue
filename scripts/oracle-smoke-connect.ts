@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * Oracle smoke-connect — opens a REAL Oracle connection via @fuguejs/oracle from
- * the SHIPPED host image (based on `oven/bun:1.4.2-alpine`) and runs
+ * the SHIPPED host image (based on `oven/bun:1.4.4-alpine`) and runs
  * `SELECT 1 FROM DUAL`, exiting non-zero if the connection or query fails (SC-006).
  *
  * This is the credentialed, network-reachable half of the Oracle proof. The Argo

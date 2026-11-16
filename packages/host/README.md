@@ -702,7 +702,7 @@ For focused host iteration only:
 (cd packages/host && bun run test)
 ```
 
-Focused package commands are not repository parity evidence and Redis-gated suites can skip without `REDIS_URL`. Full verification requires exact Bun 1.4.2, a local `redis-server` binary, and an authorized, ACL-capable disposable Redis test server that the caller starts and stops. Server authentication is optional policy; the canonical guide and CI deliberately prove password authentication. The integration suites write fixtures and ACL users, so never use production or shared Redis. See [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) for the complete setup and the separate production-image Oracle control.
+Focused package commands are not repository parity evidence and Redis-gated suites can skip without `REDIS_URL`. Full verification requires exact Bun 1.4.4, a local `redis-server` binary, and an authorized, ACL-capable disposable Redis test server that the caller starts and stops. Server authentication is optional policy; the canonical guide and CI deliberately prove password authentication. The integration suites write fixtures and ACL users, so never use production or shared Redis. See [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) for the complete setup and the separate production-image Oracle control.
 
 ---
 

@@ -16,12 +16,12 @@
         # Bun pinned to the exact patch CI (.github/workflows/verify.yml) and
         # packages/host/Dockerfile use, so `bun run verify`'s prerequisite
         # check passes locally. Bump all three together.
-        bunVersion = "1.4.2";
+        bunVersion = "1.4.4";
         bunHashes = {
-          "aarch64-darwin" = { asset = "darwin-aarch64"; hash = "sha256-kJh6OhbX21VtiGrD1VHnttPt8KHPQ6yu1iLoZ2vh0S8="; };
-          "x86_64-darwin" = { asset = "darwin-x64"; hash = "sha256-gFINfhdSYwjJGF0mFnmsbSd5jTgDoOn3/5Ehq4r/sBI="; };
-          "aarch64-linux" = { asset = "linux-aarch64"; hash = "sha256-VDKLvC2cjgyfiSxUTWbFeoO4QTnjSQnl7oF1jxrI/ac="; };
-          "x86_64-linux" = { asset = "linux-x64"; hash = "sha256-NjaPrvdSeHXV/6UuU81IAhdB8qg+tiCKjdZAaNQiqRM="; };
+          "aarch64-darwin" = { asset = "darwin-aarch64"; hash = "sha256-wkDX8My5DCY6hJ/NsJt+5iYw2SE0jtaq/ahrnVd7xRA="; };
+          "x86_64-darwin" = { asset = "darwin-x64"; hash = "sha256-UKNJH3Orwv6BZzFxqFdi07wswWgMzsrdmD3pmt93l34="; };
+          "aarch64-linux" = { asset = "linux-aarch64"; hash = "sha256-uqa7NvUdblhWHgK76oJQOKnfRU9nPW13bou/hvjHhQ4="; };
+          "x86_64-linux" = { asset = "linux-x64"; hash = "sha256-v4zL+ysLgBWeD5ptFcVTF63YB3U028YTCj7bUvzLOVw="; };
         };
         bun = pkgs.bun.overrideAttrs (_: {
           version = bunVersion;
