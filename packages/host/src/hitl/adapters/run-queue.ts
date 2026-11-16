@@ -12,6 +12,7 @@
  * prevents double-running side-effecting nodes).
  */
 
+import { match } from "ts-pattern";
 import { ok, err, safeErrorMessage, tryRunId } from "@fuguejs/framework";
 import type { Result, RunId, QueueBackend, QueueHandle, WorkerHandle } from "@fuguejs/framework";
 import type { HostError } from "../../domain/host-error.js";
@@ -168,12 +169,22 @@ const createEnqueue = (
   };
 
 /**
+ * How a wakeup's single-flight lock claim ended: this worker `acquired` the
+ * run's lease (and holds `lockToken`), or another worker holds it and the
+ * wakeup was `deferred` (re-enqueued) — nothing to process here.
+ */
+type RunLockClaim =
+  | { readonly kind: "acquired"; readonly lockToken: string }
+  | { readonly kind: "deferred" };
+
+const DEFERRED: RunLockClaim = { kind: "deferred" };
+
+/**
  * Single-flight: only one worker processes a given run at a time. Every lease
  * carries a fresh owner token; release compares that token atomically so an
- * expired holder cannot delete a successor's lease. Returns the owner token, or
- * `undefined` after deferring the wakeup because another worker holds the lock.
+ * expired holder cannot delete a successor's lease.
  */
-const acquireRunLockOrDefer = async (ctx: WakeupContext, runId: RunId): Promise<string | undefined> => {
+const acquireRunLockOrDefer = async (ctx: WakeupContext, runId: RunId): Promise<RunLockClaim> => {
   const lockToken = ctx.newLockToken();
   const acquired = await ctx.redis.setNx(lockKey(ctx.tenant, runId), lockToken, { expiresInSec: ctx.lockTtlSec });
   if (!acquired.ok) {
@@ -181,7 +192,7 @@ const acquireRunLockOrDefer = async (ctx: WakeupContext, runId: RunId): Promise<
     // wakeup rather than silently acking and dropping it.
     throw new Error(`hitl: lock acquire failed for ${runId}: ${acquired.error.kind}`, { cause: acquired.error });
   }
-  if (acquired.value) return lockToken;
+  if (acquired.value) return { kind: "acquired", lockToken };
 
   // Another worker holds the lock (mid-slice for this run). Do NOT drop
   // this wakeup — the decision that triggered it is durable in Redis but
@@ -194,7 +205,7 @@ const acquireRunLockOrDefer = async (ctx: WakeupContext, runId: RunId): Promise<
   if (!requeued.ok) {
     throw new Error(`hitl: failed to defer wakeup for ${runId}: ${requeued.error.kind}`, { cause: requeued.error });
   }
-  return undefined;
+  return DEFERRED;
 };
 
 interface LeaseRenewal {
@@ -314,9 +325,12 @@ const processWakeup = async (
     });
   }
   const runId = trigger.value.state;
-  const lockToken = await acquireRunLockOrDefer(ctx, runId);
-  if (lockToken === undefined) return;
-  await processRunUnderLock(ctx, runId, lockToken, processRun);
+  const claim = await acquireRunLockOrDefer(ctx, runId);
+  await match(claim)
+    .with({ kind: "acquired" }, ({ lockToken }) => processRunUnderLock(ctx, runId, lockToken, processRun))
+    // Another worker holds the lease; the wakeup is re-enqueued, nothing to run here.
+    .with({ kind: "deferred" }, () => undefined)
+    .exhaustive();
 };
 
 export const createRunQueue = (deps: RunQueueDeps): RunQueueHandle => {
