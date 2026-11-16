@@ -16,6 +16,7 @@ import {
   emptyRegistry,
   registryOf,
   tenantConfig,
+  parseTenantConfig,
   register,
   deregister,
   reconfigure,
@@ -27,6 +28,7 @@ import {
 import type {
   ActiveTenantConfig,
   TenantConfigBase,
+  TenantConfigFault,
   TenantRegistry,
 } from "../../../supervisor/registry/tenant-registry.js";
 
@@ -66,17 +68,132 @@ const seededRegistry = (seed: readonly ActiveTenantConfig[]): TenantRegistry => 
 
 // ── Smart constructor (parse-don't-validate) ─────────────────────────────────
 
+const faultOf = (input: TenantConfigBase): TenantConfigFault | undefined => {
+  const parsed = parseTenantConfig(input);
+  return parsed.ok ? undefined : parsed.error;
+};
+
+describe("parseTenantConfig — one typed fault per invariant", () => {
+  const valid = (): TenantConfigBase => makeConfig("a");
+  const cases: ReadonlyArray<{
+    readonly name: string;
+    readonly input: TenantConfigBase;
+    readonly fault: TenantConfigFault;
+    readonly message: string;
+  }> = [
+    { name: "empty team", input: { ...valid(), team: "" }, fault: { kind: "empty-team" }, message: "team must be non-empty" },
+    { name: "empty fsRoot", input: { ...valid(), fsRoot: "" }, fault: { kind: "empty-fs-root" }, message: "fsRoot must be non-empty" },
+    {
+      name: "foreign fsRoot",
+      input: { ...valid(), fsRoot: "/srv/b" },
+      fault: { kind: "fs-root-not-tenant-owned" },
+      message: "fsRoot must be '/srv/a' or a canonical descendant",
+    },
+    { name: "empty dagsRoot", input: { ...valid(), dagsRoot: "" }, fault: { kind: "empty-dags-root" }, message: "dagsRoot must be non-empty" },
+    {
+      name: "foreign dagsRoot",
+      input: { ...valid(), dagsRoot: "/dags/b" },
+      fault: { kind: "dags-root-not-tenant-owned" },
+      message: "dagsRoot must be '/dags/a' or a canonical descendant",
+    },
+    {
+      name: "empty realm",
+      input: { ...valid(), keycloakClientMapping: { realm: "", clientId: "c", agentClientIdsByDag: {} } },
+      fault: { kind: "empty-keycloak-client" },
+      message: "keycloak realm and clientId must be non-empty",
+    },
+    {
+      name: "empty clientId",
+      input: { ...valid(), keycloakClientMapping: { realm: "fugue", clientId: "", agentClientIdsByDag: {} } },
+      fault: { kind: "empty-keycloak-client" },
+      message: "keycloak realm and clientId must be non-empty",
+    },
+    {
+      name: "empty agent client id",
+      input: { ...valid(), keycloakClientMapping: { realm: "fugue", clientId: "c", agentClientIdsByDag: { "lead-desk": "" } } },
+      fault: { kind: "empty-agent-client-id", dagId: "lead-desk" },
+      message: "agentClientIdsByDag['lead-desk'] must be a non-empty client id",
+    },
+    {
+      name: "negative admission limit",
+      input: { ...valid(), admission: { maxConcurrentRuns: -1, maxQueuedRuns: 0 } },
+      fault: { kind: "invalid-admission-limits" },
+      message: "admission limits must be non-negative integers",
+    },
+    {
+      name: "fractional admission limit",
+      input: { ...valid(), admission: { maxConcurrentRuns: 0, maxQueuedRuns: 1.5 } },
+      fault: { kind: "invalid-admission-limits" },
+      message: "admission limits must be non-negative integers",
+    },
+  ];
+
+  for (const c of cases) {
+    it(`${c.name} → ${c.fault.kind}, rendered as config-invalid at the HostError boundary`, () => {
+      expect(faultOf(c.input)).toEqual(c.fault);
+      expect(tenantConfig(c.input)).toEqual({
+        ok: false,
+        error: { kind: "config-invalid", message: `tenant 'a': ${c.message}` },
+      });
+    });
+  }
+
+  it("reports the FIRST fault in field order (team, fsRoot, dagsRoot, keycloak, admission)", () => {
+    const allBad: TenantConfigBase = {
+      ...valid(),
+      team: "",
+      fsRoot: "",
+      dagsRoot: "",
+      keycloakClientMapping: { realm: "", clientId: "", agentClientIdsByDag: {} },
+      admission: { maxConcurrentRuns: -1, maxQueuedRuns: -1 },
+    };
+    expect(faultOf(allBad)?.kind).toBe("empty-team");
+    expect(faultOf({ ...allBad, team: "t" })?.kind).toBe("empty-fs-root");
+    expect(faultOf({ ...allBad, team: "t", fsRoot: "/srv/a" })?.kind).toBe("empty-dags-root");
+    expect(faultOf({ ...allBad, team: "t", fsRoot: "/srv/a", dagsRoot: "/dags/a" })?.kind).toBe("empty-keycloak-client");
+    expect(faultOf({ ...valid(), admission: { maxConcurrentRuns: -1, maxQueuedRuns: -1 } })?.kind).toBe("invalid-admission-limits");
+  });
+
+  it("property: a valid config parses to an active config carrying its fields, detached from the input", () => {
+    fc.assert(fc.property(
+      fc.constantFrom("a", "b", "c"),
+      fc.nat({ max: 1_000 }),
+      fc.nat({ max: 1_000 }),
+      fc.dictionary(fc.stringMatching(/^[a-z][a-z-]{0,7}$/), fc.string({ minLength: 1, maxLength: 8 })),
+      fc.boolean(),
+      (id, maxConcurrentRuns, maxQueuedRuns, agentClientIdsByDag, eagerPin) => {
+        const input: TenantConfigBase = {
+          id: tid(id),
+          team: `${id}-team`,
+          keycloakClientMapping: { realm: "fugue", clientId: `${id}-client`, agentClientIdsByDag },
+          fsRoot: `/srv/${id}`,
+          dagsRoot: `/dags/${id}`,
+          secretsRef: markSecretsRef(`vault://${id}`),
+          admission: { maxConcurrentRuns, maxQueuedRuns },
+          eagerPin,
+        };
+        const parsed = parseTenantConfig(input);
+        expect(parsed.ok).toBe(true);
+        if (!parsed.ok) return;
+        expect(parsed.value).toMatchObject({
+          status: "active",
+          id: input.id,
+          team: input.team,
+          keycloakClientMapping: input.keycloakClientMapping,
+          fsRoot: input.fsRoot,
+          dagsRoot: input.dagsRoot,
+          secretsRef: input.secretsRef,
+          admission: input.admission,
+          eagerPin: input.eagerPin,
+        });
+        expect(parsed.value.admission).not.toBe(input.admission);
+        expect(parsed.value.keycloakClientMapping.agentClientIdsByDag).not.toBe(agentClientIdsByDag);
+      },
+    ));
+  });
+});
+
 describe("tenantConfig parse boundary", () => {
-  it("rejects empty team", () => {
-    const r = tenantConfig({ ...makeConfig("a"), team: "" });
-    expect(isErr(r)).toBe(true);
-  });
-
-  it("rejects empty fsRoot", () => {
-    const r = tenantConfig({ ...makeConfig("a"), fsRoot: "" });
-    expect(isErr(r)).toBe(true);
-  });
-
   it("accepts only this tenant's canonical /srv subtree as fsRoot", () => {
     for (const fsRoot of [
       "srv/a",
@@ -93,11 +210,6 @@ describe("tenantConfig parse boundary", () => {
     }
     expect(isOk(tenantConfig({ ...makeConfig("a"), fsRoot: "/srv/a" }))).toBe(true);
     expect(isOk(tenantConfig({ ...makeConfig("a"), fsRoot: "/srv/a/documents" }))).toBe(true);
-  });
-
-  it("rejects empty dagsRoot", () => {
-    const r = tenantConfig({ ...makeConfig("a"), dagsRoot: "" });
-    expect(isErr(r)).toBe(true);
   });
 
   it("accepts only this tenant's canonical /dags subtree as dagsRoot", () => {
@@ -147,11 +259,6 @@ describe("tenantConfig parse boundary", () => {
     expect(same.ok && same.value === reg.value).toBe(true); // identical → same reference
     const moved = register(reg.value, makeConfig("a", { dagsRoot: "/dags/a/bundle-2" }), 1000);
     expect(moved.ok && moved.value !== reg.value).toBe(true); // changed → new registry
-  });
-
-  it("rejects negative or non-integer admission limits", () => {
-    expect(isErr(tenantConfig({ ...makeConfig("a"), admission: { maxConcurrentRuns: -1, maxQueuedRuns: 0 } }))).toBe(true);
-    expect(isErr(tenantConfig({ ...makeConfig("a"), admission: { maxConcurrentRuns: 1.5, maxQueuedRuns: 0 } }))).toBe(true);
   });
 
   it("does not allow an unparsed structural config to inhabit ActiveTenantConfig", () => {

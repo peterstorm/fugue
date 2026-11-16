@@ -273,89 +273,139 @@ const isTenantOwnedPath = (
 // ── Smart constructor (parse-don't-validate) ────────────────────────────────
 
 /**
- * The first invariant a `TenantConfigBase` violates, or `undefined` when it is
- * valid. PURE; checks run in a fixed order so the FIRST fault is the one reported.
+ * The invariant a `TenantConfigBase` violates — the typed error of
+ * `parseTenantConfig`. One variant per invariant, so a caller can tell the
+ * faults apart without reading a message string; `describeTenantConfigFault`
+ * is the one rendering of each.
  */
-const configInvariantViolation = (input: TenantConfigBase): string | undefined => {
-  if (input.team.length === 0) {
-    return "team must be non-empty";
-  }
-  if (input.fsRoot.length === 0) {
-    return "fsRoot must be non-empty";
-  }
-  // fsRoot is the recursive purge target. Parse-don't-validate it into the
-  // tenant-owned `/srv/<tenantId>` subtree so arbitrary host and sibling-tenant
-  // deletion targets are impossible after registration.
-  if (!isTenantOwnedPath(input.fsRoot, "/srv", input.id)) {
-    return `fsRoot must be '/srv/${input.id}' or a canonical descendant`;
-  }
-  if (input.dagsRoot.length === 0) {
-    return "dagsRoot must be non-empty";
-  }
-  // dagsRoot becomes DAGS_LOCAL_PATH and therefore code-loading authority.
-  // Restrict it to this tenant's `/dags/<tenantId>` subtree so a worker cannot
-  // discover host code or another tenant's staged bundle.
-  if (!isTenantOwnedPath(input.dagsRoot, "/dags", input.id)) {
-    return `dagsRoot must be '/dags/${input.id}' or a canonical descendant`;
-  }
-  if (input.keycloakClientMapping.realm.length === 0 || input.keycloakClientMapping.clientId.length === 0) {
-    return "keycloak realm and clientId must be non-empty";
-  }
-  // Per-DAG agent-client ids must be non-empty — same invariant the env-side
-  // `AGENT_CLIENT_MAP` enforces (`domain/config.ts`, `z.string().min(1)`: "dagId →
-  // non-empty Keycloak client id"). Carried here so the registration/hydration
-  // parse boundary rejects `""` BEFORE the worker-side minting consumer is wired,
-  // rather than letting a blank client id surface as a fail-open later.
-  for (const [dagId, clientId] of Object.entries(input.keycloakClientMapping.agentClientIdsByDag)) {
-    if (clientId.length === 0) {
-      return `agentClientIdsByDag['${dagId}'] must be a non-empty client id`;
-    }
-  }
-  const { maxConcurrentRuns, maxQueuedRuns } = input.admission;
-  if (!Number.isInteger(maxConcurrentRuns) || maxConcurrentRuns < 0 || !Number.isInteger(maxQueuedRuns) || maxQueuedRuns < 0) {
-    return "admission limits must be non-negative integers";
-  }
-  return undefined;
+export type TenantConfigFault =
+  | { readonly kind: "empty-team" }
+  | { readonly kind: "empty-fs-root" }
+  | { readonly kind: "fs-root-not-tenant-owned" }
+  | { readonly kind: "empty-dags-root" }
+  | { readonly kind: "dags-root-not-tenant-owned" }
+  | { readonly kind: "empty-keycloak-client" }
+  | { readonly kind: "empty-agent-client-id"; readonly dagId: string }
+  | { readonly kind: "invalid-admission-limits" };
+
+type Parsed<T> = Result<T, TenantConfigFault>;
+
+/**
+ * A tenant-owned root: non-empty, then inside `<platformRoot>/<id>`.
+ * `fsRoot` is the recursive purge target and `dagsRoot` becomes
+ * `DAGS_LOCAL_PATH` (code-loading authority), so both are parsed into the
+ * tenant's own platform subtree — host paths and sibling tenants' subtrees are
+ * not representable after registration.
+ */
+const parseOwnedRoot = (
+  path: string,
+  platformRoot: "/srv" | "/dags",
+  id: TenantId,
+  faults: { readonly empty: TenantConfigFault; readonly notOwned: TenantConfigFault },
+): Parsed<string> => {
+  if (path.length === 0) return err(faults.empty);
+  return isTenantOwnedPath(path, platformRoot, id) ? ok(path) : err(faults.notOwned);
 };
 
 /**
- * The parse boundary for a `TenantConfig`. Produces an ACTIVE config
- * (`status:"active"`): a smart constructor builds the resolvable state, and
- * deregistration is a TRANSITION (`deregister`), not a constructor input — so
- * there is nothing to strip, the active variant simply cannot carry a tombstone.
- *
- * The `id` and `secretsRef` arrive already branded (their own smart constructors
- * `tenantId` / `markSecretsRef` are the seams that validate/brand them), so this
- * constructor's job is to validate the remaining INVARIANTS and reject illegal
- * states up front:
- *   - non-empty team and tenant-owned canonical fsRoot/dagsRoot paths,
- *   - non-negative INTEGER admission limits,
- *   - a non-empty realm/clientId and non-empty per-DAG agent client ids.
- * Returns `Result` (never throws) since configs arrive from registration data.
+ * A detached copy of the Keycloak mapping with a non-empty realm/clientId and
+ * non-empty per-DAG agent-client ids — the same invariant the env-side
+ * `AGENT_CLIENT_MAP` enforces (`domain/config.ts`, `z.string().min(1)`), carried
+ * here so the registration/hydration boundary rejects `""` before the
+ * worker-side minting consumer can see a blank client id.
  */
-export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig, HostError> => {
-  const violation = configInvariantViolation(input);
-  if (violation !== undefined) {
-    return err({ kind: "config-invalid", message: `tenant '${input.id}': ${violation}` });
+const parseKeycloakClientMapping = (mapping: KeycloakClientMapping): Parsed<KeycloakClientMapping> => {
+  if (mapping.realm.length === 0 || mapping.clientId.length === 0) {
+    return err({ kind: "empty-keycloak-client" });
   }
-  const { maxConcurrentRuns, maxQueuedRuns } = input.admission;
-  const active: ActiveTenantConfig = {
+  for (const [dagId, clientId] of Object.entries(mapping.agentClientIdsByDag)) {
+    if (clientId.length === 0) return err({ kind: "empty-agent-client-id", dagId });
+  }
+  return ok({
+    realm: mapping.realm,
+    clientId: mapping.clientId,
+    agentClientIdsByDag: { ...mapping.agentClientIdsByDag },
+  });
+};
+
+const isCount = (n: number): boolean => Number.isInteger(n) && n >= 0;
+
+/** A detached copy of the admission ceilings, both non-negative integers. */
+const parseTenantLimits = ({ maxConcurrentRuns, maxQueuedRuns }: TenantLimits): Parsed<TenantLimits> =>
+  isCount(maxConcurrentRuns) && isCount(maxQueuedRuns)
+    ? ok({ maxConcurrentRuns, maxQueuedRuns })
+    : err({ kind: "invalid-admission-limits" });
+
+/**
+ * The pure parse of a `TenantConfigBase` into an `ActiveTenantConfig`, or the
+ * FIRST invariant it violates. Fields are parsed in a fixed order (team, fsRoot,
+ * dagsRoot, Keycloak mapping, admission) so the reported fault is
+ * deterministic; each parsed piece is the value the config is built from.
+ */
+export const parseTenantConfig = (input: TenantConfigBase): Parsed<ActiveTenantConfig> => {
+  if (input.team.length === 0) return err({ kind: "empty-team" });
+  const fsRoot = parseOwnedRoot(input.fsRoot, "/srv", input.id, {
+    empty: { kind: "empty-fs-root" },
+    notOwned: { kind: "fs-root-not-tenant-owned" },
+  });
+  if (!fsRoot.ok) return fsRoot;
+  const dagsRoot = parseOwnedRoot(input.dagsRoot, "/dags", input.id, {
+    empty: { kind: "empty-dags-root" },
+    notOwned: { kind: "dags-root-not-tenant-owned" },
+  });
+  if (!dagsRoot.ok) return dagsRoot;
+  const keycloakClientMapping = parseKeycloakClientMapping(input.keycloakClientMapping);
+  if (!keycloakClientMapping.ok) return keycloakClientMapping;
+  const admission = parseTenantLimits(input.admission);
+  if (!admission.ok) return admission;
+  return ok({
     [VALIDATED_TENANT_CONFIG]: true,
     status: "active",
     id: input.id,
     team: input.team,
-    keycloakClientMapping: {
-      realm: input.keycloakClientMapping.realm,
-      clientId: input.keycloakClientMapping.clientId,
-      agentClientIdsByDag: { ...input.keycloakClientMapping.agentClientIdsByDag },
-    },
-    fsRoot: input.fsRoot,
-    dagsRoot: input.dagsRoot,
+    keycloakClientMapping: keycloakClientMapping.value,
+    fsRoot: fsRoot.value,
+    dagsRoot: dagsRoot.value,
     secretsRef: input.secretsRef,
-    admission: { maxConcurrentRuns, maxQueuedRuns },
+    admission: admission.value,
     eagerPin: input.eagerPin,
-  };
-  return ok(active);
+  });
+};
+
+/** The operator-facing rendering of a fault for tenant `id`. */
+export const describeTenantConfigFault = (fault: TenantConfigFault, id: TenantId): string =>
+  match(fault)
+    .with({ kind: "empty-team" }, () => "team must be non-empty")
+    .with({ kind: "empty-fs-root" }, () => "fsRoot must be non-empty")
+    .with({ kind: "fs-root-not-tenant-owned" }, () => `fsRoot must be '/srv/${id}' or a canonical descendant`)
+    .with({ kind: "empty-dags-root" }, () => "dagsRoot must be non-empty")
+    .with({ kind: "dags-root-not-tenant-owned" }, () => `dagsRoot must be '/dags/${id}' or a canonical descendant`)
+    .with({ kind: "empty-keycloak-client" }, () => "keycloak realm and clientId must be non-empty")
+    .with({ kind: "empty-agent-client-id" }, ({ dagId }) => `agentClientIdsByDag['${dagId}'] must be a non-empty client id`)
+    .with({ kind: "invalid-admission-limits" }, () => "admission limits must be non-negative integers")
+    .exhaustive();
+
+/**
+ * The parse boundary for a `TenantConfig`, in `HostError` terms. Produces an
+ * ACTIVE config (`status:"active"`): a smart constructor builds the resolvable
+ * state, and deregistration is a TRANSITION (`deregister`), not a constructor
+ * input — so there is nothing to strip, the active variant simply cannot carry
+ * a tombstone.
+ *
+ * The `id` and `secretsRef` arrive already branded (their own smart constructors
+ * `tenantId` / `markSecretsRef` are the seams that validate/brand them);
+ * `parseTenantConfig` parses the remaining invariants:
+ *   - non-empty team and tenant-owned canonical fsRoot/dagsRoot paths,
+ *   - non-negative INTEGER admission limits,
+ *   - a non-empty realm/clientId and non-empty per-DAG agent client ids.
+ * A fault maps to `config-invalid` naming the tenant. Returns `Result` (never
+ * throws) since configs arrive from registration data.
+ */
+export const tenantConfig = (input: TenantConfigBase): Result<ActiveTenantConfig, HostError> => {
+  const parsed = parseTenantConfig(input);
+  return parsed.ok
+    ? parsed
+    : err({ kind: "config-invalid", message: `tenant '${input.id}': ${describeTenantConfigFault(parsed.error, input.id)}` });
 };
 
 // ── Structural equality (drives idempotency) ─────────────────────────────────
