@@ -116,7 +116,7 @@ MLflow's built-in metric. Sends prediction + context to gpt-4o-mini and asks: "I
 
 #### grounding (deterministic, no LLM)
 
-Custom scorer that loads the raw customer fixture JSON (`fixtures/customers/cust-XXX.json`) and runs 4 checks against the actual source conversation data:
+Custom scorer that loads the raw customer fixture JSON (`apps/customer-summary/fixtures/customers/cust-XXX.json`) and runs 4 checks against the actual source conversation data:
 
 1. **Conversation count** — if the summary claims "3 conversations", does the fixture actually have 3?
 2. **Customer name** — if mentioned, does it match the fixture?
@@ -141,7 +141,7 @@ mlflow.evaluate() automatically creates a run in the experiment with:
 | Data | Location | Purpose |
 |------|----------|---------|
 | Eval cases | `apps/customer-summary/fixtures/eval/cases.json` | Which customers to test + gold-standard reference summaries |
-| Customer fixtures | `fixtures/customers/cust-XXX.json` | Raw conversation data (app input + grounding scorer source) |
+| Customer fixtures | `apps/customer-summary/fixtures/customers/cust-XXX.json` | Raw conversation data (app input + grounding scorer source) |
 | Generated summaries | Live from `POST /summarize` | The actual output being evaluated |
 | LLM judge | Azure OpenAI gpt-4o-mini | Scores answer_correctness, faithfulness, relevance |
 
@@ -211,7 +211,7 @@ python3 eval/run.py --mode=full --backend=both
 | `APP_BASE_URL` | `http://host.containers.internal:3000` | Summary service URL |
 | `MLFLOW_TRACKING_URI` | — | MLflow server (e.g. `http://localhost:5000`) — mlflow backend |
 | MLFLOW_EXPERIMENT_NAME | `Default` | Experiment to log results to |
-| `EVAL_CASES_PATH` | fixtures/eval/cases.json | Path to eval cases |
+| `EVAL_CASES_PATH` | fixtures/eval/cases.json (relative to the eval's working directory, apps/customer-summary) | Path to eval cases |
 | `EVAL_MODE` | `full` | Default mode if `--mode` not passed (`full`\|`ci`); `--mode` wins |
 | `EVAL_BACKEND` | `mlflow` | Default backend if `--backend` not passed (`mlflow`\|`foundry`\|`both`); `--backend` wins |
 | `AZURE_OPENAI_ENDPOINT` | — | Azure OpenAI endpoint (judge creds, reused by both backends) |
@@ -246,7 +246,7 @@ apps/customer-summary/
 
 ## Adding New Eval Cases
 
-1. Create the customer fixture at `fixtures/customers/cust-XXX.json`
+1. Create the customer fixture at `apps/customer-summary/fixtures/customers/cust-XXX.json`
 2. Add an entry to `apps/customer-summary/fixtures/eval/cases.json` with a human-written reference summary
 3. Run `python3 eval/run.py --mode=full` to verify
 

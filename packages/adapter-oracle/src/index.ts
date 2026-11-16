@@ -616,8 +616,10 @@ const createPooledQueryable = (oracledb: OracleDbModule, getPool: () => Promise<
  * errors routinely echo the supplied connectString/DSN, and this error
  * propagates to the boot log and the abort HostError (createHost
  * connectAll). Mirror healthCheckWithTimeout: re-throw with the message run
- * through stripCredentials, releasing the connection in finally (FR-041 /
- * NFR-020 / SC-008).
+ * through stripCredentials (FR-041 / NFR-020 / SC-008). The connection, when
+ * one was acquired, is released afterwards as a separate step, not in a
+ * finally: a release failure is warned when a validation failure already
+ * exists (that failure is the one thrown), and otherwise thrown itself.
  */
 const validateConnectivity = async (
   oracledb: OracleDbModule,

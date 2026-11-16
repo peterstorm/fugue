@@ -21,7 +21,7 @@ Both reasons have since dissolved:
 
 - ADR 0018 brought `onBackground` to the SM path.
 - ADR 0019 made the routing predicate explicit and exposed an in-memory `JobLike` fallback so the SM path runs cleanly without a durable backend.
-- Wave 7 §7.1 unified runNode into `packages/framework/src/dag-runtime/run-node.ts`. Both call sites already produced identical observer event sequences; with the duplication removed, there is no behavioral gap left to argue about.
+- Wave 7 §7.1 unified runNode into shared/run-node.ts (since moved to dag-runtime/). Both call sites already produced identical observer event sequences; with the duplication removed, there is no behavioral gap left to argue about.
 - Wave 7 §7.2 broke the `executor/ ↔ dag-runtime/` cycle by moving shared utilities into `packages/framework/src/shared/`.
 
 What remains is a routing predicate, a thin runDag wrapper around runDagInner, and a duplicate orchestration layer that does the same thing as `runDagStateful` minus the kernel.

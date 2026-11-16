@@ -239,7 +239,7 @@ gap.
 
 - The verified subject token threads **host-side only**: the middleware retains
   the raw verified bearer as a branded, opaque reference (e.g.
-  `SubjectToken` — branded so it stays out of logs and audit payloads
+  VerifiedSubjectToken, now SubjectToken — branded so it stays out of logs and audit payloads
   by convention, mirroring how `canRunDag` carries a capability rather than
   data) carried on the host's run context next to the identity, and injected
   into the broker deps at the wiring site.

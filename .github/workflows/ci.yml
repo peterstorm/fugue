@@ -9,7 +9,3 @@ on:
 jobs:
   verification:
     uses: ./.github/workflows/verify.yml
-    # Called (reusable) workflows do not inherit repository secrets implicitly;
-    # verify needs LOOM_DEPLOY_KEY to clone the private peterstorm/loom git
-    # dependency.
-    secrets: inherit

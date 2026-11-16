@@ -365,8 +365,10 @@ const saDispatch = (
  * cache would need its OWN key derivation — the two cells are separate cells
  * precisely so that split can happen without touching the app-only path.
  *
- * CRITICAL (review I1): every `cells.x = store(cells.x, …)` reads the CURRENT
- * cell at assignment time (synchronously, after the await) — it NEVER assigns a
+ * CRITICAL (review I1): every cell assignment
+ * (`cells.saCache = storeFreshToken(deps, cells.saCache, …)` in `obtainSaToken`,
+ * and the `appOnlyCache` twin in `doAcquireAppToken`) reads the CURRENT cell at
+ * assignment time (synchronously, after the await) — it NEVER assigns a
  * pre-await snapshot — so a mint of triple A cannot clobber a concurrent mint
  * of triple B (lost update). And concurrent mints of the SAME triple are
  * single-flighted via `inFlight`, so SC-008's "≤1 token request per triple per

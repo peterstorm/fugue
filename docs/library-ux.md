@@ -178,7 +178,10 @@ This is what runs for the simple summarize-a-customer DAG with no retries and
 no human review (e.g. the current `apps/customer-summary` HTTP handler).
 
 ### Loop
-runDagInner (`executor.ts:223`):
+Historically this loop lived in runDagInner in the old executor module.
+ADR-0021 removed it: every run now goes through `runDag`
+(`packages/framework/src/executor/run-dag.ts`) into the state-machine kernel.
+The legacy loop was:
 
 1. **Validate DAG shape** (cycles, dup ids, edge endpoints resolve to known
    nodes, every non-source root has a `$input` edge, output node exists).

@@ -199,6 +199,87 @@ describe("pr53 repair — bootstrap seams", () => {
     expect(calls).toHaveLength(2);
     expect(calls[1].opts).toBeUndefined();
   });
+
+  test("buildCheckpointWriter throws an Error naming run, node, kind and the underlying message when saveNode fails", async () => {
+    const failure = {
+      kind: "checkpoint-write-failed" as const,
+      runId: mkRunId("run-9"),
+      nodeId: mkNodeId("node-9"),
+      message: "output at $.payload is not lossless",
+    };
+    const cp = {
+      saveNode: async () => ({ ok: false as const, error: failure }),
+    } as unknown as Checkpointer;
+    const writer = buildCheckpointWriter(cp);
+
+    const thrown = await writer.write(mkRunId("run-9"), mkNodeId("node-9"), { a: 1 }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(thrown).toBeInstanceOf(Error);
+    const message = (thrown as Error).message;
+    expect(message).toContain("run=run-9");
+    expect(message).toContain("node=node-9");
+    expect(message).toContain("kind=checkpoint-write-failed");
+    expect(message).toContain("output at $.payload is not lossless");
+    // The structured error rides along for programmatic inspection.
+    expect((thrown as Error).cause).toBe(failure);
+  });
+
+  test("buildHealth's checkMlflow warns once per up/down transition and never on the first probe or a steady state", async () => {
+    const config = loadConfig();
+    const { logger, diagnostics } = recordingLogger();
+    const originalFetch = globalThis.fetch;
+    // Scripted MLflow health: up, up, down, down, up.
+    const outcomes: ReadonlyArray<"up" | "down"> = ["up", "up", "down", "down", "up"];
+    let call = 0;
+    globalThis.fetch = (async () => {
+      const outcome = outcomes[call++];
+      if (outcome === "down") throw new Error("connect ECONNREFUSED");
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const health = buildHealth(
+        config,
+        logger,
+        {
+          redis: null,
+          isHealthy: () => false,
+          contextCache: null,
+          checkpointWriter: null,
+          checkpointer: null,
+        },
+        { kind: "configured", llm: new FakeLlmClient(new Map()) },
+        null,
+      );
+
+      // First probe: no prior state, so no transition to report.
+      expect(await health.checkMlflow?.()).toBe(true);
+      expect(diagnostics).toEqual([]);
+
+      // Unchanged (up → up): silent.
+      expect(await health.checkMlflow?.()).toBe(true);
+      expect(diagnostics).toEqual([]);
+
+      // up → down: exactly one failure warning carrying the probe detail.
+      expect(await health.checkMlflow?.()).toBe(false);
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]).toStartWith("warn: [health] MLflow failed");
+      expect(diagnostics[0]).toContain("ECONNREFUSED");
+
+      // Unchanged (down → down): silent.
+      expect(await health.checkMlflow?.()).toBe(false);
+      expect(diagnostics).toHaveLength(1);
+
+      // down → up: exactly one recovery warning.
+      expect(await health.checkMlflow?.()).toBe(true);
+      expect(diagnostics).toHaveLength(2);
+      expect(diagnostics[1]).toStartWith("warn: [health] MLflow recovered");
+      expect(call).toBe(outcomes.length);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe("pr53 repair — guardrail wire schemas", () => {

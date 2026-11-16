@@ -122,8 +122,10 @@ const isMeridiemAt = (fmt: string, i: number): boolean =>
   fmt.substr(i, 5).toUpperCase() === "上午/下午";
 
 /**
- * SheetJS 0.18.5 fmt_is_date (SSF.is_date), ported statement for statement
- * so the differential test can hold it to the original. Quoted literals,
+ * SheetJS 0.18.5 fmt_is_date (SSF.is_date), ported with each scanning loop
+ * extracted into a named helper. It is behaviourally equivalent to the
+ * original, not a statement-for-statement copy; the differential test holds
+ * it to the original's answers. Quoted literals,
  * escapes, padding and number tokens are skipped; any date/time token
  * (or `B1`/`B2`, A/P, AM/PM, or an `[h]`-style elapsed bracket) makes it a date.
  */

@@ -290,7 +290,7 @@ Lives in the `fugue-platform` realm package (`~/dev/java/keycloakConfigAsCode`).
 
 **Applying it to a target environment.** The realm is applied standalone via the
 repo's runner (the selector lets you push *only* `fugue-platform`, leaving the
-shared toolbox/`2ndbrands` realms untouched):
+shared toolbox and 2ndbrands realms untouched):
 
 ```sh
 cd ~/dev/java/keycloakConfigAsCode

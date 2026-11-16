@@ -878,9 +878,9 @@ const wireHitlRunEngine = async (args: HitlWiringArgs): Promise<HitlWiring> => {
 // ── Host shell state ─────────────────────────────────────────────────────
 
 /**
- * The host's per-instance mutable state (imperative shell). Every lifecycle step
- * below takes this explicitly; the field set is exactly the mutable `let`s the
- * host owns. Teardown clears the HITL/capability fields so it stays idempotent.
+ * The host's per-instance mutable state (imperative shell) and its single
+ * owner: every lifecycle step below takes this explicitly. Teardown clears the
+ * HITL/capability fields so it stays idempotent.
  */
 interface HostShell {
   hostState: HostState;
@@ -1156,7 +1156,7 @@ const createTeardownRecorder = (logger: LogPort): TeardownRecorder => {
     failures.push(new Error(`${message}: ${diagnostic}`, { cause: error }));
     logWithoutThrowing(logger, "error", message, { error: diagnostic });
   };
-  // Sibling of `performShutdown`'s `attempt`, but awaiting: each teardown step
+  // Async counterpart of `ShutdownRecorder.attempt`: each teardown step
   // must record its own failure and let EVERY later resource still be
   // attempted, so no step may propagate. Hand-rolling the try/catch per step
   // is how one of them would eventually be written without the fence.
@@ -1223,17 +1223,14 @@ const closeCapabilityHandles = async (
  * order: server-owned reconciliation → HITL worker → capabilities →
  * infrastructure (`deps.onShutdown`).
  *
- * ONE definition shared by the boot-abort path and `shutdown()`. The two used
- * to open-code the same five steps and had already drifted on two points; this
- * keeps the STRONGER behavior from each side, because each divergence had a
- * correct half:
- *   - Guarded logging + `safeErrorMessage` (from the boot-abort path). A
- *     broken logger, or a hostile thrown value whose `toString` throws, must
- *     never abort the remaining teardown — the resource leak that would cause
- *     is worse than the lost log line.
- *   - Surfacing `closeAll`'s failures (from `shutdown`). The boot-abort path
- *     discarded the returned list, so a capability that failed to close during
- *     a failed boot left no record of WHICH one.
+ * ONE definition shared by the boot-abort path and `shutdown()`, so the two
+ * cannot drift. It guarantees:
+ *   - Guarded logging + `safeErrorMessage`. A broken logger, or a hostile
+ *     thrown value whose `toString` throws, must never abort the remaining
+ *     teardown — the resource leak that would cause is worse than the lost
+ *     log line.
+ *   - Every `closeAll` failure is surfaced per capability, so a capability
+ *     that fails to close leaves a record of WHICH one.
  *
  * Stopping the server is deliberately NOT part of this: the two callers stop
  * it differently on purpose (`shutdown` fences `server.stop()` and continues;
@@ -1404,7 +1401,7 @@ const bindHttpServer = async (
   shell: HostShell,
   app: { readonly fetch: FetchHandler },
   routedTenant: TenantId,
-): Promise<Result<void, HostError>> => {
+): Promise<Result<number, HostError>> => {
   const { config, logger } = deps;
   const unixPath = deps.bind?.unix;
   const bindDesc = unixPath !== undefined ? `unix socket ${unixPath}` : `port ${config.PORT}`;
@@ -1422,15 +1419,13 @@ const bindHttpServer = async (
   // The catch above returns on any bind/chmod failure, so reaching here means the
   // server is bound and `bunServer` is assigned.
   const listening = bunServer;
-  shell.server = {
-    // A UDS server has no TCP port; report 0 so the handle stays well-typed
-    // without claiming a port the worker is not listening on.
-    port: listening?.port ?? (unixPath !== undefined ? 0 : config.PORT),
-    stop: () => listening?.stop(),
-  };
+  // A UDS server has no TCP port; report 0 so the handle stays well-typed
+  // without claiming a port the worker is not listening on.
+  const port = listening?.port ?? (unixPath !== undefined ? 0 : config.PORT);
+  shell.server = { port, stop: () => listening?.stop() };
   logger.info(`HTTP server listening on ${bindDesc}`);
   logHeaderVerificationPosture(deps, routedTenant);
-  return ok(undefined);
+  return ok(port);
 };
 
 // ── Sync loop + Redis liveness probe ─────────────────────────────────────
@@ -1657,12 +1652,11 @@ const foldRegistryConcurrency = (shell: HostShell, registry: Registry): void => 
   );
 };
 
-const logHostBooted = (shell: HostShell, registry: Registry, logger: SyncLogger): void => {
+const logHostBooted = (boundPort: number, registry: Registry, logger: SyncLogger): void => {
   logger.info("Host fully booted and ready to serve requests", {
-    // Use the typed `server.port` handle (0 in UDS/worker mode) rather than the
-    // raw `bunServer.port`, which is `undefined` for a UDS listener and would log
-    // a misleading absent port on the boot line.
-    port: shell.server?.port,
+    // The bound handle's port (0 in UDS/worker mode); a UDS listener's own port
+    // is `undefined` and would log a misleading absent port on the boot line.
+    port: boundPort,
     dagCount: registry.dags.size,
   });
 };
@@ -1739,6 +1733,6 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
   const shutdown = createShutdown(deps, shell);
   shell.signalHandle = registerSignalHandlers({ onShutdown: shutdown, logger });
 
-  logHostBooted(shell, registry, logger);
+  logHostBooted(bound.value, registry, logger);
   return ok(hostInstanceOf(shell, shutdown));
 };

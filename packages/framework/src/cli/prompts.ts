@@ -13,6 +13,7 @@
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { computePromptHash } from "../prompts/hash.js";
+import { ok, err, type Result } from "../types/result.js";
 
 export interface RegistryEntry {
   readonly version: string;
@@ -136,18 +137,15 @@ const readRegistry = async (registryPath: string): Promise<Record<string, Regist
 
 type PromptReport = { version: string; hash: string; status: PromptStatus };
 
-type PromptsInputs =
-  | {
-      readonly ok: true;
-      readonly files: ReadonlyMap<string, string>;
-      readonly existing: Record<string, RegistryEntry>;
-    }
-  | { readonly ok: false; readonly result: PromptsResult };
+interface PromptsInputs {
+  readonly files: ReadonlyMap<string, string>;
+  readonly existing: Record<string, RegistryEntry>;
+}
 
-const unreadableResult = (registryPath: string, problem: string): PromptsInputs => ({
-  ok: false,
-  result: { ok: false, registryPath, prompts: {}, problems: [problem] },
-});
+// The error arm IS the command's finished `{ ok: false, problems }` envelope,
+// so a caller returns it as-is.
+const unreadableResult = (registryPath: string, problem: string): Result<never, PromptsResult> =>
+  err({ ok: false, registryPath, prompts: {}, problems: [problem] });
 
 // The shared read half of `sync` and `check`. `registryHint` is appended to the
 // "registry.json unreadable" problem (sync tells the operator how to recover).
@@ -155,7 +153,7 @@ const loadPromptsInputs = async (
   dagDir: string,
   registryPath: string,
   registryHint: string,
-): Promise<PromptsInputs> => {
+): Promise<Result<PromptsInputs, PromptsResult>> => {
   // An unreadable prompts/ dir (EACCES/EIO/…, rethrown by readPromptFiles) is
   // an environment failure, not "no prompts" — fold it into the envelope
   // instead of syncing the registry down to {} (or flagging every registered
@@ -172,7 +170,7 @@ const loadPromptsInputs = async (
   // hand-edited registry isn't clobbered (and its version history lost) without
   // the operator knowing.
   try {
-    return { ok: true, files, existing: await readRegistry(registryPath) };
+    return ok({ files, existing: await readRegistry(registryPath) });
   } catch (e) {
     return unreadableResult(
       registryPath,
@@ -181,13 +179,10 @@ const loadPromptsInputs = async (
   }
 };
 
-// Accumulate in Maps, NOT plain Records: prompt names are filesystem-derived,
-// so a prompt file named __proto__.txt would hit the object-literal
-// prototype setter (entry silently vanishes from the written registry while
-// sync reports ok), and `existing[name]` for any Object.prototype property
-// name (`constructor`, `toString`, …) would read a truthy non-entry through
-// the prototype chain. `readRegistryEntry` guards the reads with Object.hasOwn;
-// Object.fromEntries at the serialization edge defines own properties only.
+// Prompt names are filesystem-derived, so `existing[name]` for any
+// Object.prototype property name (`constructor`, `toString`, …) would read a
+// truthy non-entry through the prototype chain. Object.hasOwn admits own
+// entries only.
 const readRegistryEntry = (
   existing: Record<string, RegistryEntry>,
   name: string,
@@ -208,6 +203,12 @@ const syncPromptEntry = (
 // Pure sync plan. `files` iterates in codepoint order already
 // (readPromptFiles), and `serializeRegistry` canonicalizes key order on write —
 // no locale-dependent sort anywhere on the path to registry bytes.
+//
+// Accumulate in Maps, NOT plain Records: prompt names are filesystem-derived,
+// so a prompt file named __proto__.txt would hit the object-literal prototype
+// setter (the entry silently vanishes from the written registry while sync
+// reports ok). Reads of `existing` go through `readRegistryEntry`;
+// Object.fromEntries at the serialization edge defines own properties only.
 const planSync = (
   files: ReadonlyMap<string, string>,
   existing: Record<string, RegistryEntry>,
@@ -234,8 +235,8 @@ export const runPromptsSync = async (dagDir: string): Promise<PromptsResult> => 
     registryPath,
     " — fix or remove it, then re-run `fugue prompts sync`",
   );
-  if (!inputs.ok) return inputs.result;
-  const { files, existing } = inputs;
+  if (!inputs.ok) return inputs.error;
+  const { files, existing } = inputs.value;
 
   const { prompts, next } = planSync(files, existing);
 
@@ -260,7 +261,7 @@ export const runPromptsSync = async (dagDir: string): Promise<PromptsResult> => 
 
 // Pure drift verdict (no writes): every way registry.json can disagree with the
 // prompt files, as problems, plus the per-prompt status for the files that are
-// registered. Map + Object.hasOwn for the same reason as `planSync`.
+// registered. Maps and `readRegistryEntry` for the same reasons as `planSync`.
 const checkRegistryDrift = (
   files: ReadonlyMap<string, string>,
   existing: Record<string, RegistryEntry>,
@@ -294,8 +295,8 @@ export const runPromptsCheck = async (dagDir: string): Promise<PromptsResult> =>
   const registryPath = join(dagDir, PROMPTS_DIR, REGISTRY_FILE);
 
   const inputs = await loadPromptsInputs(dagDir, registryPath, "");
-  if (!inputs.ok) return inputs.result;
+  if (!inputs.ok) return inputs.error;
 
-  const { problems, prompts } = checkRegistryDrift(inputs.files, inputs.existing);
+  const { problems, prompts } = checkRegistryDrift(inputs.value.files, inputs.value.existing);
   return { ok: problems.length === 0, registryPath, prompts: Object.fromEntries(prompts), problems };
 };

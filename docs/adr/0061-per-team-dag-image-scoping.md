@@ -63,7 +63,7 @@ Concretely:
   (`dags/{team}/…`); it must equal the `fugue.yaml` `team` field. Folders below
   it are free-form intra-team grouping (e.g. dags/business-sales/leads/lead-scoring/).
 - The baked-image `Dockerfile` takes `ARG TEAM` and copies **only**
-  `dags/${TEAM}/` (plus shared lib//`packages/` + that team's data image) —
+  `dags/${TEAM}/` (plus the shared lib/ and `packages/` code and that team's data image) —
   never `COPY . .`. This makes the scoping explicit and reviewable rather than an
   implicit property of a whole-repo copy.
 - **Never** ship a single all-teams image to multiple hosts, and **never** run

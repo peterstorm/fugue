@@ -89,12 +89,12 @@
 // `parseFileEventRecord` returns `Result<FileEventRecord, string>` because
 // on-disk data may be corrupt through no fault of the caller.
 //
-// Pure module — no I/O (INV-1; only framework-core imports — no Node
-// built-ins: `layout.js` (constants + the `sequenceDomainError` rule),
-// `state-machine/serialize.ts`
+// Pure module — no I/O (INV-1; no Node built-ins). Its imports are the
+// framework-core modules `./layout` (constants + the `sequenceDomainError`
+// rule), `../state-machine/serialize`
 // (`toJson`/`serializeValue`/`deserializeValue`/`deepJsonEqual`/
-// `validateSerializedValueGrammar`), `types/result.ts`, `types/safe-error.ts`,
-// `./boundary-error.ts`).
+// `validateSerializedValueGrammar`), `../types/result`, `../types/safe-error`
+// and `./boundary-error`, plus the pure third-party matcher ts-pattern.
 
 import {
   JOURNAL_SCHEMA_VERSION,
@@ -399,8 +399,8 @@ const unrepresentableKind = (operation: string, path: string, kind: string): Err
  * descend into, `false` for a scalar (null/undefined/string/number/boolean)
  * it admits as-is, and a throw for a kind JSON cannot represent — the name
  * is the requirement, and the throw IS the rejection of bigint/symbol/
- * function. The seven `typeof` results are a closed set matched exhaustively
- * — there is no `default` arm left to hide a kind this walk does not admit.
+ * function. Every `typeof` result is matched exhaustively — there is no
+ * `default` arm left to hide a kind this walk does not admit.
  */
 const requireWalkableObject = (
   operation: string,

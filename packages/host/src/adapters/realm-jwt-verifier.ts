@@ -1,6 +1,6 @@
 /**
  * createRealmJwtVerifier — the live, JWKS-backed implementation of the
- * `VerifyRealmJwt` port (`http/middleware/auth.ts`). It verifies a fugue-platform
+ * `VerifyRealmJwt` port (`domain/auth.ts`). It verifies a fugue-platform
  * realm JWT's SIGNATURE against the realm's published keys
  * (`jose.createRemoteJWKSet`, keys fetched from the realm, never hardcoded) and,
  * on success, brands the decoded claims with `markSignatureVerified` — the single

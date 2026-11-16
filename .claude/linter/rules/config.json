@@ -179,7 +179,7 @@
     },
     {
       "module": "packages/framework/src/queue-bullmq/",
-      "description": "The BullMQ/Redis queue adapter. Owns the only sanctioned bullmq + ioredis imports outside the redis checkpoint/cache adapters; may use the executor in tests.",
+      "description": "The BullMQ/Redis queue adapter: the framework's queue port implemented over bullmq + ioredis (the package-root rule and the host also permit those two, so this is not their only home). Production files read the queue port, the state-machine kernel, types and the logger; only its integration test may also import the executor and the shared framework test helpers (perFileAllow).",
       "allow": [
         "./",
         "packages/framework/src/queue-bullmq/",
@@ -187,8 +187,6 @@
         "packages/framework/src/state-machine/",
         "packages/framework/src/types/",
         "packages/framework/src/logger",
-        "packages/framework/src/executor/",
-        "packages/framework/src/__tests__/",
         "node:",
         "bullmq",
         "ioredis",
@@ -201,7 +199,16 @@
         "packages/host/",
         "@fuguejs/host",
         "hono"
-      ]
+      ],
+      "perFileAllow": {
+        "packages/framework/src/queue-bullmq/__tests__/queue-bullmq-adapter.test.ts": {
+          "allow": [
+            "packages/framework/src/executor/",
+            "packages/framework/src/__tests__/"
+          ],
+          "reason": "the adapter's integration test drives real DAG runs through the public executor and reuses the shared framework test helpers"
+        }
+      }
     },
     {
       "module": "packages/framework/",
@@ -225,8 +232,7 @@
         "@opentelemetry/",
         "@anthropic-ai/sdk",
         "@azure/",
-        "openai",
-        "@fuguejs\\/framework"
+        "openai"
       ],
       "deny": [
         "packages/host/",
@@ -238,7 +244,15 @@
         "@fuguejs/document-source",
         "hono",
         "pg"
-      ]
+      ],
+      "perFileExactAllow": {
+        "packages/framework/src/__tests__/cli/authored.test.ts": {
+          "allow": [
+            "@fuguejs\\/framework"
+          ],
+          "reason": "not an import: a regex literal (/} from \"@fuguejs\\/framework\";/) that matches generated dag.ts source, which the text-based import extractor reads as a specifier"
+        }
+      }
     },
     {
       "module": "packages/host/src/domain/",
@@ -270,7 +284,7 @@
     },
     {
       "module": "packages/host/src/sync/",
-      "description": "The git sync loop: timer-driven shell over the registry and the git adapter. Reads the domain and its ports; never the HTTP shell or the top-level wiring.",
+      "description": "The git sync loop: timer-driven shell over the registry and the git adapter port. Reads the domain and its ports; never an adapter, the HTTP shell, the lifecycle shell, the supervisor, the HITL subsystem or the top-level wiring (adapters and lifecycle depend on sync, so the reverse would be a cycle).",
       "allow": [
         "./",
         "packages/host/src/sync/",
@@ -283,8 +297,11 @@
         "bun:test"
       ],
       "deny": [
+        "packages/host/src/adapters/",
         "packages/host/src/http/",
         "packages/host/src/lifecycle/",
+        "packages/host/src/supervisor/",
+        "packages/host/src/hitl/",
         "packages/host/src/host",
         "packages/host/src/main",
         "hono",
@@ -294,16 +311,13 @@
     },
     {
       "module": "packages/host/src/http/",
-      "description": "The HTTP shell: Hono routes, handlers and middleware. Orchestrates the domain, the ports, the supervisor, the HITL service and the adapters it is wired with; never the top-level host wiring.",
+      "description": "The HTTP shell: Hono routes, handlers and middleware. Orchestrates the domain, the ports and the HITL service; the admin tenants handler alone reads the supervisor registry, lifecycle port and audit port. Never an adapter, the sync loop, the lifecycle shell or the top-level host wiring: adapters are injected at the wiring site.",
       "allow": [
         "./",
         "packages/host/src/http/",
         "packages/host/src/domain/",
         "packages/host/src/ports",
-        "packages/host/src/supervisor/",
         "packages/host/src/hitl/",
-        "packages/host/src/adapters/",
-        "packages/host/src/entrypoint-wiring/",
         "@fuguejs/framework",
         "hono",
         "ts-pattern",
@@ -314,47 +328,67 @@
         "fast-check"
       ],
       "deny": [
+        "packages/host/src/adapters/",
+        "packages/host/src/sync/",
+        "packages/host/src/lifecycle/",
         "packages/host/src/host",
         "packages/host/src/main",
         "ioredis",
         "bullmq"
-      ]
+      ],
+      "perFileAllow": {
+        "packages/host/src/http/handlers/admin/tenants.ts": {
+          "allow": [
+            "packages/host/src/supervisor/registry/",
+            "packages/host/src/supervisor/lifecycle/spawn-port",
+            "packages/host/src/supervisor/audit/audit-port"
+          ],
+          "reason": "the admin tenant routes parse tenant config, read the tenant registry, drive the worker-lifecycle port and record admin audit events — all supervisor-owned seams"
+        }
+      }
     },
     {
       "module": "packages/host/src/lifecycle/",
-      "description": "Boot, signals and the Redis probe: the process-lifecycle shell. Domain, ports, adapters and sync; never the HTTP shell or top-level wiring.",
+      "description": "Boot, signals and the Redis probe: the process-lifecycle shell. Domain and ports; startup alone runs the initial sync. Never an adapter, the HTTP shell, the supervisor, the HITL subsystem or top-level wiring.",
       "allow": [
         "./",
         "packages/host/src/lifecycle/",
         "packages/host/src/domain/",
         "packages/host/src/ports",
-        "packages/host/src/sync/",
-        "packages/host/src/adapters/",
         "@fuguejs/framework",
         "node:",
         "ts-pattern",
         "bun:test"
       ],
       "deny": [
+        "packages/host/src/adapters/",
+        "packages/host/src/http/",
+        "packages/host/src/supervisor/",
+        "packages/host/src/hitl/",
         "packages/host/src/host",
         "packages/host/src/main",
         "hono",
         "bullmq"
-      ]
+      ],
+      "perFileAllow": {
+        "packages/host/src/lifecycle/startup.ts": {
+          "allow": [
+            "packages/host/src/sync/sync-loop"
+          ],
+          "reason": "startup runs initialSync before the host serves, and takes the sync loop's SyncConfig and SyncLogger types"
+        }
+      }
     },
     {
       "module": "packages/host/src/adapters/",
-      "description": "The host's infrastructure adapters (Redis, git, Graph, Keycloak, spend authority, run executor). Implements domain-owned ports; may read the domain, the ports and the sibling shells it adapts, never the top-level wiring.",
+      "description": "The host's infrastructure adapters (Redis, git, Graph, Keycloak, spend authority, run executor). Implements domain-owned ports; reads the domain, the ports, the HITL subsystem and the entrypoint wiring. Two per-file grants cover the only shell edges: the Redis bundle's supervisor port types and the Oracle capability's SyncLogger type. Never the HTTP shell, the lifecycle shell or the top-level wiring.",
       "allow": [
         "./",
         "packages/host/src/adapters/",
         "packages/host/src/domain/",
         "packages/host/src/ports",
         "packages/host/src/hitl/",
-        "packages/host/src/supervisor/",
         "packages/host/src/entrypoint-wiring",
-        "packages/host/src/sync/",
-        "packages/host/src/http/",
         "@fuguejs/framework",
         "@fuguejs/http-auth",
         "@fuguejs/ms-graph",
@@ -370,11 +404,34 @@
         "fast-check"
       ],
       "deny": [
+        "packages/host/src/http/",
+        "packages/host/src/lifecycle/",
         "packages/host/src/host",
         "packages/host/src/main",
         "hono",
         "bullmq"
-      ]
+      ],
+      "perFileAllow": {
+        "packages/host/src/adapters/redis-bundle.ts": {
+          "allow": [
+            "packages/host/src/supervisor/secrets/redis-acl-provisioner",
+            "packages/host/src/supervisor/audit/audit-sink-log-redis"
+          ],
+          "reason": "the Redis bundle builds the ACL-admin and audit-stream adapters over its one connection, so it takes their port types (RedisAclAdminPort, AuditStreamPort) from the supervisor modules that own them"
+        },
+        "packages/host/src/adapters/oracle-capability.ts": {
+          "allow": [
+            "packages/host/src/sync/sync-loop"
+          ],
+          "reason": "takes the SyncLogger type for its warn sink; SyncLogger lives in the sync loop, not in ports"
+        },
+        "packages/host/src/adapters/__tests__/oracle-capability.test.ts": {
+          "allow": [
+            "packages/host/src/sync/sync-loop"
+          ],
+          "reason": "builds the SyncLogger stub the Oracle capability takes"
+        }
+      }
     },
     {
       "module": "packages/host/",
@@ -398,13 +455,7 @@
         "node:",
         "bun:test",
         "bun:ffi",
-        "fast-check",
-        "fs",
-        "path",
-        "os",
-        "url",
-        "crypto",
-        "child_process"
+        "fast-check"
       ],
       "deny": [
         "packages/framework/",
@@ -413,7 +464,16 @@
         "packages/document-source/",
         "packages/xlsx/",
         "pg"
-      ]
+      ],
+      "perFileExactAllow": {
+        "packages/host/src/__tests__/module-loader.test.ts": {
+          "allow": [
+            "fs",
+            "path"
+          ],
+          "reason": "imports the bare fs and path specifiers (not node:fs / node:path); the only bare builtins in the package"
+        }
+      }
     },
     {
       "module": "packages/adapter-pg/",

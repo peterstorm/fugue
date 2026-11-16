@@ -177,18 +177,13 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  * One manager's collaborators plus its per-instance mutable state. Every
  * lifecycle step below takes this context explicitly; the only mutable state is
  * the four containers (and `livenessSweepRunning`), and every `workers` entry is
- * an immutable pure `WorkerState` we replace, never mutate.
+ * an immutable pure `WorkerState` we replace, never mutate. The collaborators
+ * are the injected deps verbatim, so a new dependency is declared only once.
  */
-interface LifecycleCtx {
-  readonly spawn: SpawnPort;
-  readonly proc: ProcManagePort;
-  readonly registry: WorkerRegistry;
-  readonly probe: UdsLivenessProbe;
-  readonly tenants: TenantSpawnConfigView;
-  readonly clock: () => number;
-  readonly config: WorkerLifecycleConfig;
-  readonly logger: LogPort;
-  readonly provisionRedisAcl: WorkerLifecycleDeps["provisionRedisAcl"];
+type LifecycleCtx = Omit<WorkerLifecycleDeps, "lifecycle"> & LifecycleState;
+
+/** The per-instance half of `LifecycleCtx`: the bound ADT plus the mutable state. */
+interface LifecycleState {
   readonly lifecycle: WorkerLifecycleAdt;
   /** Per-tenant pure ADT state. */
   readonly workers: Map<TenantId, WorkerState>;
@@ -635,8 +630,8 @@ const lazySpawn = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result<En
   // the slot were claimed only AFTER the awaited ACL provisioning in `buildSpawnEnv`,
   // all of them would read the same pre-commit `liveWorkerCount()`, all pass the cap
   // and all overshoot it (`liveWorkerCount()` is the SOLE multi-tenant spec FR-033
-  // enforcer). Reserving here closes that TOCTOU; every failure path below unwinds
-  // this entry (`workers.delete`) so the slot is released fail-closed.
+  // enforcer). Reserving here closes that TOCTOU; every failure path (in the
+  // helpers called below) releases this slot fail-closed.
   ctx.workers.set(tenant, ctx.lifecycle.requestWorker(tenant, spawnCfg.eagerPin, ctx.clock()));
 
   const extraEnv = await buildSpawnEnv(ctx, tenant, spawnCfg);
@@ -995,15 +990,7 @@ const livenessSweep = async (ctx: LifecycleCtx): Promise<readonly TenantId[]> =>
 
 export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecyclePort => {
   const ctx: LifecycleCtx = {
-    spawn: deps.spawn,
-    proc: deps.proc,
-    registry: deps.registry,
-    probe: deps.probe,
-    tenants: deps.tenants,
-    clock: deps.clock,
-    config: deps.config,
-    logger: deps.logger,
-    provisionRedisAcl: deps.provisionRedisAcl,
+    ...deps,
     lifecycle: deps.lifecycle ?? lifecycleAdt,
     workers: new Map(),
     inFlightSpawns: new Map(),

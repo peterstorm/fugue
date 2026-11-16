@@ -936,9 +936,11 @@ export type Retriability = "retriable" | "non-retriable";
  * The kinds that carry no per-instance discriminant of their own: the failure
  * is fully described by its structured context fields. `retriabilityOf` sends
  * them down the standard backoff path and `messageOf` serialises the whole
- * value. ONE pattern for both, so the two classifications cannot drift apart on
- * which kinds belong here; it is a `P.union`, so each caller's `.exhaustive()`
- * still sees every member.
+ * value. One list of context-only kinds shared by both matches, so the set is
+ * written once rather than copied. Each match still lists its other kinds
+ * itself (`retriabilityOf` puts `transient` beside it) and stays
+ * `.exhaustive()`; that, not this list, is what stops a kind going
+ * unclassified. Being a `P.union`, every member stays visible to that check.
  */
 const CONTEXT_ONLY_KINDS = P.union(
   { kind: "retry-exhausted" },
