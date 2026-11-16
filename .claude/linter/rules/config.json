@@ -717,7 +717,9 @@
     "packages/framework/src/scheduler/catch-up.ts",
     "packages/framework/src/scheduler/cycle.ts",
     "packages/framework/src/scheduler/diff.ts",
-    "packages/framework/src/dag-runtime/fan/"
+    "packages/framework/src/dag-runtime/fan/",
+    "packages/host/src/supervisor/lifecycle/worker-lifecycle-decisions.ts",
+    "packages/host/src/supervisor/lifecycle/worker-lifecycle.ts"
   ],
   "impureModules": [
     {

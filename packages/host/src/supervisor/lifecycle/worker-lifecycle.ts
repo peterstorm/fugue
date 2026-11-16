@@ -88,6 +88,9 @@ export type WorkerState =
   | { readonly phase: "crashed"; readonly tenant: TenantId; readonly eagerPin: boolean; readonly crashedAt: number; readonly exitCode: number | null }
   | { readonly phase: "evicted"; readonly tenant: TenantId; readonly eagerPin: boolean; readonly evictedAt: number };
 
+/** A freshly requested worker: the only state a slot reservation may hold. */
+export type SpawningState = Extract<WorkerState, { readonly phase: "spawning" }>;
+
 // ── Constructors ───────────────────────────────────────────────────────────
 
 /**
@@ -96,7 +99,7 @@ export type WorkerState =
  * a worker is the absence of an entry in the supervisor's per-tenant map, so this
  * is a constructor, not a transition from a prior state.
  */
-export const requestWorker = (tenant: TenantId, eagerPin: boolean, now: number): WorkerState => ({
+export const requestWorker = (tenant: TenantId, eagerPin: boolean, now: number): SpawningState => ({
   phase: "spawning",
   tenant,
   eagerPin,
@@ -164,7 +167,7 @@ export const adoptLive = (
  * until the worker truly exits — at which point the liveness sweep lands the
  * pure `drainComplete` transition (terminal `evicted`), mirroring the spawned-
  * worker exit watcher. `drainStartedAt` is the persisted record's `startedAt`
- * (which `persistRecord` stores as the drain-start instant for a draining record).
+ * (which `workerRecordOf` stores as the drain-start instant for a draining record).
  */
 export const adoptDraining = (
   tenant: TenantId,
@@ -299,7 +302,7 @@ export const crash = (
  *
  * NOT USED IN PRODUCTION (kept for the ADT's completeness + transition tests).
  * `createWorkerLifecycle` does NOT call `restart`: it implements RESTART-AT-CAP
- * (`worker-lifecycle-manager.ts`) by `workers.delete(tenant)` on crash and
+ * (`worker-lifecycle-manager.ts`) by `workers.release(tenant)` on crash and
  * re-entering via `requestWorker`, so the `maxLiveWorkers` admission check runs
  * FIRST. Wiring `restart` here would bypass that check and reintroduce the
  * crash-loop-at-cap bug the delete-and-re-request path exists to avoid — do not

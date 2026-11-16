@@ -806,6 +806,12 @@ describe("Full Host Lifecycle", () => {
     expect(warnLogs.some((line) => line.msg.includes("Capability 'cache' failed to close")))
       .toBe(true);
     expect(warnLogs.some((line) => line.msg.includes("Host stopped with"))).toBe(true);
+
+    // Teardown took each capability before releasing it, so a second shutdown
+    // after the failed one releases nothing again — even though a close threw.
+    const stopped = result.value;
+    await Promise.allSettled([stopped.shutdown()]);
+    expect(events).toEqual(["connect:db", "connect:cache", "close:cache", "close:db"]);
   });
 
   test("ADR-0051: a post-connect boot failure (HTTP bind) closes the already-connected capabilities", async () => {

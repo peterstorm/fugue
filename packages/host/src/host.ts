@@ -1,11 +1,12 @@
 /**
  * Host — top-level imperative shell wiring all subsystems together.
  *
- * This is the IMPERATIVE SHELL. It holds mutable `let` references
- * to state and wires everything:
+ * This is the IMPERATIVE SHELL. It holds the live state shared with the
+ * subsystems (`HostRuntime`) apart from the resources boot acquires
+ * (`HostResources`, one ownership cell each) and wires everything:
  * - Receives SharedInfra from the injected HostDeps (the entrypoint constructs
  *   it; this file only destructures and threads it)
- * - Creates mutable state references (HostState, ConcurrencyState, CircuitBreaker map)
+ * - Creates the live state cells (HostState, ConcurrencyState, CircuitBreaker map)
  * - Wires sync loop → registry swap + circuit breaker force-reset
  * - Wires HTTP router → read current state
  * - Handles SIGTERM → stop sync loop + Redis probe → draining state → await
@@ -94,6 +95,8 @@ import { registerSignalHandlers } from "./lifecycle/signals.js";
 import type { SignalHandlerHandle } from "./lifecycle/signals.js";
 import { startRedisProbe } from "./lifecycle/redis-probe.js";
 import type { RedisProbeHandle } from "./lifecycle/redis-probe.js";
+import { owned } from "./lifecycle/owned.js";
+import type { Owned } from "./lifecycle/owned.js";
 import type { ConcurrencyState } from "./domain/concurrency.js";
 import { topoSortHandles, connectAll, closeAll } from "./domain/capability-manager.js";
 
@@ -575,17 +578,29 @@ export interface HitlReconciliationHandle {
   readonly settle: () => Promise<void>;
 }
 
-/** Everything the HITL durable run engine contributes to a booted host. */
-export interface HitlWiring {
-  readonly service: HitlRunService | undefined;
-  readonly worker: WorkerHandle | undefined;
-  readonly reconciliation: HitlReconciliationHandle | undefined;
-  readonly teamsBotHandle:
-    | ((input: { authHeader: string | undefined; activity: unknown }) => Promise<BotResponse>)
-    | undefined;
-  readonly notifier: HumanReviewNotifierPort | undefined;
-  readonly conversations: ConversationStorePort | undefined;
+type TeamsBotHandle = (input: { authHeader: string | undefined; activity: unknown }) => Promise<BotResponse>;
+
+/** The durable run service + its queue worker + the reconciliation sweep. */
+interface DurableRunEngine {
+  readonly service: HitlRunService;
+  readonly worker: WorkerHandle;
+  readonly reconciliation: HitlReconciliationHandle;
 }
+
+/**
+ * Everything the HITL durable run engine contributes to a booted host. A run
+ * service exists only together with its running worker and reconciliation
+ * sweep, so "service without worker" cannot be represented. The notifier and
+ * conversation store are consumed while wiring and are not part of the result.
+ */
+export type HitlWiring =
+  | { readonly kind: "disabled" }
+  | {
+      readonly kind: "enabled";
+      readonly engine: DurableRunEngine;
+      /** Only the Bot Framework transport has an inbound handler. */
+      readonly teamsBotHandle: TeamsBotHandle | undefined;
+    };
 
 /** The inputs every HITL wiring step reads. */
 interface HitlWiringArgs {
@@ -597,8 +612,6 @@ interface HitlWiringArgs {
   readonly queueBackend: QueueBackend | undefined;
   readonly getHostState: () => HostState;
 }
-
-type TeamsBotHandle = (input: { authHeader: string | undefined; activity: unknown }) => Promise<BotResponse>;
 
 /** The notifier (and, for the Bot Framework transport, its conversation store) a selection yields. */
 interface NotifierWiring {
@@ -697,13 +710,6 @@ const startHitlReconciliation = async (
     settle: async () => { await inFlight; },
   };
 };
-
-/** The durable run service + its queue worker + the reconciliation sweep. */
-interface DurableRunEngine {
-  readonly service: HitlRunService;
-  readonly worker: WorkerHandle;
-  readonly reconciliation: HitlReconciliationHandle;
-}
 
 /**
  * Compose the HITL run executor over the host's DAG registry. FR-013 / SC-001
@@ -862,50 +868,82 @@ const wireHitlRunEngine = async (args: HitlWiringArgs): Promise<HitlWiring> => {
   const { config, logger, queueBackend } = args;
   const selection = selectHitlNotifierTransport(config);
   const { notifier, conversations } = buildHitlNotifier(selection, args);
-  const off = { service: undefined, worker: undefined, reconciliation: undefined, teamsBotHandle: undefined };
 
-  if (notifier === undefined) return { ...off, notifier, conversations };
+  if (notifier === undefined) return { kind: "disabled" };
   if (queueBackend === undefined) {
     logger.warn("A HITL notifier is configured but no queue backend was wired — HITL is disabled");
-    return { ...off, notifier, conversations };
+    return { kind: "disabled" };
   }
 
   const engine = await startDurableRunEngine(args, queueBackend, notifier);
   const teamsBotHandle = connectInboundTransport(selection, args, engine.service, conversations);
-  return { ...engine, teamsBotHandle, notifier, conversations };
+  return { kind: "enabled", engine, teamsBotHandle };
 };
+
+/** The router's view of HITL: the run service and the inbound Teams handler, when enabled. */
+const routerHitlDeps = (hitl: HitlWiring): Pick<RouterDeps, "hitl" | "teamsBot"> =>
+  match(hitl)
+    .with({ kind: "enabled" }, (enabled) => ({ hitl: enabled.engine.service, teamsBot: enabled.teamsBotHandle }))
+    .with({ kind: "disabled" }, () => ({ hitl: undefined, teamsBot: undefined }))
+    .exhaustive();
 
 // ── Host shell state ─────────────────────────────────────────────────────
 
-/**
- * The host's per-instance mutable state (imperative shell) and its single
- * owner: every lifecycle step below takes this explicitly. Teardown clears the
- * HITL/capability fields so it stays idempotent.
- */
-interface HostShell {
-  hostState: HostState;
-  concurrency: ConcurrencyState;
-  readonly circuitBreakers: Map<DagId, CircuitState>;
-  syncLoop: SyncLoopHandle | null;
-  redisProbe: RedisProbeHandle | null;
-  signalHandle: SignalHandlerHandle | null;
-  server: { port: number; stop: () => void } | null;
-  sortedHandles: readonly CapabilityHandle[];
-  hitlWorker: WorkerHandle | undefined;
-  hitlReconciliation: HitlReconciliationHandle | undefined;
+/** A live, replaceable value shared between the host and the subsystems it wires. */
+interface Cell<T> {
+  readonly get: () => T;
+  readonly set: (value: T) => void;
 }
 
-const createHostShell = (config: HostConfig): HostShell => ({
-  hostState: booting(Date.now()),
-  concurrency: initConcurrency(config.MAX_GLOBAL_CONCURRENCY, config.DEFAULT_DAG_CONCURRENCY),
+const cell = <T>(initial: T): Cell<T> => {
+  let current = initial;
+  return { get: () => current, set: (value) => { current = value; } };
+};
+
+/**
+ * The live state the host shares with the router, the sync loop, the Redis
+ * probe and the drain: read and replaced while the host serves.
+ */
+interface HostRuntime {
+  readonly hostState: Cell<HostState>;
+  readonly concurrency: Cell<ConcurrencyState>;
+  readonly circuitBreakers: Map<DagId, CircuitState>;
+}
+
+/** The HTTP listener as the host exposes it. */
+type BoundServer = { port: number; stop: () => void };
+
+/**
+ * Every resource boot acquires, one ownership cell each. Teardown and shutdown
+ * reach a resource only by taking it, so each is released at most once.
+ */
+interface HostResources {
+  readonly server: Owned<BoundServer>;
+  readonly syncLoop: Owned<SyncLoopHandle>;
+  readonly redisProbe: Owned<RedisProbeHandle>;
+  readonly signalHandle: Owned<SignalHandlerHandle>;
+  /** The connected capability handles, in dependency order. */
+  readonly capabilities: Owned<readonly CapabilityHandle[]>;
+  /** The running HITL engine: its queue worker and reconciliation sweep, released together. */
+  readonly hitl: Owned<DurableRunEngine>;
+}
+
+/** What boot holds before the HTTP server binds: all a pre-server teardown may release. */
+type AcquiredBeforeServer = Pick<HostResources, "hitl" | "capabilities">;
+
+const createHostRuntime = (config: HostConfig): HostRuntime => ({
+  hostState: cell(booting(Date.now())),
+  concurrency: cell(initConcurrency(config.MAX_GLOBAL_CONCURRENCY, config.DEFAULT_DAG_CONCURRENCY)),
   circuitBreakers: new Map<DagId, CircuitState>(),
-  syncLoop: null,
-  redisProbe: null,
-  signalHandle: null,
-  server: null,
-  sortedHandles: [],
-  hitlWorker: undefined,
-  hitlReconciliation: undefined,
+});
+
+const createHostResources = (): HostResources => ({
+  server: owned(),
+  syncLoop: owned(),
+  redisProbe: owned(),
+  signalHandle: owned(),
+  capabilities: owned(),
+  hitl: owned(),
 });
 
 // ── Capability connection + readiness ────────────────────────────────────
@@ -915,17 +953,16 @@ const createHostShell = (config: HostConfig): HostShell => ({
  * dependencies connect first, then connect all. Failure here aborts boot — a
  * missing capability at runtime is worse than a clean boot failure.
  */
-const connectCapabilities = async (deps: HostDeps, shell: HostShell): Promise<Result<void, HostError>> => {
+const connectCapabilities = async (deps: HostDeps): Promise<Result<readonly CapabilityHandle[], HostError>> => {
   const { sharedInfra, logger } = deps;
   const capHandles = sharedInfra.capabilities;
-  if (capHandles.length === 0) return ok(undefined);
+  if (capHandles.length === 0) return ok([]);
 
   const sortResult = topoSortHandles(capHandles);
   if (!sortResult.ok) {
     return sortResult as Result<never, HostError>;
   }
   const sortedHandles = sortResult.value;
-  shell.sortedHandles = sortedHandles;
   const connectResult = await connectAll(sortedHandles, logger);
   if (!connectResult.ok) {
     // Boot aborts — close the handles that already connected so a
@@ -942,23 +979,24 @@ const connectCapabilities = async (deps: HostDeps, shell: HostShell): Promise<Re
     ]));
   }
   logger.info(`${sortedHandles.length} external capabilities connected`);
-  return ok(undefined);
+  return ok(sortedHandles);
 };
 
-/** Transition to ready; a rejected transition aborts boot after closing the capabilities. */
+/** Transition to ready; a rejected transition aborts boot after closing the connected capabilities. */
 const markHostReady = async (
   deps: HostDeps,
-  shell: HostShell,
+  runtime: HostRuntime,
+  connected: readonly CapabilityHandle[],
   registry: Registry,
   sha: GitSha,
 ): Promise<Result<void, HostError>> => {
-  const readyResult = bootComplete(shell.hostState, registry, sha, Date.now());
+  const readyResult = bootComplete(runtime.hostState.get(), registry, sha, Date.now());
   if (!readyResult.ok) {
     // Capabilities already connected — close them before aborting boot so a
     // crash-loop boot doesn't leak pools/sockets (same guarantee as the
     // connect-failure path).
-    const cleanupFailures = shell.sortedHandles.length > 0
-      ? await closeAll(shell.sortedHandles, deps.logger)
+    const cleanupFailures = connected.length > 0
+      ? await closeAll(connected, deps.logger)
       : [];
     const primary: HostError = {
       kind: "internal-invariant-violated",
@@ -970,7 +1008,7 @@ const markHostReady = async (
       capabilityCleanupErrors(cleanupFailures, "failed ready transition"),
     ));
   }
-  shell.hostState = readyResult.value;
+  runtime.hostState.set(readyResult.value);
   return ok(undefined);
 };
 
@@ -1098,7 +1136,8 @@ const createDagExecutor = (config: HostConfig, authority: RunAuthority): RouterD
  */
 const buildRouterDeps = (
   deps: HostDeps,
-  shell: HostShell,
+  runtime: HostRuntime,
+  getCapabilities: () => readonly CapabilityHandle[],
   authority: RunAuthority,
   hitl: HitlWiring,
   realmJwt: RealmJwtDeps | undefined,
@@ -1106,14 +1145,13 @@ const buildRouterDeps = (
   const { config, sharedInfra, logger } = deps;
   const tokenStore = createRedisTokenStore(sharedInfra.redis, authority.routedTenant, sharedInfra.logger);
   return {
-    hitl: hitl.service,
-    teamsBot: hitl.teamsBotHandle,
-    getHostState: () => shell.hostState,
-    getConcurrency: () => shell.concurrency,
-    setConcurrency: (s) => { shell.concurrency = s; },
+    ...routerHitlDeps(hitl),
+    getHostState: runtime.hostState.get,
+    getConcurrency: runtime.concurrency.get,
+    setConcurrency: runtime.concurrency.set,
     circuit: {
-      get: (id) => shell.circuitBreakers.get(id) ?? initCircuit(Date.now()),
-      set: (id, s) => { shell.circuitBreakers.set(id, s); },
+      get: (id) => runtime.circuitBreakers.get(id) ?? initCircuit(Date.now()),
+      set: (id, s) => { runtime.circuitBreakers.set(id, s); },
     },
     createContext: createRunContextFactory(config, sharedInfra, authority),
     executeDag: createDagExecutor(config, authority),
@@ -1133,9 +1171,9 @@ const buildRouterDeps = (
       generateRandomBytes: () => crypto.getRandomValues(new Uint8Array(32)),
     },
     // Read through a thunk, not by value: capabilities are connected before this
-    // router is built, but teardown reassigns `sortedHandles` to `[]`. Capturing
-    // it by value would freeze the diagnostic at the boot-time list.
-    capabilityHealthDeps: { getHandles: () => shell.sortedHandles },
+    // router is built, but teardown takes them. Capturing them by value would
+    // freeze the diagnostic at the boot-time list.
+    capabilityHealthDeps: { getHandles: getCapabilities },
     logger,
   };
 };
@@ -1171,39 +1209,36 @@ const createTeardownRecorder = (logger: LogPort): TeardownRecorder => {
 };
 
 /**
- * Stop server-owned reconciliation, then close the HITL worker. Clears ownership
- * before each operation so teardown remains idempotent even when a
+ * Stop server-owned reconciliation, then close the HITL worker. The engine is
+ * taken before either operation, so teardown remains idempotent even when a
  * non-conforming port throws. Every later resource is still attempted.
  */
-const stopHitlEngine = async (shell: HostShell, rec: TeardownRecorder, context: string): Promise<void> => {
-  const reconciliation = shell.hitlReconciliation;
-  shell.hitlReconciliation = undefined;
-  if (reconciliation !== undefined) {
-    await rec.attempt(
-      `Failed to stop HITL reconciliation during ${context}`,
-      () => reconciliation.stop(),
-    );
-    await rec.attempt(
-      `Failed to settle HITL reconciliation during ${context}`,
-      () => reconciliation.settle(),
-    );
-  }
-
-  const worker = shell.hitlWorker;
-  shell.hitlWorker = undefined;
-  if (worker !== undefined) {
-    await rec.attempt(`Failed to close HITL worker during ${context}`, () => worker.close());
-  }
+const stopHitlEngine = async (
+  hitl: Owned<DurableRunEngine>,
+  rec: TeardownRecorder,
+  context: string,
+): Promise<void> => {
+  const engine = hitl.take();
+  if (engine === undefined) return;
+  const { reconciliation, worker } = engine;
+  await rec.attempt(
+    `Failed to stop HITL reconciliation during ${context}`,
+    () => reconciliation.stop(),
+  );
+  await rec.attempt(
+    `Failed to settle HITL reconciliation during ${context}`,
+    () => reconciliation.settle(),
+  );
+  await rec.attempt(`Failed to close HITL worker during ${context}`, () => worker.close());
 };
 
 const closeCapabilityHandles = async (
-  shell: HostShell,
+  capabilities: Owned<readonly CapabilityHandle[]>,
   logger: LogPort,
   rec: TeardownRecorder,
   context: string,
 ): Promise<void> => {
-  const handles = shell.sortedHandles;
-  shell.sortedHandles = [];
+  const handles = capabilities.take() ?? [];
   if (handles.length === 0) return;
   try {
     const closeFailures = await closeAll(handles, logger);
@@ -1240,12 +1275,12 @@ const closeCapabilityHandles = async (
  */
 const teardownAfterServerStop = async (
   deps: HostDeps,
-  shell: HostShell,
+  resources: AcquiredBeforeServer,
   context: string,
 ): Promise<readonly unknown[]> => {
   const rec = createTeardownRecorder(deps.logger);
-  await stopHitlEngine(shell, rec, context);
-  await closeCapabilityHandles(shell, deps.logger, rec, context);
+  await stopHitlEngine(resources.hitl, rec, context);
+  await closeCapabilityHandles(resources.capabilities, deps.logger, rec, context);
 
   // Captured so the closure keeps the narrowing — a property access would
   // need a non-null assertion here, which the type rules rule out.
@@ -1354,7 +1389,7 @@ const restrictSocket = async (unixPath: string | undefined): Promise<void> => {
  */
 const abortBootAfterBindFailure = async (
   deps: HostDeps,
-  shell: HostShell,
+  resources: AcquiredBeforeServer,
   bunServer: { readonly stop: () => void } | undefined,
   bindDesc: string,
   cause: unknown,
@@ -1363,7 +1398,7 @@ const abortBootAfterBindFailure = async (
   const serverStopFailure = stopBoundServerAfterBindFailure(bunServer, bindDesc, deps.logger);
   const teardownFailures = await teardownAfterServerStop(
     deps,
-    shell,
+    resources,
     "boot abort after server bind failure",
   );
   const primary: HostError = {
@@ -1396,12 +1431,16 @@ const logHeaderVerificationPosture = (deps: HostDeps, routedTenant: TenantId): v
   );
 };
 
+/**
+ * Bind the listener and lock it down. A failure tears down the resources
+ * already acquired (HITL engine, capabilities) before returning the error.
+ */
 const bindHttpServer = async (
   deps: HostDeps,
-  shell: HostShell,
+  resources: AcquiredBeforeServer,
   app: { readonly fetch: FetchHandler },
   routedTenant: TenantId,
-): Promise<Result<number, HostError>> => {
+): Promise<Result<BoundServer, HostError>> => {
   const { config, logger } = deps;
   const unixPath = deps.bind?.unix;
   const bindDesc = unixPath !== undefined ? `unix socket ${unixPath}` : `port ${config.PORT}`;
@@ -1414,7 +1453,7 @@ const bindHttpServer = async (
     bunServer = listen(config, unixPath, fetchHandler);
     await restrictSocket(unixPath);
   } catch (e) {
-    return abortBootAfterBindFailure(deps, shell, bunServer, bindDesc, e);
+    return abortBootAfterBindFailure(deps, resources, bunServer, bindDesc, e);
   }
   // The catch above returns on any bind/chmod failure, so reaching here means the
   // server is bound and `bunServer` is assigned.
@@ -1422,26 +1461,25 @@ const bindHttpServer = async (
   // A UDS server has no TCP port; report 0 so the handle stays well-typed
   // without claiming a port the worker is not listening on.
   const port = listening?.port ?? (unixPath !== undefined ? 0 : config.PORT);
-  shell.server = { port, stop: () => listening?.stop() };
   logger.info(`HTTP server listening on ${bindDesc}`);
   logHeaderVerificationPosture(deps, routedTenant);
-  return ok(port);
+  return ok({ port, stop: () => listening?.stop() });
 };
 
 // ── Sync loop + Redis liveness probe ─────────────────────────────────────
 
 const startHostSyncLoop = (
   deps: HostDeps,
-  shell: HostShell,
+  runtime: HostRuntime,
   syncConfig: SyncConfig,
   sha: GitSha,
 ): SyncLoopHandle => {
   const syncCallbacks = createSyncCallbacks({
-    getState: () => shell.hostState,
-    setState: (s) => { shell.hostState = s; },
-    getCircuitBreakers: () => shell.circuitBreakers,
-    getConcurrency: () => shell.concurrency,
-    setConcurrency: (s) => { shell.concurrency = s; },
+    getState: runtime.hostState.get,
+    setState: runtime.hostState.set,
+    getCircuitBreakers: () => runtime.circuitBreakers,
+    getConcurrency: runtime.concurrency.get,
+    setConcurrency: runtime.concurrency.set,
     logger: deps.logger,
     clock: Date.now,
   });
@@ -1465,35 +1503,38 @@ const startHostSyncLoop = (
  * is valid from ready/syncing; redisRecovered only from degraded:redis-disconnected),
  * so the edge-vs-level distinction is handled by the pure state machine, not here.
  */
-const startHostRedisProbe = (deps: HostDeps, shell: HostShell): RedisProbeHandle => {
+const startHostRedisProbe = (deps: HostDeps, runtime: HostRuntime): RedisProbeHandle => {
   const { logger } = deps;
+  const { hostState } = runtime;
   return startRedisProbe(
     deps.redis,
     deps.config.REDIS_PROBE_INTERVAL_MS,
     {
       onDead: () => {
-        const result = redisDied(shell.hostState, Date.now());
+        const current = hostState.get();
+        const result = redisDied(current, Date.now());
         if (result.ok) {
-          shell.hostState = result.value;
+          hostState.set(result.value);
           logger.warn("Redis liveness probe failed — host degraded (redis-disconnected)");
-        } else if (shell.hostState.phase !== "degraded") {
+        } else if (current.phase !== "degraded") {
           // Already-degraded is the expected no-op; any other rejection is a real
           // state-machine surprise worth surfacing (mirrors the sync-callbacks pattern).
           logger.warn("redisDied transition unexpectedly rejected", {
-            currentPhase: shell.hostState.phase,
+            currentPhase: current.phase,
             error: result.error.message,
           });
         }
       },
       onAlive: () => {
-        if (shell.hostState.phase === "degraded" && shell.hostState.reason === "redis-disconnected") {
-          const result = redisRecovered(shell.hostState);
+        const current = hostState.get();
+        if (current.phase === "degraded" && current.reason === "redis-disconnected") {
+          const result = redisRecovered(current);
           if (result.ok) {
-            shell.hostState = result.value;
+            hostState.set(result.value);
             logger.info("Redis recovered — host returned to ready");
           } else {
             logger.warn("redisRecovered transition unexpectedly rejected", {
-              currentPhase: shell.hostState.phase,
+              currentPhase: current.phase,
               error: result.error.message,
             });
           }
@@ -1531,52 +1572,53 @@ const createShutdownRecorder = (logger: LogPort): ShutdownRecorder => {
   return { failures, recordFailure, attempt };
 };
 
-/** Stop the sync loop and the Redis liveness probe (each cleared before it is stopped). */
-const stopBackgroundLoops = (shell: HostShell, rec: ShutdownRecorder): void => {
-  const stoppingSyncLoop = shell.syncLoop;
-  shell.syncLoop = null;
-  if (stoppingSyncLoop !== null) {
-    rec.attempt("stop sync loop", () => stoppingSyncLoop.stop());
+/** Stop the sync loop and the Redis liveness probe (each taken before it is stopped). */
+const stopBackgroundLoops = (
+  resources: Pick<HostResources, "syncLoop" | "redisProbe">,
+  rec: ShutdownRecorder,
+): void => {
+  const syncLoop = resources.syncLoop.take();
+  if (syncLoop !== undefined) {
+    rec.attempt("stop sync loop", () => syncLoop.stop());
   }
 
-  const stoppingRedisProbe = shell.redisProbe;
-  shell.redisProbe = null;
-  if (stoppingRedisProbe !== null) {
-    rec.attempt("stop Redis liveness probe", () => stoppingRedisProbe.stop());
+  const redisProbe = resources.redisProbe.take();
+  if (redisProbe !== undefined) {
+    rec.attempt("stop Redis liveness probe", () => redisProbe.stop());
   }
 };
 
 /** Begin draining and wait (bounded by `DRAIN_TIMEOUT_MS`) for in-flight requests to finish. */
 const drainInflightRequests = async (
   deps: HostDeps,
-  shell: HostShell,
+  runtime: HostRuntime,
   rec: ShutdownRecorder,
 ): Promise<void> => {
-  const inflightCount = shell.concurrency.global.current;
-  const drainResult = beginDrain(shell.hostState, inflightCount, Date.now());
+  const inflight = (): number => runtime.concurrency.get().global.current;
+  const drainResult = beginDrain(runtime.hostState.get(), inflight(), Date.now());
   if (drainResult.ok) {
-    shell.hostState = drainResult.value;
+    runtime.hostState.set(drainResult.value);
   } else {
     const transitionError = new Error(drainResult.error.message);
     rec.recordFailure("transition host to draining", transitionError);
   }
 
   const drainDeadline = Date.now() + deps.config.DRAIN_TIMEOUT_MS;
-  while (shell.concurrency.global.current > 0 && Date.now() < drainDeadline) {
+  while (inflight() > 0 && Date.now() < drainDeadline) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  if (shell.concurrency.global.current > 0) {
+  if (inflight() > 0) {
     rec.attempt("log drain timeout", () =>
-      deps.logger.warn(`Drain timeout — ${shell.concurrency.global.current} requests still in-flight`));
+      deps.logger.warn(`Drain timeout — ${inflight()} requests still in-flight`));
   }
 };
 
 /** Land the stopped transition, report, and throw if any step failed. */
-const completeShutdown = (deps: HostDeps, shell: HostShell, rec: ShutdownRecorder): void => {
+const completeShutdown = (deps: HostDeps, runtime: HostRuntime, rec: ShutdownRecorder): void => {
   const { logger } = deps;
-  const stoppedResult = drainComplete(shell.hostState);
+  const stoppedResult = drainComplete(runtime.hostState.get());
   if (stoppedResult.ok) {
-    shell.hostState = stoppedResult.value;
+    runtime.hostState.set(stoppedResult.value);
   } else {
     rec.recordFailure("transition host to stopped", new Error(stoppedResult.error.message));
   }
@@ -1591,29 +1633,32 @@ const completeShutdown = (deps: HostDeps, shell: HostShell, rec: ShutdownRecorde
   }
 };
 
-const performShutdown = async (deps: HostDeps, shell: HostShell): Promise<void> => {
+const performShutdown = async (deps: HostDeps, runtime: HostRuntime, resources: HostResources): Promise<void> => {
   const rec = createShutdownRecorder(deps.logger);
 
   rec.attempt("log shutdown start", () =>
     deps.logger.info("Shutdown initiated — draining in-flight requests..."));
-  stopBackgroundLoops(shell, rec);
-  await drainInflightRequests(deps, shell, rec);
+  stopBackgroundLoops(resources, rec);
+  await drainInflightRequests(deps, runtime, rec);
 
-  const stoppingServer = shell.server;
-  shell.server = null;
-  if (stoppingServer !== null) {
-    rec.attempt("stop HTTP server", () => stoppingServer.stop());
+  const server = resources.server.take();
+  if (server !== undefined) {
+    rec.attempt("stop HTTP server", () => server.stop());
   }
 
-  rec.failures.push(...await teardownAfterServerStop(deps, shell, "shutdown"));
-  completeShutdown(deps, shell, rec);
+  rec.failures.push(...await teardownAfterServerStop(deps, resources, "shutdown"));
+  completeShutdown(deps, runtime, rec);
 };
 
 /** The idempotent shutdown: every caller shares ONE in-flight shutdown. */
-const createShutdown = (deps: HostDeps, shell: HostShell): (() => Promise<void>) => {
+const createShutdown = (
+  deps: HostDeps,
+  runtime: HostRuntime,
+  resources: HostResources,
+): (() => Promise<void>) => {
   let shutdownPromise: Promise<void> | undefined;
   return () => {
-    shutdownPromise ??= performShutdown(deps, shell);
+    shutdownPromise ??= performShutdown(deps, runtime, resources);
     return shutdownPromise;
   };
 };
@@ -1645,11 +1690,11 @@ const selectRunAuthority = (deps: HostDeps, routedTenant: TenantId): RunAuthorit
  * Fold per-DAG concurrency limits from the loaded registry into the limiter (FR-051).
  * Without this, every DAG would silently collapse to DEFAULT_DAG_CONCURRENCY.
  */
-const foldRegistryConcurrency = (shell: HostShell, registry: Registry): void => {
-  shell.concurrency = reconcileDagLimits(
-    shell.concurrency,
+const foldRegistryConcurrency = (concurrency: Cell<ConcurrencyState>, registry: Registry): void => {
+  concurrency.set(reconcileDagLimits(
+    concurrency.get(),
     Array.from(registry.dags.values(), (d) => ({ dagId: d.id, max: d.config.maxConcurrency })),
-  );
+  ));
 };
 
 const logHostBooted = (boundPort: number, registry: Registry, logger: SyncLogger): void => {
@@ -1661,23 +1706,25 @@ const logHostBooted = (boundPort: number, registry: Registry, logger: SyncLogger
   });
 };
 
-const hostInstanceOf = (shell: HostShell, shutdown: () => Promise<void>): HostInstance => ({
-  getState: () => shell.hostState,
-  getConcurrency: () => shell.concurrency,
-  getCircuitBreakers: () => shell.circuitBreakers as ReadonlyMap<DagId, CircuitState>,
+const hostInstanceOf = (
+  runtime: HostRuntime,
+  resources: HostResources,
+  shutdown: () => Promise<void>,
+): HostInstance => ({
+  getState: runtime.hostState.get,
+  getConcurrency: runtime.concurrency.get,
+  getCircuitBreakers: () => runtime.circuitBreakers,
   shutdown: () => {
-    if (shell.signalHandle) {
-      shell.signalHandle.unregister();
-      shell.signalHandle = null;
-    }
+    resources.signalHandle.take()?.unregister();
     return shutdown();
   },
   triggerSync: async () => {
-    if (shell.syncLoop) {
-      await shell.syncLoop.triggerSync();
+    const syncLoop = resources.syncLoop.peek();
+    if (syncLoop !== undefined) {
+      await syncLoop.triggerSync();
     }
   },
-  get server() { return shell.server; },
+  get server() { return resources.server.peek() ?? null; },
 });
 
 /**
@@ -1694,7 +1741,8 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
   // worker passes its resolved `Tenant.id`; the legacy single-tenant entrypoint
   // (and main.ts) omit it and keep the constant `default` namespace (FR-035).
   const routedTenant: TenantId = deps.tenant ?? DEFAULT_TENANT_ID;
-  const shell = createHostShell(config);
+  const runtime = createHostRuntime(config);
+  const resources = createHostResources();
 
   const startupResult = await executeStartup({ config, redis, git, loader, logger });
   if (!startupResult.ok) {
@@ -1702,12 +1750,13 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
   }
   const { registry, sha, syncConfig } = startupResult.value;
 
-  const connected = await connectCapabilities(deps, shell);
+  const connected = await connectCapabilities(deps);
   if (!connected.ok) return connected;
-  const ready = await markHostReady(deps, shell, registry, sha);
+  const ready = await markHostReady(deps, runtime, connected.value, registry, sha);
   if (!ready.ok) return ready;
+  resources.capabilities.set(connected.value);
 
-  foldRegistryConcurrency(shell, registry);
+  foldRegistryConcurrency(runtime.concurrency, registry);
 
   const authority = selectRunAuthority(deps, routedTenant);
   const realmJwt = buildRealmJwtDeps(config);
@@ -1718,21 +1767,22 @@ export const createHost = async (deps: HostDeps): Promise<Result<HostInstance, H
     logger,
     broker: authority.broker,
     queueBackend: deps.queueBackend,
-    getHostState: () => shell.hostState,
+    getHostState: runtime.hostState.get,
   });
-  shell.hitlWorker = hitl.worker;
-  shell.hitlReconciliation = hitl.reconciliation;
+  if (hitl.kind === "enabled") resources.hitl.set(hitl.engine);
 
-  const app = createRouter(buildRouterDeps(deps, shell, authority, hitl, realmJwt));
-  const bound = await bindHttpServer(deps, shell, app, routedTenant);
+  const getCapabilities = (): readonly CapabilityHandle[] => resources.capabilities.peek() ?? [];
+  const app = createRouter(buildRouterDeps(deps, runtime, getCapabilities, authority, hitl, realmJwt));
+  const bound = await bindHttpServer(deps, resources, app, routedTenant);
   if (!bound.ok) return bound;
+  resources.server.set(bound.value);
 
-  shell.syncLoop = startHostSyncLoop(deps, shell, syncConfig, sha);
-  shell.redisProbe = startHostRedisProbe(deps, shell);
+  resources.syncLoop.set(startHostSyncLoop(deps, runtime, syncConfig, sha));
+  resources.redisProbe.set(startHostRedisProbe(deps, runtime));
 
-  const shutdown = createShutdown(deps, shell);
-  shell.signalHandle = registerSignalHandlers({ onShutdown: shutdown, logger });
+  const shutdown = createShutdown(deps, runtime, resources);
+  resources.signalHandle.set(registerSignalHandlers({ onShutdown: shutdown, logger }));
 
-  logHostBooted(bound.value, registry, logger);
-  return ok(hostInstanceOf(shell, shutdown));
+  logHostBooted(bound.value.port, registry, logger);
+  return ok(hostInstanceOf(runtime, resources, shutdown));
 };

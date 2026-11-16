@@ -8,9 +8,11 @@
  * DESIGN (functional core / imperative shell):
  *   - ALL state-transition DECISIONS live in the pure ADT (`requestWorker`,
  *     `workerLive`, `touch`, `idleEvict`, `beginDrain`, `crash`,
- *     `adoptLive`, the `isIdleEvictable` / `occupiesSlot` queries). This module
- *     only performs the I/O (spawn / signal / probe / Redis write) and threads the
- *     resulting pure states through a per-tenant `Map<TenantId, WorkerState>`.
+ *     `adoptLive`, the `isIdleEvictable` / `occupiesSlot` queries); the manager's
+ *     own decisions (crash-restart budget, durable record, re-adoption, stop
+ *     signals) live in the pure `worker-lifecycle-decisions.ts`. This module only
+ *     performs the I/O (spawn / signal / probe / Redis write) and threads the
+ *     resulting pure states through the per-tenant `WorkerTable`.
  *     (NOTE: the ADT's `restart` transition EXISTS but is deliberately NOT used
  *     here — see RESTART-AT-CAP in `onCrash` below: we delete the crashed entry
  *     and re-enter via `requestWorker` so the cap admission check runs first.)
@@ -28,6 +30,7 @@
  * REFERENCE only; this module never dereferences a secret.
  */
 
+import { match } from "ts-pattern";
 import { ok, err, safeErrorMessage } from "@fuguejs/framework";
 import type { Result } from "@fuguejs/framework";
 import { workerUnavailable, formatHostError } from "../../domain/host-error.js";
@@ -37,8 +40,12 @@ import type { LogPort } from "../../ports.js";
 import { workerSocketPath } from "../../domain/config.js";
 import * as lifecycleAdt from "./worker-lifecycle.js";
 import type { WorkerState } from "./worker-lifecycle.js";
-import { initialRestartBudget, decideSupervisorRestart } from "./thin-init.js";
-import type { RestartBudget } from "./thin-init.js";
+import { decideCrashRestart, workerRecordOf, adoptedState, stopPlan } from "./worker-lifecycle-decisions.js";
+import type { SignalStep, StopReason } from "./worker-lifecycle-decisions.js";
+import { createWorkerTable } from "./worker-table.js";
+import type { WorkerTable } from "./worker-table.js";
+import { singleFlight, skipIfRunning } from "./single-flight.js";
+import type { SingleFlight, SkipIfRunning } from "./single-flight.js";
 import type { AppliedAclCredential } from "../secrets/redis-acl-provisioner.js";
 import { WORKER_REDIS_ACL_USERNAME_ENV, WORKER_REDIS_ACL_PASSWORD_ENV } from "../secrets/redis-acl.js";
 import type { SpawnPort, ProcManagePort, WorkerLifecyclePort, WorkerHandle, EnsuredWorker } from "./spawn-port.js";
@@ -174,102 +181,63 @@ export type WorkerLifecycleAdt = typeof import("./worker-lifecycle.js");
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
- * One manager's collaborators plus its per-instance mutable state. Every
- * lifecycle step below takes this context explicitly; the only mutable state is
- * the four containers (and `livenessSweepRunning`), and every `workers` entry is
- * an immutable pure `WorkerState` we replace, never mutate. The collaborators
- * are the injected deps verbatim, so a new dependency is declared only once.
+ * One manager's collaborators plus its per-instance state. Every lifecycle step
+ * below takes this context explicitly. The collaborators are the injected deps
+ * verbatim, so a new dependency is declared only once; all per-tenant mutable
+ * state lives behind the `WorkerTable` and the two concurrency guards.
  */
 type LifecycleCtx = Omit<WorkerLifecycleDeps, "lifecycle"> & LifecycleState;
 
-/** The per-instance half of `LifecycleCtx`: the bound ADT plus the mutable state. */
+/** The per-instance half of `LifecycleCtx`: the bound ADT plus the owned state. */
 interface LifecycleState {
   readonly lifecycle: WorkerLifecycleAdt;
-  /** Per-tenant pure ADT state. */
-  readonly workers: Map<TenantId, WorkerState>;
+  /** Per-tenant worker state, exit-watcher marks and restart budgets. */
+  readonly workers: WorkerTable;
   /**
-   * In-flight cold-spawn coalescing (single-flight per tenant). `lazySpawn` sets
-   * the `spawning` entry synchronously but then `await`s the spawn; two concurrent
-   * first-requests for the same cold tenant would BOTH pass the no-live-worker
-   * check and BOTH spawn a process onto the same `workerSocketPath` (UDS bind
-   * contention, double-charged slot, an orphaned process). `ensureWorker` dedupes
-   * concurrent callers onto ONE shared promise keyed by `TenantId`, cleared on
-   * settle, so a cold tenant is spawned exactly once even under a request burst.
+   * Cold-spawn coalescing, one flight per tenant. `lazySpawn` reserves the
+   * `spawning` slot synchronously but then awaits the spawn; two concurrent
+   * first-requests for the same cold tenant would otherwise BOTH spawn a process
+   * onto the same `workerSocketPath` (UDS bind contention, double-charged slot,
+   * an orphaned process). Every spawn source joins the in-flight spawn instead.
    */
-  readonly inFlightSpawns: Map<TenantId, Promise<Result<EnsuredWorker, HostError>>>;
+  readonly spawns: SingleFlight<TenantId, Result<EnsuredWorker, HostError>>;
   /**
-   * Tenants whose CURRENT incarnation was SPAWNED by this manager and therefore
-   * carries a `handle.exited` crash watcher (attached in `lazySpawn`). Crash
-   * detection for these tenants flows through that watcher.
-   *
-   * RE-ADOPTED workers (`reconcileReadopt` → `adoptLive`) are NOT in this set: the
-   * worker was re-parented across a supervisor restart, so this process never owns
-   * its `WorkerHandle` and has no `exited` promise to await. Their ONLY crash
-   * signal is `livenessSweep` (poll `proc.isAlive`). The set is what lets the sweep
-   * skip watched tenants so it never double-fires `onCrash` against a worker the
-   * exited-watcher already covers. Membership is sticky: once a tenant is spawned
-   * by this process, every later incarnation is also spawned (respawn re-enters
-   * `lazySpawn`), so it stays watcher-covered for this process's lifetime.
+   * Serializes `livenessSweep` so two overlapping ticks cannot both detect the
+   * same dead adopted worker and drive `onCrash` twice (the second `crash` from a
+   * `spawning`/`crashed` phase would drop the respawning entry). A tick that
+   * overlaps a slow sweep is SKIPPED with an empty result rather than joined —
+   * liveness detection is not latency-critical.
    */
-  readonly watchedTenants: Set<TenantId>;
-  /**
-   * Per-tenant crash-loop budget (mirrors the supervisor-process budget in
-   * thin-init). Tracks AUTOMATIC `onCrash` respawns within a SLIDING window; an
-   * exhausted budget stops the auto-restart so a boots-then-crashes-fast worker
-   * cannot pin a core. Window-based (NOT reset on `live`): a worker that reaches
-   * `live` briefly each cycle still counts toward the budget — the window sliding
-   * is the recovery path (a tenant healthy for > windowMs resets on its next crash).
-   */
-  readonly restartBudgets: Map<TenantId, RestartBudget>;
-  /**
-   * Single-flight guard for `livenessSweep`: serialize sweeps so two overlapping
-   * ticks cannot both detect the same dead adopted worker and drive `onCrash`
-   * twice (the second `crash` from a `spawning`/`crashed` phase would drop the
-   * respawning entry). One sweep at a time; a tick that overlaps a slow sweep is
-   * skipped (liveness detection is not latency-critical).
-   */
-  livenessSweepRunning: boolean;
+  readonly livenessSweeps: SkipIfRunning<readonly TenantId[]>;
 }
 
-/** Count of workers occupying a slot (spawning/live/draining) — T9 reads this. */
-const liveWorkerCount = (ctx: LifecycleCtx): number => {
-  let n = 0;
-  for (const s of ctx.workers.values()) if (ctx.lifecycle.occupiesSlot(s)) n++;
-  return n;
-};
-
 /**
- * Best-effort signal a worker pid, surfacing GENUINE kill failures.
+ * Send one signal, surfacing a GENUINE failure at the severity the stop plan
+ * gave it.
  *
  * `proc.signal` returns `ok` for ESRCH (already-dead) — the Bun adapter treats a
  * vanished pid as success — so a `!ok` here is a REAL failure (EPERM, invalid
  * signal, unexpected throw). The kill itself stays best-effort (we never abort
- * control flow), but a failure MUST be observable:
- *  - `orphanRisk: true` → the caller has already removed the map entry + registry
- *    record, so a failed SIGKILL leaves an orphaned worker still bound to its UDS
- *    while the supervisor believes the slot is reclaimed (corrupts the multi-tenant spec FR-033
- *    live-worker count). Logged at `error`.
- *  - `orphanRisk: false` → the slot is not yet considered reclaimed (e.g. SIGTERM
- *    during drain); logged at `warn`.
+ * control flow), but a failure MUST be observable: `orphan-risk` at `error`,
+ * `best-effort` at `warn` (see `SignalFailureSeverity`).
  */
-const signalWorker = async (
-  ctx: LifecycleCtx,
-  tenant: TenantId,
-  pid: number,
-  sig: "SIGTERM" | "SIGKILL",
-  orphanRisk: boolean,
-): Promise<void> => {
-  const r = await ctx.proc.signal(pid, sig);
+const signalWorker = async (ctx: LifecycleCtx, tenant: TenantId, pid: number, step: SignalStep): Promise<void> => {
+  const r = await ctx.proc.signal(pid, step.sig);
   if (r.ok) return;
-  const logCtx = { tenant, pid, sig, error: formatHostError(r.error) };
-  if (orphanRisk) {
-    ctx.logger.error(
-      "[worker-lifecycle] kill failed AFTER slot reclaim — worker may be orphaned (still bound to its UDS); live-worker count may be inaccurate",
-      logCtx,
-    );
-  } else {
-    ctx.logger.warn("[worker-lifecycle] signal failed (best-effort)", logCtx);
-  }
+  const logCtx = { tenant, pid, sig: step.sig, error: formatHostError(r.error) };
+  match(step.onFailure)
+    .with("orphan-risk", () =>
+      ctx.logger.error(
+        "[worker-lifecycle] kill failed AFTER slot reclaim — worker may be orphaned (still bound to its UDS); live-worker count may be inaccurate",
+        logCtx,
+      ))
+    .with("best-effort", () => ctx.logger.warn("[worker-lifecycle] signal failed (best-effort)", logCtx))
+    .exhaustive();
+};
+
+/** Send a stop's signals in order, each awaited before the next (`stopPlan`). */
+const stopWorker = async (ctx: LifecycleCtx, tenant: TenantId, pid: number, reason: StopReason): Promise<void> => {
+  for (const step of stopPlan(reason)) await signalWorker(ctx, tenant, pid, step);
 };
 
 /**
@@ -288,12 +256,7 @@ const signalWorker = async (
  * A phase with no durable record (anything but live/draining) is a no-op success.
  */
 const persistRecord = async (ctx: LifecycleCtx, state: WorkerState): Promise<Result<void, HostError>> => {
-  let record: WorkerRecord | undefined;
-  if (state.phase === "live") {
-    record = { tenant: state.tenant, pid: state.pid, udsPath: state.udsPath, startedAt: state.startedAt, health: "live", eagerPin: state.eagerPin };
-  } else if (state.phase === "draining") {
-    record = { tenant: state.tenant, pid: state.pid, udsPath: state.udsPath, startedAt: state.drainStartedAt, health: "draining", eagerPin: state.eagerPin };
-  }
+  const record = workerRecordOf(state);
   if (record === undefined) return ok(undefined);
   return ctx.registry.put(record);
 };
@@ -315,18 +278,17 @@ const removeRecord = async (ctx: LifecycleCtx, tenant: TenantId): Promise<void> 
  * incarnation?", so a deliberate abort SIGKILL must not be readable as a crash
  * and trigger a respawn.
  *
- * `orphanRisk` says whether a FAILED kill would leave a process still bound to
- * the tenant's UDS while the slot already reads as reclaimed — true once a
- * registry record existed, false while the spawn was never announced.
+ * `reason` says whether a registry record may exist for this spawn — which is
+ * what makes a FAILED kill orphan-risk (see `stopPlan`).
  */
 const abortSpawn = async (
   ctx: LifecycleCtx,
   tenant: TenantId,
   pid: number,
-  orphanRisk: boolean,
+  reason: Extract<StopReason, "abort-unannounced-spawn" | "abort-announced-spawn">,
 ): Promise<Result<never, HostError>> => {
-  ctx.workers.delete(tenant);
-  await signalWorker(ctx, tenant, pid, "SIGKILL", orphanRisk);
+  ctx.workers.release(tenant);
+  await stopWorker(ctx, tenant, pid, reason);
   return err(workerUnavailable(tenant));
 };
 
@@ -351,11 +313,10 @@ const hardStopAndForget = async (
   tenant: TenantId,
   pid: number | undefined,
 ): Promise<void> => {
-  ctx.workers.delete(tenant);
+  ctx.workers.release(tenant);
   await removeRecord(ctx, tenant);
   if (pid === undefined) return;
-  await signalWorker(ctx, tenant, pid, "SIGTERM", false);
-  await signalWorker(ctx, tenant, pid, "SIGKILL", true);
+  await stopWorker(ctx, tenant, pid, "hard-stop");
 };
 
 /** Wait, bounded, for a worker's UDS to become reachable via the probe. */
@@ -387,7 +348,7 @@ const waitForUds = async (ctx: LifecycleCtx, record: WorkerRecord): Promise<bool
  */
 const admitSpawn = (ctx: LifecycleCtx, tenant: TenantId): Result<TenantSpawnConfig, HostError> => {
   const { config, logger } = ctx;
-  if (config.maxLiveWorkers !== undefined && liveWorkerCount(ctx) >= config.maxLiveWorkers) {
+  if (config.maxLiveWorkers !== undefined && ctx.workers.liveCount() >= config.maxLiveWorkers) {
     logger.warn("[worker-lifecycle] at SUPERVISOR_MAX_LIVE_WORKERS — refusing new worker", { tenant, cap: config.maxLiveWorkers });
     return err(workerUnavailable(tenant));
   }
@@ -425,7 +386,7 @@ const buildSpawnEnv = async (
         tenant,
         error: formatHostError(cred.error),
       });
-      ctx.workers.delete(tenant);
+      ctx.workers.release(tenant);
       return err(workerUnavailable(tenant));
     }
     extraEnv = {
@@ -475,7 +436,7 @@ const spawnWorkerProcess = async (
       tenant,
       error: formatHostError(spawnResult.error),
     });
-    ctx.workers.delete(tenant);
+    ctx.workers.release(tenant);
     return err(workerUnavailable(tenant));
   }
   return spawnResult;
@@ -505,7 +466,7 @@ const markWorkerLive = async (
   if (!ready) {
     logger.warn("[worker-lifecycle] worker UDS did not become ready in time — killing + worker-unavailable", { tenant, pid: handle.pid });
     // No live slot/registry record was ever taken for this incarnation.
-    return abortSpawn(ctx, tenant, handle.pid, false);
+    return abortSpawn(ctx, tenant, handle.pid, "abort-unannounced-spawn");
   }
 
   // Pure transition spawning → live.
@@ -514,14 +475,14 @@ const markWorkerLive = async (
     // The entry was concurrently replaced (e.g. an evict) — fail closed for
     // this request rather than resurrect a stale spawn.
     logger.warn("[worker-lifecycle] spawning state vanished before workerLive — refusing", { tenant });
-    return abortSpawn(ctx, tenant, handle.pid, false);
+    return abortSpawn(ctx, tenant, handle.pid, "abort-unannounced-spawn");
   }
   const liveResult = ctx.lifecycle.workerLive(current, handle.pid, udsPath, clock());
   if (!liveResult.ok) {
     logger.error("[worker-lifecycle] workerLive transition rejected (invariant)", { tenant });
-    return abortSpawn(ctx, tenant, handle.pid, false);
+    return abortSpawn(ctx, tenant, handle.pid, "abort-unannounced-spawn");
   }
-  ctx.workers.set(tenant, liveResult.value);
+  ctx.workers.replace(liveResult.value);
   return ok(liveResult.value);
 };
 
@@ -545,8 +506,7 @@ const persistLiveOrAbort = async (
     "[worker-lifecycle] registry put failed for a live worker — killing it rather than leaving an unreadoptable orphan",
     { tenant, pid, error: formatHostError(persisted.error) },
   );
-  // A registry record may exist, so a failed kill is orphan-risk (error).
-  return abortSpawn(ctx, tenant, pid, true);
+  return abortSpawn(ctx, tenant, pid, "abort-announced-spawn");
 };
 
 /**
@@ -576,7 +536,7 @@ const handleSpawnedWorkerExit = async (
     if (!done.ok) {
       ctx.logger.error("[worker-lifecycle] drainComplete rejected on draining exit (invariant)", { tenant });
     }
-    ctx.workers.delete(tenant);
+    ctx.workers.release(tenant);
     await removeRecord(ctx, tenant);
     return;
   }
@@ -592,7 +552,7 @@ const handleSpawnedWorkerExit = async (
  * the drainComplete branch in `handleSpawnedWorkerExit` is what frees it.
  */
 const watchWorkerExit = (ctx: LifecycleCtx, tenant: TenantId, handle: WorkerHandle): void => {
-  ctx.watchedTenants.add(tenant); // this incarnation is watcher-covered (see set docs).
+  ctx.workers.markWatched(tenant); // this incarnation is watcher-covered (sticky).
   void handle.exited.then((code) => handleSpawnedWorkerExit(ctx, tenant, handle.pid, code)).catch((error) => {
     // This is the terminal promise boundary for every watcher effect,
     // including graceful-drain registry removal. It must not throw even when
@@ -628,11 +588,11 @@ const lazySpawn = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result<En
   // single thread. The single-flight only dedupes the SAME tenant; concurrent
   // FIRST requests for DISTINCT cold tenants each run their own `lazySpawn`, so if
   // the slot were claimed only AFTER the awaited ACL provisioning in `buildSpawnEnv`,
-  // all of them would read the same pre-commit `liveWorkerCount()`, all pass the cap
-  // and all overshoot it (`liveWorkerCount()` is the SOLE multi-tenant spec FR-033
+  // all of them would read the same pre-commit `liveCount()`, all pass the cap
+  // and all overshoot it (`liveCount()` is the SOLE multi-tenant spec FR-033
   // enforcer). Reserving here closes that TOCTOU; every failure path (in the
   // helpers called below) releases this slot fail-closed.
-  ctx.workers.set(tenant, ctx.lifecycle.requestWorker(tenant, spawnCfg.eagerPin, ctx.clock()));
+  ctx.workers.reserve(ctx.lifecycle.requestWorker(tenant, spawnCfg.eagerPin, ctx.clock()));
 
   const extraEnv = await buildSpawnEnv(ctx, tenant, spawnCfg);
   if (!extraEnv.ok) return extraEnv;
@@ -656,26 +616,17 @@ const lazySpawn = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result<En
  * double-spawn on the shared UDS — bind contention, double-charged slot, an
  * orphan). The single-flight lives at the SPAWN SEAM (not in one caller) so EVERY
  * spawn source shares it: a cold first request (`ensureWorker`) and a crash
- * auto-restart (`onCrash`) racing for the same tenant collapse to one spawn. The
- * synchronous read-then-set has no `await` between the lookup and the
- * `inFlightSpawns.set`, so on Bun's single thread it is atomic per tenant.
+ * auto-restart (`onCrash`) racing for the same tenant collapse to one spawn.
  */
-const spawnSingleFlight = (ctx: LifecycleCtx, tenant: TenantId): Promise<Result<EnsuredWorker, HostError>> => {
-  const pending = ctx.inFlightSpawns.get(tenant);
-  if (pending !== undefined) return pending;
-  const spawnPromise = lazySpawn(ctx, tenant).finally(() => {
-    ctx.inFlightSpawns.delete(tenant);
-  });
-  ctx.inFlightSpawns.set(tenant, spawnPromise);
-  return spawnPromise;
-};
+const spawnSingleFlight = (ctx: LifecycleCtx, tenant: TenantId): Promise<Result<EnsuredWorker, HostError>> =>
+  ctx.spawns.run(tenant, () => lazySpawn(ctx, tenant));
 
 const ensureWorker = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result<EnsuredWorker, HostError>> => {
   const existing = ctx.workers.get(tenant);
   if (existing !== undefined && existing.phase === "live") {
     // Touch (refresh idle clock) and route to the existing socket.
     const touched = ctx.lifecycle.touch(existing, ctx.clock());
-    if (touched.ok) ctx.workers.set(tenant, touched.value);
+    if (touched.ok) ctx.workers.replace(touched.value);
     return ok({ udsPath: existing.udsPath });
   }
   // No live worker → lazy spawn (a draining/crashed/evicted/spawning entry is
@@ -696,9 +647,7 @@ const ensureWorker = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result
 const chargeRestartBudget = (ctx: LifecycleCtx, tenant: TenantId): "restart" | "give-up" => {
   const { config } = ctx;
   const now = ctx.clock();
-  const budget = ctx.restartBudgets.get(tenant) ?? initialRestartBudget(config.maxRestartsPerWindow, config.restartWindowMs, now);
-  const decision = decideSupervisorRestart(budget, now);
-  ctx.restartBudgets.set(tenant, decision.budget);
+  const decision = ctx.workers.chargeRestart(tenant, (prior) => decideCrashRestart(prior, config, now));
   if (decision.action === "give-up") {
     ctx.logger.error("[worker-lifecycle] worker crash-loop budget exhausted — NOT auto-restarting (tenant unavailable until next request)", {
       tenant,
@@ -727,11 +676,11 @@ const onCrash = async (
     // Not in a crashable phase (spawning/crashed/evicted) — drop the entry so a
     // fresh request lazy-spawns. Still contained to this tenant.
     logger.warn("[worker-lifecycle] crash from non-crashable phase — dropping entry", { tenant, phase: current.phase });
-    ctx.workers.delete(tenant);
+    ctx.workers.release(tenant);
     await removeRecord(ctx, tenant);
     return ok(undefined);
   }
-  ctx.workers.set(tenant, crashed.value);
+  ctx.workers.replace(crashed.value);
   await removeRecord(ctx, tenant);
 
   // Restart ONLY this tenant's worker (AD-8/multi-tenant spec FR-015): re-run the spawn
@@ -739,7 +688,7 @@ const onCrash = async (
   // HITL durability is handled by existing checkpoint machinery (AD-8).
   if (chargeRestartBudget(ctx, tenant) === "give-up") {
     // Leave the entry deleted; no auto-respawn.
-    ctx.workers.delete(tenant);
+    ctx.workers.release(tenant);
     return ok(undefined);
   }
 
@@ -751,7 +700,7 @@ const onCrash = async (
   // matters. By removing the record first, lazySpawn re-enters `spawning` via
   // `requestWorker` AFTER the admission check passes. The crashed tenant is
   // replacing itself, so its restart must not be blocked by the cap.
-  ctx.workers.delete(tenant);
+  ctx.workers.release(tenant);
   // Respawn via the SAME single-flight as `ensureWorker`: a crash racing an inbound
   // request for this tenant collapses to ONE spawn (no double-spawn on the shared UDS).
   const respawn = await spawnSingleFlight(ctx, tenant);
@@ -789,7 +738,7 @@ const drain = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result<void, 
     return err(workerUnavailable(tenant));
   }
   const next = draining.value;
-  ctx.workers.set(tenant, next);
+  ctx.workers.replace(next);
   // Best-effort by design, unlike the spawn path: the draining record is
   // TRANSITIONAL. The worker has already been SIGTERM'd, and its exit drives
   // `drainComplete` → `removeRecord`. A failed write leaves the prior `live`
@@ -805,7 +754,7 @@ const drain = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result<void, 
   }
   // Signal the worker to stop accepting new work (SIGTERM). In-flight work
   // finishes; the crash/exit path drives the terminal transition.
-  await signalWorker(ctx, tenant, next.pid, "SIGTERM", false);
+  await stopWorker(ctx, tenant, next.pid, "drain");
   return ok(undefined);
 };
 
@@ -822,30 +771,6 @@ const evict = async (ctx: LifecycleCtx, tenant: TenantId): Promise<Result<void, 
 
 // ── Re-adoption ──────────────────────────────────────────────────────────────
 
-/**
- * Rebuild one tenant's pure state from a re-adopted registry record.
- *
- * C3 / AD-7: source eagerPin from the AUTHORITATIVE tenant registry config;
- * fall back to the persisted record value (belt-and-suspenders), NEVER default
- * to false.
- *
- * multi-tenant spec FR-017 fidelity: a record persisted as `draining` (it had been SIGTERM'd to
- * drain) that still answers its UDS MUST be re-adopted as `draining`, NOT
- * forced to `live`. `adoptLive` would set `canServe` true and `ensureWorker`
- * would route NEW traffic to a worker we deliberately drained. `adoptDraining`
- * keeps `canServe` false (no new routing) while still counting the slot
- * (`occupiesSlot`) and letting the liveness sweep finalise it via
- * `drainComplete` when it exits. `record.startedAt` is the drain-start instant
- * for a draining record (see `persistRecord`).
- */
-const adoptRecord = (ctx: LifecycleCtx, record: WorkerRecord): WorkerState => {
-  const spawnCfg = ctx.tenants.spawnConfigFor(record.tenant);
-  const eagerPin = spawnCfg !== undefined ? spawnCfg.eagerPin : record.eagerPin;
-  return record.health === "draining"
-    ? ctx.lifecycle.adoptDraining(record.tenant, eagerPin, record.pid, record.udsPath, record.startedAt)
-    : ctx.lifecycle.adoptLive(record.tenant, eagerPin, record.pid, record.udsPath, record.startedAt, ctx.clock());
-};
-
 const reconcileReadopt = async (
   ctx: LifecycleCtx,
 ): Promise<Result<{ readonly adopted: readonly TenantId[]; readonly pruned: readonly TenantId[] }, HostError>> => {
@@ -853,14 +778,16 @@ const reconcileReadopt = async (
   if (!result.ok) return err(result.error);
   const adoptedTenants: TenantId[] = [];
   for (const { record } of result.value.adopted) {
-    ctx.workers.set(record.tenant, adoptRecord(ctx, record));
+    // Authoritative eagerPin from the tenant registry (C3); a drained worker
+    // stays draining and the liveness sweep finalises it on exit.
+    ctx.workers.replace(adoptedState(record, ctx.tenants.spawnConfigFor(record.tenant)?.eagerPin, ctx.clock()));
     adoptedTenants.push(record.tenant);
   }
   // Prune dead in-memory entries the registry pruned (defensive — the map is
   // freshly empty on a supervisor restart, but a re-run must drop stale ones).
   for (const tenant of result.value.pruned) {
     const cur = ctx.workers.get(tenant);
-    if (cur !== undefined && cur.phase !== "live" && cur.phase !== "draining") ctx.workers.delete(tenant);
+    if (cur !== undefined && cur.phase !== "live" && cur.phase !== "draining") ctx.workers.release(tenant);
   }
   return ok({ adopted: adoptedTenants, pruned: result.value.pruned });
 };
@@ -875,7 +802,7 @@ const reconcileReadopt = async (
 const idleEvictSweep = async (ctx: LifecycleCtx): Promise<readonly TenantId[]> => {
   const { lifecycle, config } = ctx;
   const now = ctx.clock();
-  const candidates = [...ctx.workers]
+  const candidates = ctx.workers.snapshot()
     .filter(([, state]) => lifecycle.isIdleEvictable(state, config.idleEvictMs, now))
     .map(([tenant]) => tenant);
   const evicted: TenantId[] = [];
@@ -930,7 +857,7 @@ const finalizeDeadAdoptedWorker = async (ctx: LifecycleCtx, tenant: TenantId, pi
     if (!done.ok) {
       logger.error("[worker-lifecycle] drainComplete rejected on draining liveness-death (invariant)", { tenant });
     }
-    ctx.workers.delete(tenant);
+    ctx.workers.release(tenant);
     await removeRecord(ctx, tenant);
     return true;
   }
@@ -946,8 +873,8 @@ const finalizeDeadAdoptedWorker = async (ctx: LifecycleCtx, tenant: TenantId, pi
 const sweepAdoptedWorkers = async (ctx: LifecycleCtx): Promise<readonly TenantId[]> => {
   // Snapshot candidates first: only adopted (non-watched) live/draining workers.
   const candidates: Array<{ tenant: TenantId; pid: number }> = [];
-  for (const [tenant, state] of ctx.workers) {
-    if (ctx.watchedTenants.has(tenant)) continue;
+  for (const [tenant, state] of ctx.workers.snapshot()) {
+    if (ctx.workers.isWatched(tenant)) continue;
     if (state.phase === "live" || state.phase === "draining") candidates.push({ tenant, pid: state.pid });
   }
   const dead: TenantId[] = [];
@@ -962,7 +889,7 @@ const sweepAdoptedWorkers = async (ctx: LifecycleCtx): Promise<readonly TenantId
 /**
  * Liveness sweep (multi-tenant spec FR-014/FR-015, SC-006): the crash-detection SAFETY NET for
  * RE-ADOPTED workers. A worker spawned by THIS process carries a `handle.exited`
- * crash watcher (`watchedTenants`); a worker re-adopted across a supervisor
+ * crash watcher (`markWatched`); a worker re-adopted across a supervisor
  * restart (`adoptLive`) does NOT — its process was re-parented, so we never own
  * its handle and have no `exited` promise to await. Without this sweep a
  * re-adopted worker that later crashes (OOM, AD-9) would go undetected: the entry
@@ -974,29 +901,22 @@ const sweepAdoptedWorkers = async (ctx: LifecycleCtx): Promise<readonly TenantId
  * `proc.isAlive(pid)`; a dead pid drives the normal `onCrash` path (contained
  * crash → budgeted auto-restart). Watched tenants are skipped so this never
  * double-fires `onCrash` against a crash the watcher already handles. Serialized
- * via `livenessSweepRunning` so overlapping ticks cannot both drive `onCrash`.
+ * via `livenessSweeps` so overlapping ticks cannot both drive `onCrash` (an
+ * overlapping tick is skipped and returns `[]`).
  * Exposed for the supervisor to drive on a timer (the binary owns the schedule).
  * Returns the tenants detected dead (and handed to `onCrash`) this sweep.
  */
-const livenessSweep = async (ctx: LifecycleCtx): Promise<readonly TenantId[]> => {
-  if (ctx.livenessSweepRunning) return [];
-  ctx.livenessSweepRunning = true;
-  try {
-    return await sweepAdoptedWorkers(ctx);
-  } finally {
-    ctx.livenessSweepRunning = false;
-  }
-};
+const livenessSweep = (ctx: LifecycleCtx): Promise<readonly TenantId[]> =>
+  ctx.livenessSweeps.run(() => sweepAdoptedWorkers(ctx), []);
 
 export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecyclePort => {
+  const lifecycle = deps.lifecycle ?? lifecycleAdt;
   const ctx: LifecycleCtx = {
     ...deps,
-    lifecycle: deps.lifecycle ?? lifecycleAdt,
-    workers: new Map(),
-    inFlightSpawns: new Map(),
-    watchedTenants: new Set(),
-    restartBudgets: new Map(),
-    livenessSweepRunning: false,
+    lifecycle,
+    workers: createWorkerTable((state) => lifecycle.occupiesSlot(state)),
+    spawns: singleFlight(),
+    livenessSweeps: skipIfRunning(),
   };
 
   return {
@@ -1005,7 +925,7 @@ export const createWorkerLifecycle = (deps: WorkerLifecycleDeps): WorkerLifecycl
     evict: (tenant) => evict(ctx, tenant),
     onCrash: (tenant, exitCode) => onCrash(ctx, tenant, exitCode),
     reconcileReadopt: () => reconcileReadopt(ctx),
-    liveWorkerCount: () => liveWorkerCount(ctx),
+    liveWorkerCount: () => ctx.workers.liveCount(),
     // `idleEvictSweep` / `livenessSweep` are part of the typed WorkerLifecyclePort
     // (spawn-port.ts) — the supervisor binary drives each on a timer. No cast needed.
     idleEvictSweep: () => idleEvictSweep(ctx),
