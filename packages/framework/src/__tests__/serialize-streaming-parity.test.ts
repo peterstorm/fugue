@@ -32,6 +32,7 @@ const { value } = fc.letrec((tie) => ({
     fc.date({ noInvalidDate: true }),
     fc.string(),
     fc.array(tie("value"), { maxLength: 4 }),
+    fc.sparseArray(tie("value"), { maxLength: 5 }),
     fc.dictionary(
       fc.oneof(fc.string(), fc.constantFrom("__proto__", "constructor", "prototype", "__map__", "__undefined__")),
       tie("value"),
@@ -63,6 +64,8 @@ describe("toJson streams the serializer grammar byte-for-byte", () => {
       { n: Object(5), s: Object("s"), b: Object(true) },
       { withToJson: { toJSON: () => ({ m: new Map([["k", 1]]) }), v: 1 } },
       [undefined, () => 1, Symbol("s")],
+      // Holes stringify as null (map keeps them); an explicit undefined is tagged.
+      { a: [, 1, , undefined] },
       { nested: { set: new Set([new Date(1), undefined]) } },
     ];
     for (const c of cases) expect(streamed(c)).toBe(reference(c));
