@@ -231,17 +231,14 @@ const requestDirectWakeup = async (
  * on crashes. Non-durable load is bounded separately by the supervisor's
  * request-scoped `maxConcurrentRuns` gate.
  */
-const admitQueuedRun = (
+const admitQueuedRun = async (
   runStore: RunStorePort,
   admission: QueuedRunAdmission,
-): Promise<Result<void, HostError>> =>
-  match(admission)
-    .with({ kind: "unlimited" }, () => Promise.resolve(ok(undefined)))
-    .with({ kind: "bounded" }, async (policy): Promise<Result<void, HostError>> => {
-      const active = await runStore.countActiveRuns();
-      return active.ok ? decideQueuedRunAdmission(policy, active.value) : active;
-    })
-    .exhaustive();
+): Promise<Result<void, HostError>> => {
+  if (admission.kind === "unlimited") return ok(undefined);
+  const active = await runStore.countActiveRuns();
+  return active.ok ? decideQueuedRunAdmission(admission, active.value) : active;
+};
 
 const startRun = async (
   ctx: StartCtx,
