@@ -17,7 +17,7 @@
 //   - SLOTS are tracked from dispatch until the shell is done with them
 //     (child failure, output the child schema rejects, or the save of its
 //     completion settling). `maxInFlight` is therefore a lower bound of the
-//     machine's in-flight count, and `pendingAtReturn` counts slots still
+//     machine's in-flight count, and pendingAtReturn counts slots still
 //     outstanding when `runMappedFan` resolved — the INV-6 witness: it must
 //     be 0 on every return path.
 //   - `quiesce` yields macrotasks, so every microtask the shell queued has
@@ -369,7 +369,7 @@ export const fanHarness = (o: FanHarnessOptions) => {
 
 /**
  * Drive a started fan to completion: whenever it is quiescent, settle the
- * in-flight child `choose` picks with the plan `planOf` gives it.
+ * in-flight child `choose` picks with the plan planOf gives it.
  */
 export const drive = async (
   h: FanHarness,

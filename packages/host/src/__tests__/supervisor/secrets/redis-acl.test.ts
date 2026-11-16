@@ -4,7 +4,7 @@
  * Two layers:
  *   1. PURE spec (`redis-acl.ts`): the scope-only key pattern, command scoping,
  *      excluded admin commands, the DENIAL of keyspace enumeration
- *      (`SCAN`/`RANDOMKEY`/`DBSIZE`/`KEYS` — key-pattern ACLs do not reliably
+ *      (`SCAN`/RANDOMKEY/DBSIZE/`KEYS` — key-pattern ACLs do not reliably
  *      scope enumeration across Redis versions), and the cross-tenant non-overlap
  *      that MAKES SC-001 true (an adversarial worker's cross-tenant `GET` hits
  *      NOPERM, and it cannot enumerate the keyspace to discover other tenants).
@@ -106,7 +106,7 @@ describe("buildAclSpec — scope-only key pattern (SC-001, FR-009)", () => {
     const spec = buildAclSpec(mkTenant("acme"));
     expect(spec.rules).toContain("on");
     expect(spec.rules).toContain("resetchannels");
-    // No channel grant (`&…` or `allchannels`).
+    // No channel grant (`&…` or allchannels).
     expect(spec.rules.some((r) => r.startsWith("&") || r === "allchannels")).toBe(false);
   });
 });
@@ -228,7 +228,7 @@ describe("buildAclSpec — cross-tenant scope is non-overlapping (FR-010, US2)",
 
   it("PREFIX COLLISION: one tenant id being a prefix of another does NOT widen scope", () => {
     // The `:`-delimited scheme defends against ids where one is a textual prefix
-    // of another. `acme2`'s keys must NOT match `acme`'s glob prefix — the `:`
+    // of another. acme2's keys must NOT match `acme`'s glob prefix — the `:`
     // after the tenant segment is the guard. This is the exact hazard the scheme
     // exists to prevent.
     const acme = buildAclSpec(mkTenant("acme"));
@@ -277,7 +277,7 @@ describe("buildAclSpec — properties (any valid TenantId)", () => {
     // (`fugue:<a>:`), and vice-versa. We model glob-disjointness with the
     // `startsWith` prefix check — the actual containment test a `:`-delimited
     // prefix glob performs. This catches the prefix-collision hazard (e.g.
-    // `acme` vs `acme2`) that plain string inequality silently passes.
+    // `acme` vs acme2) that plain string inequality silently passes.
     fc.assert(
       fc.property(tenantIdArb, tenantIdArb, fc.string(), (a, b, suffix) => {
         fc.pre(a !== b);

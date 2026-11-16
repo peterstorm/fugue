@@ -13,7 +13,7 @@
  *
  *  (a) AUTHORIZATION gate (the action-prevention control): the in-Teams button
  *      path authorizes the clicking user against the run's immutable owning team
- *      AT PARITY with the HTTP approve path (`runs.ts#authorizeRunAccess`). The card
+ *      AT PARITY with the HTTP approve path (`http/handlers/runs.ts#authorizeRunAccess`). The card
  *      click carries the clicker's `from.aadObjectId`; `approverTeamIdentity`
  *      (`hitl/identity.ts`) resolves it — fail-closed on an unknown id — to an
  *      `AuthIdentity`, and the SAME `canAccessDag` predicate the HTTP path uses
@@ -37,7 +37,7 @@
  * Behaviour by activity type:
  *   - conversationUpdate (bot added) → capture + persist the conversation
  *     reference (default, plus per-team when the team is mapped).
- *   - invoke `adaptiveCard/action` with our verb → authorize, then map the button
+ *   - invoke adaptiveCard/action with our verb → authorize, then map the button
  *     to a HumanAction, record the decision (resuming the run), refresh the card.
  *   - anything else → 200 no-op.
  */
@@ -133,7 +133,7 @@ const parseActivity = (raw: unknown): ParsedActivity => {
   };
 };
 
-/** A Teams `adaptiveCard/action` invoke response carrying a refreshed card. */
+/** A Teams adaptiveCard/action invoke response carrying a refreshed card. */
 const cardInvokeResponse = (card: unknown): BotResponse => ({
   status: 200,
   body: { statusCode: 200, type: "application/vnd.microsoft.card.adaptive", value: card },
@@ -260,7 +260,7 @@ export const handleBotActivity = async (
   if (action === null) return messageInvokeResponse(`Unknown decision '${decision}'.`);
 
   // 4. Load the run, then AUTHORIZE BEFORE disclosing ANY run state — PARITY with
-  //    the HTTP approve path (`runs.ts#createApproveRunHandler`: getRun → authorize
+  //    the HTTP approve path (`http/handlers/runs.ts#createApproveRunHandler`: getRun → authorize
   //    → only then reveal status). The card `data` (runId/nodeId) is client-supplied
   //    and a Bot-Framework token only proves the request came from Bot Framework,
   //    NOT that this clicker is authorized for this run's team. Checking run

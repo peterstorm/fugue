@@ -17,7 +17,7 @@ an `AuthIdentity` of kind `user`, carrying the realm JWT's verified subject. To
 authorize *which* DAGs that user may run, the run-gate needs the user's team
 memberships. The fugue-platform realm now emits those memberships as a
 multi-valued `teams` claim on the access token — realm roles (one per team)
-projected through an `oidc-usermodel-realm-role-mapper` (FR-020), derived
+projected through an oidc-usermodel-realm-role-mapper (FR-020), derived
 upstream from the user's Azure groups. The host must turn that claim into the
 `readonly string[]` that `RealmJwtClaims.teams` / `AuthenticatedUser.teams`
 promises, which `authorizeUserRun = (u, dagTeam) => u.teams.includes(dagTeam)`
@@ -65,7 +65,7 @@ already owns a runtime schema validator (Zod) used at the **config boundary**
      not the functional core). It also **splits the parse seam**: `iss`/`aud`/`exp`/
      `sub`/`azp` would stay hand-parsed while `teams` alone went through Zod, so a
      future reader must reason about two parsing mechanisms in one module and two
-     error-shaping paths (Zod's `ZodError` vs. the module's `AuthError` ADT). The
+     error-shaping paths (Zod's ZodError vs. the module's `AuthError` ADT). The
      gain — one declarative predicate — is small against an array-of-strings
      check the module can already express in three lines.
 

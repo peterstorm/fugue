@@ -56,7 +56,7 @@ Concrete enforcement:
 
 - **Import direction:** `@fuguejs/host` → `@fuguejs/framework` (allowed). `@fuguejs/framework` → `@fuguejs/host` (forbidden).
 - **DAG imports:** DAG code imports `@fuguejs/framework` for execution types and `@fuguejs/host` for `DagRegistration` only.
-- **Lint rule:** The existing import-graph lint (`scripts/check-imports.ts` from ADR 0001) is extended to verify `packages/framework/src/**` never imports from `packages/host/**`.
+- **Lint rule:** The existing import-graph lint (`packages/framework/src/scripts/check-imports.ts` from ADR 0001) is extended to verify `packages/framework/src/**` never imports from `packages/host/**`.
 - **NodeContext construction:** The host's `node-context-factory.ts` adapter constructs `NodeContext` using framework's public API (`makeNodeContext` or direct construction). The framework doesn't provide host-specific helpers.
 - **Type compatibility:** The host declares `@fuguejs/framework` as a `dependencies` entry in `packages/host/package.json`. Framework types (`DagDef`, `NodeDef`, etc.) are consumed as-is; no wrappers or re-exports.
 

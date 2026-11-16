@@ -10,16 +10,16 @@ Accepted
 
 ADR-0082 made the per-run LLM budget mean money instead of tokens. It did not make it survive anything.
 
-`createMeteredLlm` is constructed inside `createNodeContextForDag`, and its meter starts at `emptyMeter()`. The HITL run executor calls that factory **once per execution slice** (`hitl/adapters/run-executor.ts`). So a run that parks for a human decision and resumes comes back with an empty meter: **five parks, six budgets.** A crash-looping run is worse — every restart is a fresh ceiling.
+`createMeteredLlm` is constructed inside `createNodeContextForDag`, and its meter starts at `emptyMeter()`. The HITL run executor calls that factory **once per execution slice** (`packages/host/src/hitl/adapters/run-executor.ts`). So a run that parks for a human decision and resumes comes back with an empty meter: **five parks, six budgets.** A crash-looping run is worse — every restart is a fresh ceiling.
 
-Nothing durable existed to rehydrate from. Usage reaches OTel spans and the `llm.metered` log line, but `types/events.ts` carries no usage at all and `RunMeta` has no spend field. F6 is what made this urgent rather than theoretical: before durable resume, losing the meter meant losing the run too, so the two failure modes were indistinguishable.
+Nothing durable existed to rehydrate from. Usage reaches OTel spans and the `llm.metered` log line, but `packages/framework/src/types/events.ts` carries no usage at all and `RunMeta` has no spend field. F6 is what made this urgent rather than theoretical: before durable resume, losing the meter meant losing the run too, so the two failure modes were indistinguishable.
 
 The hard part is not storage. It is that spend accrues **per call**, concurrently, from a decorator that may be running several calls at once — while the thing being stored, `Spend`, contains a `PricedSpend` union whose `unpriced` member carries a *set* of model names. A naive durable counter is a read-modify-write, and a read-modify-write under concurrency loses increments.
 
 ## Options Considered
 
 1. **A ledger port storing spend across a hash plus set**
-   - Pros: `Spend`'s monoid is (sum, sum, sum, set-union), mapped directly to `HINCRBY` and `SADD`.
+   - Pros: `Spend`'s monoid is (sum, sum, sum, set-union), mapped directly to HINCRBY and `SADD`.
    - Cons: the two keys cannot be read as one snapshot. Independent expiry can erase unpriced evidence while numeric spend survives, and `HGETALL` followed by `SMEMBERS` has an expiry-between-reads race even if writes use one transaction. Rejected.
 
 2. **Store spend in the checkpoint (`RunMeta`)**
@@ -30,7 +30,7 @@ The hard part is not storage. It is that spend accrues **per call**, concurrentl
    - Pros: two round trips per slice instead of two per call; no concurrency question at all.
    - Cons: a crash mid-slice loses the *entire slice's* spend, which is precisely the crash-loop case the budget most needs to survive. It fixes park/resume and leaves the worse hole open. Rejected.
 
-4. **One-hash optimistic saturating append (`WATCH`/`HGET`/`MULTI`/`EXEC`)**
+4. **One-hash optimistic saturating append (`WATCH`/HGET/`MULTI`/`EXEC`)**
    - Pros: reserved marker fields, numeric fields, and one retention deadline share one aggregate key. The transaction computes each axis with the same safe-integer saturation as `addSpend`, so durable Redis state remains readable after cumulative overflow. Marker union and all numeric replacements commit together; hydration remains one `HGETALL`.
    - Cons: one optimistic transaction per delegated LLM attempt, with three field reads and conflict retries. Only an `EXEC null` is retried because Redis proves it did not commit; a thrown/lost acknowledgement remains ambiguous and is never replayed. **Selected.**
 
@@ -51,7 +51,7 @@ type SpendLedgerPort = {
 };
 ```
 
-**The encoding preserves `addSpend`'s saturating commutative axes across the full safe-integer domain.** `domain/spend-record.ts` flattens a `Spend` into ONE Redis hash: three established numeric fields plus reserved `$usage:unknown` and `$unpriced:<canonical-encoded-model>` fields whose value is exactly `1`. Usage uncertainty and the `priced`/`unpriced` discriminant are **derived from marker-field presence** rather than stored as mutable tags. The adapter watches the aggregate hash, reads the three numeric fields, computes each replacement with the same `Number.MAX_SAFE_INTEGER` saturation as the in-process monoid, then queues marker `HSET`s first, nonzero numeric `HSET`s cost-first (`micros`, `tokens`, `calls`), and one optional `EXPIRE`. Every `MULTI`/`EXEC` sharing that command connection — including checkpoint/spend-retention commits that do not themselves WATCH — enters the same local serializer, because any EXEC on the connection can consume its connection-scoped WATCH state. Cross-process writers remain concurrent: `EXEC null` proves one won and safely retries from a fresh read. Any thrown or lost acknowledgement remains a typed ambiguous failure and is never replayed. No Lua, second key, or split hydration read is used.
+**The encoding preserves `addSpend`'s saturating commutative axes across the full safe-integer domain.** `packages/host/src/domain/spend-record.ts` flattens a `Spend` into ONE Redis hash: three established numeric fields plus reserved `$usage:unknown` and `$unpriced:<canonical-encoded-model>` fields whose value is exactly `1`. Usage uncertainty and the `priced`/`unpriced` discriminant are **derived from marker-field presence** rather than stored as mutable tags. The adapter watches the aggregate hash, reads the three numeric fields, computes each replacement with the same `Number.MAX_SAFE_INTEGER` saturation as the in-process monoid, then queues marker `HSET`s first, nonzero numeric `HSET`s cost-first (`micros`, `tokens`, `calls`), and one optional `EXPIRE`. Every `MULTI`/`EXEC` sharing that command connection — including checkpoint/spend-retention commits that do not themselves WATCH — enters the same local serializer, because any EXEC on the connection can consume its connection-scoped WATCH state. Cross-process writers remain concurrent: `EXEC null` proves one won and safely retries from a fresh read. Any thrown or lost acknowledgement remains a typed ambiguous failure and is never replayed. No Lua, second key, or split hydration read is used.
 
 **`add` returns nothing.** The in-process meter already knows the run's figure, and the durability port only acknowledges whether the append transaction was observed as successful. Returning a total would add an unused read-model contract to a write seam and still could not resolve a lost acknowledgement.
 

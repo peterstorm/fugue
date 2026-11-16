@@ -662,7 +662,7 @@ describe("@fuguejs/oracle — healthCheckWithTimeout", () => {
  * echo the supplied connectString/DSN.
  *
  * Regression guard: before Fix 1, connect() propagated the RAW driver error
- * un-stripped (unlike query/healthCheck), so embedded `user/secret@host`
+ * un-stripped (unlike query/healthCheck), so embedded user/secret@host
  * reached the boot log and the abort HostError. The re-thrown error must now
  * carry NO credential substring.
  */

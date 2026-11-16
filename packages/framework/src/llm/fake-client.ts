@@ -129,7 +129,7 @@ const isThenable = (value: unknown): boolean => {
  * `nodeId` read threw or was missing (hostile request object). Mirrors the
  * checkpoint-write-failed truthful-branding policy: a typed error always
  * carries a grammar-valid id and the message carries the true cause — never
- * a raw rejection (FR-040). The `llm_` namespace keeps the placeholder out of
+ * a raw rejection (FR-040). The llm_ namespace keeps the placeholder out of
  * the real-node id space for metering attribution.
  */
 const UNKNOWN_NODE_ID: NodeId = __brandNodeId("llm_unknown_node");
@@ -261,7 +261,7 @@ export class FakeLlmClient implements LlmClient {
     }
 
     // The declared schema IS the contract of `O` (parity with the
-    // `withTools` final-turn seam, where the check runs BEFORE
+    // `sendWithTools` final-turn seam, where the check runs BEFORE
     // serialization): a fixture violating it must fail here with a typed
     // node-crash, not silently pass the `raw as O` cast — the cast is
     // uncheckable across the `unknown` seam, so the fake validates exactly

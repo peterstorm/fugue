@@ -426,7 +426,7 @@ describe("OpenAILlmClient.sendStructured", () => {
   it("response.status incomplete surfaces incomplete_details.reason on the JSON-parse and schema-failure arms", async () => {
     // Pins the `incompleteDetail(response)` call sites (openai-client.ts
     // ~:365/:375). The API distinguishes two truncation causes
-    // (`max_output_tokens` vs `content_filter`); the stated reason must reach
+    // (max_output_tokens vs content_filter); the stated reason must reach
     // the error message so a filter is not misread as a token cap. Dropping
     // the `${truncated ? \` (${incompleteDetail(response)})\` : ""}` suffix (or
     // reducing incompleteDetail to the bare status) must FAIL these.

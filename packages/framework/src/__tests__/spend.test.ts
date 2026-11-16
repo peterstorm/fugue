@@ -57,7 +57,7 @@ const arbSpend: fc.Arbitrary<Spend> = fc.oneof(
       )
       .map(([models, m]): PricedSpend => ({
         kind: "unpriced",
-        // The type guarantees non-emptiness; `uniqueArray` guarantees it at
+        // The type guarantees non-emptiness; uniqueArray guarantees it at
         // runtime, and sorting matches the canonical form `unionModels` keeps.
         models: modelsOf(models),
         knownMicros: micros(m),

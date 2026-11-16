@@ -74,7 +74,7 @@ const lifecycleLiveByTenant = (sockOf: (t: TenantId) => string): WorkerLifecycle
 
 /**
  * Build the SAME stateful admit binding `main-supervisor.ts` wires, over the REAL
- * `admitTenant` ADT. `releasedTokens`/`tenantConc` exposed so a test can inspect
+ * `admitTenant` ADT. releasedTokens/`tenantConc` exposed so a test can inspect
  * state, but the binding itself is verbatim production logic.
  */
 const buildRealAdmission = (registry: ReturnType<typeof createRedisTenantRegistry>): AdmissionPort => {

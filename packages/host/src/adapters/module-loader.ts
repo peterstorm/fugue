@@ -192,7 +192,7 @@ export const loadDagModule = async (
 };
 
 /**
- * Validate the optional `prompts/registry.json` (prompt versioning, opt-in).
+ * Validate the optional prompts/registry.json (prompt versioning, opt-in).
  *
  * Shape: `{ "<prompt-name>": { "version": "1.0.0", "hash": "<sha256/16>" } }` —
  * the same contract as the framework's `FilePromptRegistry`. When the file is
@@ -320,14 +320,14 @@ export const loadPromptsForModule = async (
  * Discover all DAG module paths in the given root directory.
  *
  * Convention: `dags/{team}/.../{dag-name}/dag.ts` — the FIRST folder under
- * `dags/` is the team (see `extractTeam`); intermediate folders are free-form
- * intra-team grouping (e.g. `dags/business-sales/leads/lead-scoring/dag.ts`).
+ * dags/ is the team (see `extractTeam`); intermediate folders are free-form
+ * intra-team grouping (e.g. dags/business-sales/leads/lead-scoring/dag.ts).
  * A `dag.ts` file marks a DAG root at ANY depth, so the glob is depth-agnostic
  * (`dags/**` + `dag.ts`) rather than the old fixed two-level team/dag glob.
  *
  * `dag.ts` therefore means "this is a DAG root" — do NOT name a non-DAG module
- * `dag.ts` (a node helper, a barrel) anywhere under `dags/`. Paths inside a
- * `node_modules/` are excluded so a baked dependency's example `dag.ts` is never
+ * `dag.ts` (a node helper, a barrel) anywhere under dags/. Paths inside a
+ * node_modules/ are excluded so a baked dependency's example `dag.ts` is never
  * mistaken for a deployed DAG.
  *
  * Returns absolute paths to each discovered dag.ts file.

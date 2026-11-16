@@ -19,7 +19,7 @@
  * persisted ADT (`RunMeta`, `HumanAction`, `ConversationReference`) rather than
  * `as`-cast. A torn/evicted/hand-edited checkpoint is rejected as
  * `internal-invariant-violated` instead of feeding a bad discriminant into the
- * transition (which would throw a raw `NonExhaustiveError`). Construction is
+ * transition (which would throw a raw NonExhaustiveError). Construction is
  * therefore fallible and returns a `Result`.
  *
  * `wrapDagJobLike` (applied inside the kernel) strips closures before calling

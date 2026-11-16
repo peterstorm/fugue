@@ -90,7 +90,7 @@ export interface ComposeOptions {
    */
   readonly team: Kebab;
   readonly model?: string;
-  /** Root dir that contains `dags/` and resolvable node_modules. */
+  /** Root dir that contains dags/ and resolvable node_modules. */
   readonly root?: string;
   readonly owner?: string;
   readonly force?: boolean;

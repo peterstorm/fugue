@@ -172,7 +172,7 @@ export const encodeShareUrl = (url: string): string => {
 /**
  * Resolve a `FileRef` to its Graph content + metadata URLs. Handles the three
  * MS Graph variants; any other variant (e.g. `localPath`, or a future foreign
- * provider) fails closed with an `unsupported-ref` error — the runtime half of
+ * provider) fails closed with an `unsupportedRefError` — the runtime half of
  * the ref↔adapter contract (ADR-0052). Exported for testing.
  */
 export const resolveUrls = (

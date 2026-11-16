@@ -186,7 +186,7 @@ const detectShapeHelper = (dag: DagDef): LintAdvisory | null => {
 // ---------------------------------------------------------------------------
 
 /**
- * Flag the legacy request-carrier idiom (the pre-0.2.0 `read-request` node): a
+ * Flag the legacy request-carrier idiom (the pre-0.2.0 read-request node): a
  * transform whose SOLE incoming source is `DAG_INPUT` and whose `inputSchema`
  * and `outputSchema` are the SAME reference. Such a node exists only to forward
  * the DAG request one hop downstream — exactly what a direct `DAG_INPUT` edge to

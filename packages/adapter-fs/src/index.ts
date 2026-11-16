@@ -16,7 +16,7 @@
  * Every `localPath` is resolved against the configured `rootDir` and rejected
  * (non-retriable) if it escapes that root (`../` traversal or an outside
  * absolute path). Absolute paths already inside the root remain confined and
- * are accepted. This is the local equivalent of SharePoint's `Sites.Selected`. Note:
+ * are accepted. This is the local equivalent of SharePoint's Sites.Selected. Note:
  * confinement is lexical — for untrusted input over symlinked roots, mount the
  * volume read-only and/or disallow symlink-following at the mount.
  *

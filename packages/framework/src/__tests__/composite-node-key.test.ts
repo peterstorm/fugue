@@ -21,7 +21,7 @@ import type { CompositeNodeKeyOpts } from "../shared/composite-node-key.js";
 /**
  * De-branded mirror of `ParsedCompositeNodeKey`. `parseCompositeNodeKey` carries
  * the `ID_PATTERN` proof forward as a branded `NodeId`; brands erase at runtime
- * and `toEqual` compares structurally, so this file keeps its expectations as
+ * and toEqual compares structurally, so this file keeps its expectations as
  * plain string literals instead of minting a `NodeId` at every assertion.
  */
 type ExpectedParse =
@@ -183,7 +183,7 @@ describe("compositeNodeKey — hostile inputs rejected (typed throws)", () => {
 
   // Round-9 C1/A2 — typeof-first ordering + total-message pins. `Number.isSafeInteger`
   // never traps (non-coercing), but the conjunction's TAIL (`value >= 0`) applies
-  // ToNumber: a re-ordered guard would trap on a `valueOf`-bearing hostile and the
+  // ToNumber: a re-ordered guard would trap on a valueOf-bearing hostile and the
   // codec would reject RAW with the hostile's own error text. The rejection must
   // name the CODEC'S rule — "expected a non-negative safe integer" — proving the
   // guard rejected before any coercion was observed. The `toString` twin pins the
@@ -215,7 +215,7 @@ describe("compositeNodeKey — hostile inputs rejected (typed throws)", () => {
   // which treats `null` as ABSENT — so `{ namespace: null, index: 5 }` encoded
   // as `dag@read-node@5@0`, byte-identical to the call that supplied no
   // namespace at all, with the caller's out-of-contract value silently
-  // discarded. `strictNullChecks` keeps honest TS callers out, but forged JS
+  // discarded. strictNullChecks keeps honest TS callers out, but forged JS
   // values at `saveNode`'s opts boundary are this module's stated threat model,
   // and the in-memory and Redis backends pass `opts` straight through with no
   // prior re-validation (only the file backend's `parseSaveNodeBoundary`

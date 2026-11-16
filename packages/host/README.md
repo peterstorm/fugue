@@ -4,7 +4,7 @@ The Fugue Host is a production-grade runtime that discovers, loads, and serves D
 
 ## Docs
 
-Shipped in this package — read from `node_modules/@fuguejs/host/docs/`:
+Shipped in this package — read from node_modules/@fuguejs/host/docs/:
 
 - [`docs/writing-dags.md`](./docs/writing-dags.md) — the `DagRegistration` + `fugue.yaml` + discovery contract DAG authors deploy against.
 - [`docs/auth.md`](./docs/auth.md) — admin / team-token / OIDC auth and team isolation.

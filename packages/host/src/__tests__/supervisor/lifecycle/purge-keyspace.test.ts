@@ -29,7 +29,7 @@ const hostErr = (message: string): HostError => ({ kind: "config-invalid", messa
 
 /**
  * Fake admin-Redis: returns the supplied scan pages in call order, and routes
- * `del` through `delFor` (default: deletes 1). Records every key whose del was
+ * `del` through delFor (default: deletes 1). Records every key whose del was
  * attempted and every key successfully deleted, plus the cursors `scan` saw.
  */
 const fakeRedis = (

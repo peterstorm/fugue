@@ -3,7 +3,7 @@
 // The kernel mints spans from `dag-runtime/run-dag-stateful.ts`,
 // `dag-runtime/eval-judges.ts`, and `dag-runtime/node-span.ts`. Routing them
 // through a single resolved reference lets the host install a replacement
-// tracer (typically alongside `initTracing` — or a `RecordingTracer` in
+// tracer (typically alongside `initTracing` — or a RecordingTracer in
 // tests) without each call site touching the global OTel SDK directly.
 
 import { trace, type Tracer } from "@opentelemetry/api";

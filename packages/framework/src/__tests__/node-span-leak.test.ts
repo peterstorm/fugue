@@ -8,7 +8,7 @@ import { resourceName } from "../types/freshness.js";
 
 /**
  * Wave 1.1 regression test. Before the fix, `withTracedNodeSpan` did
- * `const result = await fn()` with no `try/catch` around `fn()` itself —
+ * `const result = await fn()` with no try/catch around `fn()` itself —
  * under `OBSERVER_STRICT=1` (or any other re-thrown failure inside the
  * node), `span.end()` never ran and the OTel pipeline leaked spans.
  *

@@ -29,7 +29,7 @@ Several forces constrain how the new packages reach fugue-dags:
   fields in `bun.lock`, so a bump that misses the lockfile fails the release.
 - **Tag pushes and contract publishes belong to the user.** FR-060 and AS-036
   reserve pushing the release tag to the user. Publishing leads contract 0.5.0
-  through fugue-dags' `publish-contract.yml` is gated the same way, under the
+  through fugue-dags' publish-contract.yml is gated the same way, under the
   same feature's leads-contract decision.
 - **One framework copy at runtime.** fugue-dags imports `framework`,
   `document-source`, `xlsx`, `fs` (adapter-fs), `host` and `ms-graph`
@@ -83,7 +83,7 @@ Several forces constrain how the new packages reach fugue-dags:
 **All nine published `@fuguejs/*` packages move from 0.5.1 to 0.6.0 in
 lockstep; fugue-dags consumes the local fugue workspace through `bun link`
 during development, and switches to the published 0.6.0 packages only after the
-user pushes the `v0.6.0` tag.**
+user pushes the v0.6.0 tag.**
 
 Concretely:
 
@@ -106,17 +106,17 @@ Concretely:
   breach blocks the release; budgets are never raised to make a run pass.
 - **No merge with links.** The fugue-dags branch is not merged while its
   `package.json` or `bun.lock` carries any `link:` specifier.
-- **User-gated publication.** The user pushes `v0.6.0` in fugue, where
+- **User-gated publication.** The user pushes v0.6.0 in fugue, where
   `release.yaml` validates lockstep and publishes, and runs
-  `publish-contract.yml` in fugue-dags for leads contract 0.5.0. No agent pushes
+  publish-contract.yml in fugue-dags for leads contract 0.5.0. No agent pushes
   tags or triggers either publish.
 - **Final pin (the closing fugue-dags pin change).** Only after both publishes, and after checking
   each version with `npm view <name>@0.6.0 version`, every `link:` specifier is
   replaced with `0.6.0` and the external contract dependency is set to `0.5.0`
   (the in-repo workspace dependency stays `workspace:*`). Then `bun install`,
-  the full `verify:junit`, and the `snapshot-memory.ts` and `parse-memory.ts`
+  the full `verify:junit`, and the snapshot-memory.ts and `parse-memory.ts`
   real-data benchmarks are re-run to fill the "after (0.6.0)" column of
-  `fugue-dags/docs/benchmarks/2026-11-host-memory-spikes.md`.
+  fugue-dags/docs/benchmarks/2026-11-host-memory-spikes.md.
 
 ## Consequences
 

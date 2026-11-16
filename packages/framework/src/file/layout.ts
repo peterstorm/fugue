@@ -121,7 +121,7 @@ export const isPlainRecord = (value: unknown): value is Record<string, unknown> 
  *
  * Well-formed Unicode strings retain the original `sha256(UTF-8(key))`
  * mapping. JavaScript also admits ill-formed UTF-16 strings containing lone
- * surrogates; passing those strings directly to `Hash.update` would first
+ * surrogates; passing those strings directly to Hash.update would first
  * replace every lone surrogate with U+FFFD and conflate distinct resources.
  * Ill-formed strings therefore use an injective code-unit encoding:
  *

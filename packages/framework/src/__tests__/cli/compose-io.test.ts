@@ -14,7 +14,7 @@ import { readlineComposeIo, type ReadlineLike } from "../../cli/compose-io.js";
  * (or leaves pending), `close()` fires the registered close listener the way
  * the real interface's "close" event does.
  *
- * `questionBehavior` scripts Bun's divergence from Node: under Bun,
+ * questionBehavior scripts Bun's divergence from Node: under Bun,
  * `rl.question` on a closed interface throws SYNCHRONOUSLY instead of
  * returning a never-settling promise.
  *   - "pending"                    — Node semantics (default): always return

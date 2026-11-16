@@ -204,7 +204,7 @@ export const resolveMappedItems = (
   // reads agreeing.
   //
   // Inside a try for the reason the guard above does NOT cover it: `Array.isArray`
-  // performs `IsArray`, which unwraps a Proxy to its target WITHOUT invoking any
+  // performs IsArray, which unwraps a Proxy to its target WITHOUT invoking any
   // trap. Passing that guard therefore proves the target is an array and proves
   // nothing at all about what the next property read does — a Proxy whose `get`
   // trap throws on `"length"` reaches this line having satisfied every check
@@ -227,14 +227,14 @@ export const resolveMappedItems = (
   // The guard the three earlier hardenings did not cover. They each closed an
   // access that could THROW or CHANGE; none established that what came back is
   // a number at all. It need not be: a `length` getter returning an object with
-  // a stateful `valueOf` — one reporting 1 the first time it is coerced and 1e6
+  // a stateful valueOf — one reporting 1 the first time it is coerced and 1e6
   // afterwards — passes `width > max` on the first ToPrimitive call and then
   // lengthens the "fixed-count" loop below on every iteration, because `i <
   // width` re-coerces the SAME object each time. That is the maxWidth bypass of
   // round 1 again, reached by coercion rather than by growth.
   //
   // Narrowing to a primitive here is what closes it, not merely detecting the
-  // hostile case: a primitive `number` in `<` and `>` never calls `valueOf`,
+  // hostile case: a primitive `number` in `<` and `>` never calls valueOf,
   // so past this line there is no second reading of the width to disagree with
   // the one the bound was checked against. Same shape as `asMaxWidth` and
   // `asMapIndex` in this file, which lead with the identical `typeof` check.

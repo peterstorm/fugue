@@ -43,7 +43,7 @@ export const MAX_CACHE_BREAKPOINTS = 4;
  * the breakpoints that carry it, so "no breakpoints but a TTL" and "a
  * breakpoint with no TTL to put on it" are both nonsense. Splitting on
  * `systemBreakpoint` makes each unrepresentable instead of merely unproduced —
- * the same treatment `BudgetDecision` and `AdmitDecision` get in the host meter.
+ * the same treatment BudgetDecision and `AdmitDecision` get in the host meter.
  * A turn breakpoint without a system one is also excluded: the system prefix is
  * the cheapest and largest cacheable span, so caching a turn while leaving it
  * uncached is never the intent.

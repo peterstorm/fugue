@@ -299,7 +299,7 @@ describe("runGracePurgeSweep (SC-010 retain-then-purge)", () => {
   it("aggregates per-tenant outcomes losslessly: continues past a partially-failing tenant, preserving REAL typed failedSteps + keysDeleted (C5, SC-010)", async () => {
     const now = 10_000_000;
     const win = DAY_MS;
-    // `due-bad`'s keyspace purge persistently fails; `due-ok` purges cleanly.
+    // due-bad's keyspace purge persistently fails; due-ok purges cleanly.
     const registry = seededRegistry([
       tombstone("due-ok", now - 2 * DAY_MS),
       tombstone("due-bad", now - 2 * DAY_MS),

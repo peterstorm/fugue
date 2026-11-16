@@ -4,7 +4,7 @@
 // `FileEventRecord` is the byte-level schema of every journal record file
 // (`events/<NNNNNN>-<digest>.json`, ADR-0076): `{ schemaVersion: 1, sequence,
 // dedupKey, recordedAtMs, event }` — byte-identical to Loom's proven
-// `ProgramEventRecord`. Records are serialized with `toJson` so Map/Set/Date
+// ProgramEventRecord. Records are serialized with `toJson` so Map/Set/Date
 // values inside `event` survive the JSON round-trip; the read pipeline is
 // `tryParseEventRecordJson` — `JSON.parse` + the shared exact canonical
 // serializer-grammar validator + `deserializeValue` (restoring those values)
@@ -91,10 +91,10 @@
 //
 // Pure module — no I/O (INV-1; only framework-core imports — no Node
 // built-ins: `layout.js` (constants + the `sequenceDomainError` rule),
-// `state-machine/serialize.js`
+// `state-machine/serialize.ts`
 // (`toJson`/`serializeValue`/`deserializeValue`/`deepJsonEqual`/
-// `validateSerializedValueGrammar`), `types/result.js`, `types/safe-error.js`,
-// `./boundary-error.js`).
+// `validateSerializedValueGrammar`), `types/result.ts`, `types/safe-error.ts`,
+// `./boundary-error.ts`).
 
 import {
   JOURNAL_SCHEMA_VERSION,
@@ -232,7 +232,7 @@ const dedupKeyError = (value: unknown): string | null => {
   if (typeof value !== "string") {
     // Do not render or coerce object/function values here. Diagnostics are
     // part of the hostile runtime boundary: rendering a Proxy or boxed value
-    // can execute traps, getters, `toJSON`, or `Symbol.toPrimitive` after the
+    // can execute traps, getters, `toJSON`, or Symbol.toPrimitive after the
     // type verdict is already known. `typeof` (plus the null distinction) is
     // sufficient, deterministic context and cannot dereference the value.
     const runtimeType = value === null ? "null" : typeof value;

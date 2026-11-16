@@ -6,7 +6,7 @@
 
 Accepted
 
-> **Amendment (2026-06-20, pass 9):** the `canAccessDagForTenant` authorization
+> **Amendment (2026-06-20, pass 9):** the canAccessDagForTenant authorization
 > *extension* described below was designed but is **NOT wired** in the shipped
 > single-host slice — it had zero production callers and has been removed. Tenant
 > isolation for DAG execution is enforced **structurally** instead: the supervisor
@@ -19,7 +19,7 @@ Accepted
 > itself is still load-bearing — for routing, the `fugue:<tenant>:*` keyspace, and
 > the per-tenant Redis ACL (ADR-0067). Reintroduce a tenant-scoped conjunct if a
 > future shared-worker / multi-DAG-per-worker topology needs per-request tenant
-> scoping. References to `canAccessDagForTenant` below are retained as the original
+> scoping. References to canAccessDagForTenant below are retained as the original
 > design rationale; read them subject to this amendment.
 
 ## Date
@@ -140,7 +140,7 @@ system, and keep status/breaker/leakage decisions in one authoritative taxonomy.
 with smart constructors and a strict `TENANT_ID_REGEX`, resolve an
 `AuthIdentity` to a `Tenant` at the supervisor boundary and thread it through
 routing / keyspace / ACL alongside the existing `canAccessDag` auth (a
-tenant-aware `canAccessDagForTenant` *extension* was designed but not wired — see
+tenant-aware canAccessDagForTenant *extension* was designed but not wired — see
 Amendment); and
 extend the single `HostError` taxonomy with `tenant-unknown` (404/401),
 `tenant-over-quota` (429 + retry-after), and `worker-unavailable` (503),
@@ -224,7 +224,7 @@ Key invariants:
   rather than a per-request tenant conjunct; see Amendment.)
 - The tenant boundary stays additive by design: the identity→team `canAccessDag`
   decision (ADR-0058, ADR-0063) is unchanged and a tenant scope can only ever
-  *narrow*, never widen, an authorization decision. (The `canAccessDagForTenant`
+  *narrow*, never widen, an authorization decision. (The canAccessDagForTenant
   conjunct that would have made this explicit per-request was not wired — see
   Amendment.)
 - Status truth stays in one exhaustive mapping, so the per-tenant taxonomy can
@@ -235,14 +235,14 @@ Key invariants:
   cannot be probed via existence, state, status code, or body, and a hostile or
   saturated tenant cannot degrade a neighbour's availability through the breaker.
   These are verified together under concurrency by
-  `__tests__/integration/error-taxonomy-concurrent.test.ts` (SC-012): four
+  `packages/host/src/__tests__/integration/error-taxonomy-concurrent.test.ts` (SC-012): four
   tenants × four fault classes interleaved, each response asserted to be the
   status for *its own* tenant with a non-leaking body.
 
 **Negative:**
 
 - Hand-rolled brands and smart constructors carry their own correctness burden,
-  enforced by unit tests (`__tests__/domain/tenant.test.ts`,
+  enforced by unit tests (`packages/host/src/__tests__/domain/tenant.test.ts`,
   `tenant-error-taxonomy.test.ts`, `tenant-header.test.ts`) rather than a library.
   The `markTenant` regex re-assertion is defensive redundancy that only fires on a
   programmer cast — dead under correct use, deliberately so.
@@ -291,7 +291,7 @@ Key invariants:
 - `packages/host/src/domain/framework-error-http.ts` — `classifyHostError`
   (no breaker trip for over-quota/unknown; 503 + breaker for worker-unavailable).
 - `packages/host/src/domain/auth.ts` — `canAccessDag`, the identity→team authz
-  decision (the operative DAG gate; the `canAccessDagForTenant` extension was
+  decision (the operative DAG gate; the canAccessDagForTenant extension was
   designed here but removed — see Amendment).
 - `packages/host/src/__tests__/integration/error-taxonomy-concurrent.test.ts` —
   SC-012: 429/503/404 under concurrent load, zero cross-tenant bleed,

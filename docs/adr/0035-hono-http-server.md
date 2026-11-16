@@ -65,10 +65,10 @@ Concrete design:
 
 - **File:** `packages/host/src/http/router.ts` defines all routes using Hono's `app.get()` / `app.post()` API.
 - **Middleware pipeline:**
-  1. Error handler (`http/middleware/error-handler.ts`) — catches thrown errors, maps `HostError` and `FrameworkError` DUs to appropriate HTTP status codes and machine-readable JSON responses.
-  2. Concurrency guard (`http/middleware/concurrency-guard.ts`) — acquires per-DAG concurrency token before handler execution, releases in `finally`. Returns 429 with `Retry-After` when at capacity.
-- **Handlers:** Each route handler is a separate file in `http/handlers/` — `run-dag.ts`, `list-dags.ts`, `health.ts`. Handlers receive typed context, read from the registry snapshot, and return typed responses.
-- **Response builders:** `http/response.ts` provides typed builder functions for success and error responses, ensuring consistent JSON shape across all endpoints.
+  1. Error handler (`packages/host/src/http/middleware/error-handler.ts`) — catches thrown errors, maps `HostError` and `FrameworkError` DUs to appropriate HTTP status codes and machine-readable JSON responses.
+  2. Concurrency guard (http/middleware/concurrency-guard.ts) — acquires per-DAG concurrency token before handler execution, releases in `finally`. Returns 429 with `Retry-After` when at capacity.
+- **Handlers:** Each route handler is a separate file in `packages/host/src/http/handlers/` — `run-dag.ts`, `list-dags.ts`, `health.ts`. Handlers receive typed context, read from the registry snapshot, and return typed responses.
+- **Response builders:** `packages/host/src/http/response.ts` provides typed builder functions for success and error responses, ensuring consistent JSON shape across all endpoints.
 - **Bun integration:** Hono runs on top of `Bun.serve` with zero adapter code — Hono's `export default app` pattern works natively in Bun.
 - **Testing:** Handlers are tested with Hono's `app.request()` test utility — no real HTTP server needed for unit tests.
 

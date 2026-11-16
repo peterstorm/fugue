@@ -112,7 +112,7 @@ Start with these to understand the runtime as it stands today:
 ## Conventions
 
 - **Number** is assigned at merge time, not at draft time. Drafts in `docs/plans/**` that propose an ADR number may collide with concurrent work; the actual ADR number is whatever's next free when it lands.
-- **Status** values: `Proposed`, `Accepted`, `Superseded by ADR NNNN`. Never `Rejected` (rejected ideas live in plan docs, not as ADRs).
+- **Status** values: Proposed, Accepted, `Superseded by ADR NNNN`. Never `Rejected` (rejected ideas live in plan docs, not as ADRs).
 - **Related** lists adjacent or amending ADRs; **Supersedes** lists ADRs this one replaces; **Superseded by** lists the inverse.
 - Code that depends on an ADR's decision should cite it inline with `// ADR NNNN: <one-line reason>`.
 - When a decision is reversed or significantly amended, write a new ADR rather than editing the old one — the historical record is the value.
@@ -131,4 +131,4 @@ The ADR records:
 - the drain, and the typed `fan-budget-refused` and `fan-child-failed` errors;
 - the per-epoch refusal seed under a new `fan-seed` composite namespace, with no grammar change.
 
-A stale `## ADR 0020` heading exists in `docs/plans/2026-05-10-typed-tool-names.md` — that plan is still draft and proposed claiming slot 0020 before slot 0020 was assigned to `ontrace-vs-run-end-ordering`. The plan must renumber its proposal when it leaves draft; the ADR itself is unaffected.
+A stale `## ADR 0020` heading exists in `docs/plans/2026-05-10-typed-tool-names.md` — that plan is still draft and proposed claiming slot 0020 before slot 0020 was assigned to `0020-ontrace-vs-run-end-ordering.md`. The plan must renumber its proposal when it leaves draft; the ADR itself is unaffected.

@@ -2,7 +2,7 @@
 //
 // Centralises the OTel + observer plumbing the orchestrator (`runDagStateful`)
 // would otherwise inline. Two consumers — the orchestrator on the happy
-// path, and `eval-judges.ts/finalizeRunWithJudges` from the success branch
+// path, and `eval-judges.ts`'s `finalizeRunWithJudges` from the success branch
 // — share the same span-close vocabulary so success/failure paths emit
 // identical attributes.
 

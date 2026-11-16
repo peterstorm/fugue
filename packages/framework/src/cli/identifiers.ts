@@ -200,11 +200,11 @@ export const JS_RESERVED_WORDS: ReadonlySet<string> = new Set([
 // Node-level constructors take the branded `KebabIdent` — the parse-time
 // guarantee that camelCase/PascalCase yields a valid JS identifier.
 
-/** Output-schema const for a node: `fetch-record` → `FetchRecordSchema`. */
+/** Output-schema const for a node: `fetch-record` → FetchRecordSchema. */
 export const schemaConstName = (id: KebabIdent): string => `${pascalCase(id)}Schema`;
 
 /**
- * Fan-in schema const for a join/assemble node: `merge` → `MergeFanIn`.
+ * Fan-in schema const for a join/assemble node: `merge` → MergeFanIn.
  * Emitted only when the node's role receives a keyed fan-in, but claimed for
  * EVERY node (see the conservatism note on `generatedIdentifiersFor`).
  */
@@ -230,10 +230,10 @@ export const childLocalName = (generatedName: string): string =>
 
 /**
  * The `<camel>Node` identifier claimed for llm nodes: `summarize` →
- * `summarizeNode`. Current codegen never BINDS it — the structure expression
+ * summarizeNode. Current codegen never BINDS it — the structure expression
  * calls `create<Pascal>(model)` directly, so this name never reaches the
- * emitted file. It is claimed anyway so an llm id `foo` can never collide
- * with a sibling `foo-node` if codegen ever starts binding the factory result.
+ * emitted file. It is claimed anyway so an llm id foo can never collide
+ * with a sibling foo-node if codegen ever starts binding the factory result.
  */
 export const llmNodeRefName = (id: KebabIdent): string => `${camelCase(id)}Node`;
 
@@ -256,10 +256,10 @@ export const nodeRefName = (id: KebabIdent, kind: AuthoredNodeKind): string => {
 // name like `2fast` would emit `interface 2fastDagOpts` — a SyntaxError the
 // brand makes unrepresentable at every call site.
 
-/** The exported DAG factory for llm scaffolds: `lead-opener` → `createLeadOpenerDag`. */
+/** The exported DAG factory for llm scaffolds: lead-opener → createLeadOpenerDag. */
 export const dagFactoryName = (dagName: KebabIdent): string => `create${pascalCase(dagName)}Dag`;
 
-/** The factory-opts interface for llm scaffolds: `lead-opener` → `LeadOpenerDagOpts`. */
+/** The factory-opts interface for llm scaffolds: lead-opener → LeadOpenerDagOpts. */
 export const dagOptsInterfaceName = (dagName: KebabIdent): string => `${pascalCase(dagName)}DagOpts`;
 
 /** The DAG input-schema const every scaffold declares. */

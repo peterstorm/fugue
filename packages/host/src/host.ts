@@ -133,7 +133,7 @@ const capabilityCleanupErrors = (
  *
  * Built once through the canonical `tenantId` smart constructor (the SINGLE
  * `TenantId` source, `domain/tenant.ts`). `"default"` trivially satisfies
- * `TENANT_ID_REGEX` (`{1,64}`, no `:`/glob), so the `Left` branch is unreachable
+ * `TENANT_ID_REGEX` (`{1,64}`, no `:`/glob), so the Left branch is unreachable
  * — we throw on it as an internal invariant rather than widen the API with an
  * unsafe constructor just for this constant.
  */
@@ -512,7 +512,7 @@ export const selectCapabilityBroker = (
  * (with the explicit or `http://localhost:<PORT>`-defaulted approval base
  * URL) — a complete webhook therefore beats an INCOMPLETE bot pair, the
  * pre-extraction chain's order, preserved; a lone `BOT_APP_ID` (password
- * missing) classifies as `disabled/bot-password-missing` — the
+ * missing) classifies as disabled/bot-password-missing — the
  * lowest-precedence arm, surfaced only when no webhook is configured, which
  * is exactly when the shell emits its single boot warning; neither configures
  * no transport (HITL stays off).

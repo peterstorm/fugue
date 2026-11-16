@@ -41,11 +41,11 @@ Teams use MLflow's experiment tracking to:
 
 ### 4. Sugar helpers for common patterns
 
-The `sugar/confidence-buckets.ts` module provides helpers for the most common bucketing patterns (numeric thresholds, logprob ranges) so teams don't have to write raw `extract` functions.
+The `packages/framework/src/sugar/confidence-buckets.ts` module provides helpers for the most common bucketing patterns (numeric thresholds, logprob ranges) so teams don't have to write raw `extract` functions.
 
 ## Consequences
 
 - Calibration is a data-driven workflow, not a framework feature — the framework provides the signals, not the policy.
 - The `source` provenance field is essential: without it, calibration conflates differently-distributed signals.
 - Teams that skip calibration still get meaningful gating via the bucket ordering (`high > medium > low > unknown`).
-- The `raw` field is preserved for forensics but the framework never compares raw values directly (per `types/confidence.ts` contract).
+- The `raw` field is preserved for forensics but the framework never compares raw values directly (per `packages/framework/src/types/confidence.ts` contract).

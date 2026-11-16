@@ -10,10 +10,10 @@
  * accepts only own DATA properties.
  *
  * That rule was hand-rolled five times before round 14 — `types/spend.ts`
- * (`ownValue`, `parseModelArray`), `dag-runtime/run-node.ts` (`readOwnData`),
+ * (`ownValue`, `parseModelArray`), `dag-runtime/run-node.ts` (readOwnData),
  * `dag-runtime/run-dag-stateful.ts` (`snapshotOrigin`'s local closures),
- * `host/adapters/metered-llm.ts` (`snapshotDataObject`, `snapshotDataArray`,
- * `snapshotPricingModel`), and `host/adapters/run-spend-authority.ts`
+ * `packages/host/src/adapters/metered-llm.ts` (`snapshotDataObject`, `snapshotDataArray`,
+ * `snapshotPricingModel`), and `packages/host/src/adapters/run-spend-authority.ts`
  * (`ownDataValue` for required fields, plus a raw descriptor walk for the
  * optional `thinking` field — see `readOptionalOwnDataProperty` below, added in
  * round 15 so that last copy could migrate too) — where a fix to the algorithm

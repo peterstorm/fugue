@@ -393,7 +393,7 @@ export function createInMemoryEventLogReader(backend: InMemoryBackend): EventLog
 
 /**
  * In-memory MarkerStore. TTL expiry uses `setTimeout`/`clearTimeout` so it
- * is compatible with `vi.useFakeTimers()`.
+ * is compatible with vi.useFakeTimers().
  */
 export interface InMemoryMarkerStoreHandle extends MarkerStore, Disposable {
   /** Cancel all pending TTL timers. Call when discarding the store. */

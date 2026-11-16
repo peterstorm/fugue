@@ -1,11 +1,11 @@
 /**
- * Date detection from `xl/styles.xml`, exactly as SheetJS 0.18.5 decides it
+ * Date detection from xl/styles.xml, exactly as SheetJS 0.18.5 decides it
  * under `cellDates: true`: a numeric cell is a date when its style's number
- * format string passes `SSF.is_date`.
+ * format string passes SSF.is_date.
  *
  * The format string for a `numFmtId` is the workbook's custom `<numFmt>` for
- * that id (ids > 0), else SheetJS's built-in table (`SSF_init_table`), else its
- * implicit table (`SSFImplicit`), else `General`. Date detection only happens
+ * that id (ids > 0), else SheetJS's built-in table (SSF_init_table), else its
+ * implicit table (SSFImplicit), else `General`. Date detection only happens
  * when the styles part has a `<cellXfs>` list at all.
  */
 
@@ -14,7 +14,7 @@ import { ok, err } from "@fuguejs/framework";
 import { decodeXmlEscapes } from "./cell-value.js";
 import { attrLocal, parseXml, type XmlHandler } from "./xml.js";
 
-/** SheetJS `SSF_init_table`. */
+/** SheetJS SSF_init_table. */
 const BUILTIN_FORMATS: Readonly<Record<number, string>> = {
   0: "General", 1: "0", 2: "0.00", 3: "#,##0", 4: "#,##0.00", 9: "0%", 10: "0.00%", 11: "0.00E+00",
   12: "# ?/?", 13: "# ??/??", 14: "m/d/yy", 15: "d-mmm-yy", 16: "d-mmm", 17: "mmm-yy",
@@ -24,7 +24,7 @@ const BUILTIN_FORMATS: Readonly<Record<number, string>> = {
   56: '"上午/下午 "hh"時"mm"分"ss"秒 "',
 };
 
-/** SheetJS `SSFImplicit`: what an id missing from the built-in table falls back to. */
+/** SheetJS SSFImplicit: what an id missing from the built-in table falls back to. */
 const IMPLICIT_FORMATS: Readonly<Record<number, string>> = {
   5: '"$"#,##0_);\\("$"#,##0\\)', 6: '"$"#,##0_);[Red]\\("$"#,##0\\)',
   7: '"$"#,##0.00_);\\("$"#,##0.00\\)', 8: '"$"#,##0.00_);[Red]\\("$"#,##0.00\\)',
@@ -50,7 +50,7 @@ export const builtinNumberFormat = (id: number): string => BUILTIN_FORMATS[id] ?
 
 const ABSOLUTE_TIME = /\[[HhMmSsชนท]*\]/;
 
-/** SheetJS `SSF_isgeneral`: "General" (any case) at `i`. */
+/** SheetJS SSF_isgeneral: "General" (any case) at `i`. */
 const isGeneralAt = (s: string, i: number): boolean => s.slice(i, i + 7).toLowerCase() === "general";
 
 const DATE_TOKEN_CHARS = new Set("MDYHSEmdyhseg");
@@ -115,17 +115,17 @@ const skipLiteralDigits = (fmt: string, start: number): number => {
   return i;
 };
 
-/** `A/P`, `AM/PM` or the Chinese `上午/下午` meridiem marker begins at `i`. */
+/** A/P, AM/PM or the Chinese `上午/下午` meridiem marker begins at `i`. */
 const isMeridiemAt = (fmt: string, i: number): boolean =>
   fmt.substr(i, 3).toUpperCase() === "A/P" ||
   fmt.substr(i, 5).toUpperCase() === "AM/PM" ||
   fmt.substr(i, 5).toUpperCase() === "上午/下午";
 
 /**
- * SheetJS 0.18.5 `fmt_is_date` (`SSF.is_date`), ported statement for statement
+ * SheetJS 0.18.5 fmt_is_date (SSF.is_date), ported statement for statement
  * so the differential test can hold it to the original. Quoted literals,
  * escapes, padding and number tokens are skipped; any date/time token
- * (or `B1`/`B2`, `A/P`, `AM/PM`, or an `[h]`-style elapsed bracket) makes it a date.
+ * (or `B1`/`B2`, A/P, AM/PM, or an `[h]`-style elapsed bracket) makes it a date.
  */
 export const isDateFormat = (fmt: string): boolean => {
   let i = 0;
@@ -191,7 +191,7 @@ const parseNumFmtId = (raw: string | undefined): number | undefined =>
 const formatFor = (customs: ReadonlyMap<number, string>, id: number | undefined): string =>
   id === undefined ? "General" : (customs.get(id) ?? builtinNumberFormat(id));
 
-/** `xl/styles.xml` → which cell styles are dates. */
+/** xl/styles.xml → which cell styles are dates. */
 export const parseStyles = (xml: string): Result<DateStyles, string> => {
   const customs = new Map<number, string>();
   const xfFormatIds: Array<number | undefined> = [];

@@ -321,7 +321,7 @@ describe("markSecretsRef", () => {
   });
 });
 
-// NOTE: the ADR-0073 `canAccessDagForTenant` conjunctive gate was removed (pass 9)
+// NOTE: the ADR-0073 canAccessDagForTenant conjunctive gate was removed (pass 9)
 // — it had zero production callers because tenant isolation for DAG execution is
 // STRUCTURAL in this slice (the supervisor routes each caller to its own tenant's
 // worker; a worker serves exactly one tenant's DAGs). DAG authz is exercised by

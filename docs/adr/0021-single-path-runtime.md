@@ -10,7 +10,7 @@
 Earlier ADRs documented a deliberate two-path runtime:
 
 - A *legacy fast path* (`executor/executor.ts:runDagInner`) for DAGs without HITL, retries, conditional edges, or a durable `JobLike`. Straight `topoSort → Promise.all per wave → return`.
-- A *state-machine path* (`dag-runtime/run-dag-stateful.ts`) for everything else, built on the kernel runner and a `JobLike`-backed durable handle.
+- A *state-machine path* (`packages/framework/src/dag-runtime/run-dag-stateful.ts`) for everything else, built on the kernel runner and a `JobLike`-backed durable handle.
 
 A routing predicate in `runDag` selected between them (ADR 0009 + ADR 0019). The split existed for two reasons:
 
@@ -21,10 +21,10 @@ Both reasons have since dissolved:
 
 - ADR 0018 brought `onBackground` to the SM path.
 - ADR 0019 made the routing predicate explicit and exposed an in-memory `JobLike` fallback so the SM path runs cleanly without a durable backend.
-- Wave 7 §7.1 unified `runNode` into `shared/run-node.ts`. Both call sites already produced identical observer event sequences; with the duplication removed, there is no behavioral gap left to argue about.
-- Wave 7 §7.2 broke the `executor/ ↔ dag-runtime/` cycle by moving shared utilities into `shared/`.
+- Wave 7 §7.1 unified runNode into `packages/framework/src/dag-runtime/run-node.ts`. Both call sites already produced identical observer event sequences; with the duplication removed, there is no behavioral gap left to argue about.
+- Wave 7 §7.2 broke the `executor/ ↔ dag-runtime/` cycle by moving shared utilities into `packages/framework/src/shared/`.
 
-What remains is a routing predicate, a thin runDag wrapper around `runDagInner`, and a duplicate orchestration layer that does the same thing as `runDagStateful` minus the kernel.
+What remains is a routing predicate, a thin runDag wrapper around runDagInner, and a duplicate orchestration layer that does the same thing as `runDagStateful` minus the kernel.
 
 ## Decision
 
@@ -39,7 +39,7 @@ Concretely:
   3. **Translate `resume: { runId, checkpoint }`** into `DagRunOpts.resumeCheckpoint`, then delegate.
 - The legacy `RunOptions.resume` field is preserved on the public surface; it is reinterpreted as a per-node checkpoint replay threaded through `runNodeShared` (see "Resume semantics" below).
 - `resumeRun(runId, dag, ctx, checkpoint)` continues to work as a thin wrapper around `runDag(dag, undefined, ctx, { resume: { runId, checkpoint } })`.
-- `executor/ ↔ dag-runtime/` cycle-prevention is enforced in `scripts/check-imports.ts`: neither folder may import from the other.
+- `executor/ ↔ dag-runtime/` cycle-prevention is enforced in `packages/framework/src/scripts/check-imports.ts`: neither folder may import from the other.
 
 ## Resume semantics
 
@@ -57,15 +57,15 @@ Behavior is preserved bit-for-bit:
 
 The legacy path returned validation and `checkpoint-write-failed` errors directly. The SM path used to wrap them in `retry-exhausted` after the (zero) retry budget was consumed.
 
-Unifying the paths required deciding on one semantic. **Determinism wins**: validation failures and missing/broken cache backends won't resolve by re-running the node, so they fail-fast. `handleNodeFailed` in `dag-runtime/transition-helpers.ts` now treats `validation`, `checkpoint-write-failed`, and `predicate-malformed` as terminal-failed without consuming the retry budget. The original error kind is preserved on `result.error.kind`.
+Unifying the paths required deciding on one semantic. **Determinism wins**: validation failures and missing/broken cache backends won't resolve by re-running the node, so they fail-fast. `handleNodeFailed` in `packages/framework/src/dag-runtime/retry-policy.ts` now treats `validation`, `checkpoint-write-failed`, and `predicate-malformed` as terminal-failed without consuming the retry budget. The original error kind is preserved on `result.error.kind`.
 
 ## Consequences
 
 **Positive:**
 
 - One mental model. The runtime is the state-machine runner; everything is durable-handle-friendly by default.
-- Dead code deletion. `runDagInner`, the routing predicate's branch logic, the `useStateMachinePath` calculation, the `resume + jobLike` incompatibility path, and the duplicate orchestration (~120 LOC in `executor/executor.ts`) are gone.
-- Cycle is breakable. `executor/` and `dag-runtime/` no longer depend on each other. The boundary is enforceable in CI.
+- Dead code deletion. runDagInner, the routing predicate's branch logic, the useStateMachinePath calculation, the `resume + jobLike` incompatibility path, and the duplicate orchestration (~120 LOC in `packages/framework/src/executor/run-dag.ts`) are gone.
+- Cycle is breakable. `packages/framework/src/executor/` and `packages/framework/src/dag-runtime/` no longer depend on each other. The boundary is enforceable in CI.
 
 **Trade-offs:**
 

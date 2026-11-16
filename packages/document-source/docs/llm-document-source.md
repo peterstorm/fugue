@@ -147,9 +147,9 @@ cached; concurrent calls share one in-flight parse.
 Where the parser lives decides how long its memo lives. The host's hot reload
 re-imports only the DAG entry module (`dag.ts?v=<sha>`):
 
-- **In a `lib/` module or a package** (recommended): evaluated once per worker
+- **In a lib/ module or a package** (recommended): evaluated once per worker
   process and shared by every deployed version. The memo survives deploys, and
-  a change to that `lib/` code (including the parse function) takes effect only
+  a change to that lib/ code (including the parse function) takes effect only
   when the worker restarts.
 - **In `dag.ts` itself**: every deploy evaluates a fresh copy with an empty
   memo, and the superseded copy is not unloaded, so each deploy retains one
@@ -331,11 +331,11 @@ const counts = await foldRows(
   RSS for the parse (`packages/xlsx/bench/parse-memory.ts`).
 
 **Snapshot pattern.** When many requests read the same rarely-changing
-workbooks, do not parse per request. Hold a module-scope snapshot (in `lib/`,
+workbooks, do not parse per request. Hold a module-scope snapshot (in lib/,
 per the module-lifetime note above) that is rebuilt by `foldRows` only when a
 source's `getMetadata` fingerprint changes, and serve every request from it;
 concurrent cold requests join the one in-flight build. The direct-sales DAGs
-in fugue-dags (`lib/lead-snapshot/`) are the reference implementation.
+in fugue-dags (lib/lead-snapshot/) are the reference implementation.
 
 ---
 
@@ -348,14 +348,14 @@ If you use `@fuguejs/fs` in a container, the file must reach the pod. Ranked
 2. **RWX PersistentVolume** populated by another job; `rootDir` = mount path.
 3. **initContainer** fetches into a shared `emptyDir`; app reads via `@fuguejs/fs`.
 4. **ConfigMap/Secret volume** — only for small (<~1 MiB) / sensitive static files.
-5. **Baked into the image** (`COPY`) — only for static build-time data.
+5. **Baked into the image** (COPY) — only for static build-time data.
 
 ---
 
 ## Adding a new adapter (recipe)
 
 To support a new backend (e.g. S3), add a peer adapter — do **not** touch nodes
-or the port's two methods. See `docs/adapter-authoring.md` for the full template.
+or the port's two methods. See `framework/docs/adapter-authoring.md` for the full template.
 
 1. Add a `FileRef` variant in `@fuguejs/document-source` (e.g. `{ kind: "s3Object"; bucket; key }`) + a smart constructor + a `fileRefKey` case.
 2. New package `@fuguejs/<backend>` depending on `@fuguejs/document-source`; implement `DocumentSource`, handling your variant and returning `unsupportedRefError("<backend>", ref)` for others.

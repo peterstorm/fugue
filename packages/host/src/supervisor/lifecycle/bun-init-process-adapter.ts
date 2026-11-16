@@ -14,7 +14,7 @@
  *   - onSigchld       — installs a SIGCHLD handler driving `reapZombies`, plus a
  *     low-frequency interval as a delivery-quirk safety net.
  *
- * VALIDATED on real PID-namespace semantics (glibc box + `oven/bun` alpine/musl):
+ * VALIDATED on real PID-namespace semantics (glibc box + oven/bun alpine/musl):
  *   - `waitpid(-1, WNOHANG)` reaps re-parented orphan workers → zero zombies.
  *   - It does NOT steal the supervisor's exit status: Bun resolves `proc.exited`
  *     independently of who `waitpid()`s (pidfd), so the supervise loop never hangs

@@ -344,7 +344,7 @@ describe("deregister revoke-failure is TRUTHFULLY audited (C3, FR-029, SC-008)",
     // pre-tombstone read.
     const res = await handleAdminTenants(h.deps, req("DELETE", "/admin/tenants/acme", { token: ADMIN_TOKEN }));
     expect((await res!.json()).revokeComplete).toBe(true);
-    // `acme-team` is exactly the team carried on the tombstone (validBody).
+    // acme-team is exactly the team carried on the tombstone (validBody).
     expect(h.tokenStore.revoked).toEqual(["acme-team"]);
   });
 });

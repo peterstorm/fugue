@@ -960,7 +960,7 @@ describe("PersistedFrameworkErrorSchema: llm-budget-exceeded round-trips through
   // The existing coverage round-tripped this error through `JSON.stringify` /
   // `JSON.parse` via FrameworkAugmentedError — which never touches the Zod
   // schema. This change rewrote that schema (`persistedBreachSchema`,
-  // `persistedCeilingSchema`, the MicroUsd brand restore), so the boundary a
+  // persistedCeilingSchema, the MicroUsd brand restore), so the boundary a
   // resumed run actually reads a persisted error back through was untested.
 
   it("parses a `reached` cause, restoring the branded ids", () => {

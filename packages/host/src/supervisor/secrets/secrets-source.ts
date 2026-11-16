@@ -33,7 +33,7 @@
  *     transient supervisor-side mint+handoff: `redis-acl-provisioner.ts` mints a
  *     per-tenant ACL password on the supervisor's admin connection and the
  *     worker-lifecycle manager injects it into the owning worker's SPAWN ENV
- *     (`FUGUE_REDIS_ACL_USERNAME`/`PASSWORD`) — a SEPARATE channel from this
+ *     (`FUGUE_REDIS_ACL_USERNAME`/`FUGUE_REDIS_ACL_PASSWORD`) — a SEPARATE channel from this
  *     `SecretsSource` port (see that file's CREDENTIAL HANDOFF CONTRACT). The two
  *     narratives are complementary, not contradictory — this port carries no value
  *     supervisor-side; the ACL mint is a bounded, unretained, never-logged handoff.

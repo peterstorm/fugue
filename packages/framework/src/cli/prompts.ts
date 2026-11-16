@@ -41,7 +41,7 @@ const codepointCompare = (a: string, b: string): number => {
 };
 
 /**
- * The `prompts/registry.json` byte format: canonical 2-space JSON, keys in
+ * The prompts/registry.json byte format: canonical 2-space JSON, keys in
  * codepoint order, plus a trailing newline. Single-sourced so scaffold writers
  * and `runPromptsSync` can never drift — a later `prompts sync`/`check` over a
  * scaffolded registry sees no spurious diff, and the same entries always
@@ -182,7 +182,7 @@ const loadPromptsInputs = async (
 };
 
 // Accumulate in Maps, NOT plain Records: prompt names are filesystem-derived,
-// so a prompt file named `__proto__.txt` would hit the object-literal
+// so a prompt file named __proto__.txt would hit the object-literal
 // prototype setter (entry silently vanishes from the written registry while
 // sync reports ok), and `existing[name]` for any Object.prototype property
 // name (`constructor`, `toString`, …) would read a truthy non-entry through

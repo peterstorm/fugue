@@ -47,7 +47,7 @@ The forces on that choice:
      pure JavaScript, with no native code, and it behaves the same on Bun and
      Node. saxes is a strict, well-formedness-checking SAX parser that is actively
      maintained. It expands only the five predefined entities and character
-     references, so it is safe on hostile input. fflate also provides `zipSync`/`strToU8`
+     references, so it is safe on hostile input. fflate also provides zipSync/strToU8
      for building small test archives.
    - Cons: two new third-party runtime dependencies to track for security
      advisories and upgrades. saxes reports qualified names, so the wrapper has
@@ -58,10 +58,10 @@ The forces on that choice:
    - Cons: Bun's compatibility layer for `node:zlib` streams is a moving target.
      The streaming API is asynchronous per chunk, which turns the deterministic
      fold into event-driven code and makes back-pressure and the size cap harder
-     to reason about. `inflateRawSync` per slice does not keep inflater state
+     to reason about. inflateRawSync per slice does not keep inflater state
      across slices.
 
-3. **`sax` (the original sax-js package)**
+3. **sax (the original sax-js package)**
    - Pros: widely used and familiar. A similar SAX event model.
    - Cons: less strict than saxes (non-strict mode tolerates malformed input by
      default) and less actively maintained. saxes is its maintained, stricter
@@ -97,7 +97,7 @@ Where each dependency is used:
 
 - **fflate** is used in production code only in `packages/xlsx/src/zip.ts`. Tests
   (`stream-api.test.ts`, `zip.test.ts`, `cell-value.property.test.ts`) also import
-  `strToU8` and `zipSync` from it to build small test archives. `zip.ts` reads the ZIP central
+  strToU8 and zipSync from it to build small test archives. `zip.ts` reads the ZIP central
   directory over the in-memory bytes. `inflateSync` handles small parts (workbook,
   rels, styles, shared strings), and `Inflate` streams the selected worksheet in
   compressed slices. Both enforce `DEFAULT_MAX_ENTRY_BYTES` (512 MiB per entry),
@@ -118,13 +118,13 @@ Where each dependency is used:
   (`stream-api.test.ts`, `end-to-end.test.ts`, `xlsx.test.ts`,
   `date-group-item.test.ts` and `parity.test.ts`). The memory benchmark
   (`packages/xlsx/bench/parse-memory.ts`) reaches them only through `fixtures.ts`,
-  and `bench/` is not in the published `files`.
+  and `packages/xlsx/bench/` is not in the published `files`.
 
 Enforcement: **INV-1** (`.claude/linter/rules/inv-1-no-sheetjs-runtime-import.json`)
 is a checkable lint rule. It runs on every edit and fails closed. It rejects any
 static, side-effect, dynamic or `require` import of `xlsx` from a `.ts`, `.tsx`, `.mts`
 or `.cts` file, except files ending in `.test.ts` and `sheetjs-oracle.ts`. The
-`files` field of the package excludes `src/__tests__`, so the oracle never
+`files` field of the package excludes `packages/xlsx/src/__tests__`, so the oracle never
 ships.
 
 ## Consequences

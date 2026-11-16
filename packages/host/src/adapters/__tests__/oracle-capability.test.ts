@@ -138,7 +138,7 @@ describe("connectStringHost — adversarial credential vectors (FR-041/SC-008)",
       `(DESCRIPTION=(ADDRESS=(HOST=dbhost)(PORT=1521))` +
       `(CONNECT_DATA=(SERVICE_NAME=PRICING))(SECURITY=(PASSWORD=${pw})(USER=${user})))`;
     const surfaced = connectStringHost(dsn);
-    // OLD behaviour had no leading `user/pass@`, so it logged the WHOLE DSN —
+    // OLD behaviour had no leading user/pass@, so it logged the WHOLE DSN —
     // password included. Now both credential fields are redacted to ***.
     expect(surfaced).not.toContain(pw);
     expect(surfaced).not.toContain(user);
@@ -157,7 +157,7 @@ describe("connectStringHost — adversarial credential vectors (FR-041/SC-008)",
     //
     // CRITICAL: the password alphabet INCLUDES `@` (and the generator injects
     // extra `@`/`/` characters), because the headline regression is a password
-    // CONTAINING `@` (`u/p@ss@host`). The OLD `^[^@\s]+@` / first-`@` strip
+    // CONTAINING `@` (u/p@ss@host). The OLD `^[^@\s]+@` / first-`@` strip
     // stopped at the FIRST `@` and leaked the `ss@host…` remainder — so a
     // password without `@` (the previous alphabet) would PASS even against the
     // broken impl and never guard the regression. With `@` in the password, this
@@ -241,7 +241,7 @@ describe("buildOracleCapability — construction failure surfacing (FR-031, Fix 
     expect(thrown).toBeInstanceOf(Error);
 
     // The re-thrown error is CREDENTIAL-STRIPPED (Fix 2): the raw oracledb error
-    // embedded `USER/PASSWORD@host`, but the abort HostError this becomes must not
+    // embedded USER/PASSWORD@host, but the abort HostError this becomes must not
     // carry creds into logs/output (FR-041/NFR-020/SC-008).
     const thrownMsg = (thrown as Error).message;
     expect(thrownMsg).not.toContain(ORACLE_PASSWORD);

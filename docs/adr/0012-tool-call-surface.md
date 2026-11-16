@@ -12,7 +12,7 @@
 1. Drop down to the raw `@anthropic-ai/sdk` or `openai` SDK.
 2. Write the tool-use loop themselves (`while stop_reason === "tool_use"`).
 3. Translate Zod schemas to provider-specific tool shapes (`input_schema` for Anthropic; `parameters` for OpenAI).
-4. Wire OTel spans manually for each LLM call and each tool dispatch — without GenAI semantic conventions, MLflow's `SpanType.TOOL` rendering wouldn't fire.
+4. Wire OTel spans manually for each LLM call and each tool dispatch — without GenAI semantic conventions, MLflow's SpanType.TOOL rendering wouldn't fire.
 5. Repeat all of the above to swap providers.
 
 That's an unreasonable amount of boilerplate for a feature that's squarely the framework's responsibility. It also produces inconsistent tracing — every consumer picked slightly different span names and attributes, and MLflow's typed-span rendering only works when the GenAI semantic conventions (`gen_ai.operation.name = "execute_tool"` etc.) are followed exactly.
@@ -22,14 +22,14 @@ The framework already exports OTel via the OTLP→MLflow exporter; the substrate
 ## Options Considered
 
 1. **Adopt the Vercel AI SDK as the canonical client.**
-   - Pros: free `experimental_telemetry` GenAI semconv spans; large community.
+   - Pros: free experimental_telemetry GenAI semconv spans; large community.
    - Cons: forces every consumer onto Vercel's `tool({...})` idiom; changes our error model (Vercel throws, we use `Result`); new dependency on its abstraction churn.
 
 2. **Adopt the Anthropic Agent SDK as the canonical client.**
    - Pros: handles the loop natively.
    - Cons: Anthropic-specific; would tie the abstraction to one provider's mental model and require an OpenAI escape hatch we'd own anyway.
 
-3. **Auto-instrument via SDK monkey-patching (e.g., `mlflow.openai.autolog()`).**
+3. **Auto-instrument via SDK monkey-patching (e.g., mlflow.openai.autolog()).**
    - Pros: zero code changes for callers.
    - Cons: opaque — span names and attributes depend on the patcher, not us; brittle across SDK upgrades; no determinism for tests.
 
@@ -122,8 +122,8 @@ Tool I/O is JSON-stringified into span attributes; payloads above 8 KiB are summ
 
 ## Non-goals
 
-- **Streaming tool calls.** v1 returns `Promise<Result<…>>`; no `streamWithTools` yet.
-- **Computer-use / browser-use / file-tool variants.** v1 supports `function`-type tools only. Future ADR may add a discriminated union on `ToolDef` for Anthropic's `computer_20241022` etc.
+- **Streaming tool calls.** v1 returns `Promise<Result<…>>`; no streamWithTools yet.
+- **Computer-use / browser-use / file-tool variants.** v1 supports `function`-type tools only. Future ADR may add a discriminated union on `ToolDef` for Anthropic's computer_20241022 etc.
 - **Cross-provider raw-response parity.** The framework normalizes tool inputs and outputs; raw provider responses remain provider-shaped.
 - **Replacing `sendStructured`.** Both methods coexist. `sendStructured` remains the right answer when you only want a single structured-output round trip.
 - **Tool registries shared across calls.** Tools are per-call (`req.tools`). Consumers can build a global registry and spread it.

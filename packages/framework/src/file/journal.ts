@@ -9,7 +9,7 @@
 //
 // `appendEvent` runs the whole append transaction — list existing event
 // files, keyed dedup by filename digest suffix, `sequence = count`, atomic
-// rename commit — UNDER the per-directory lock (`events/append.lock`,
+// rename commit — UNDER the per-directory lock (events/append.lock,
 // `withFileLock` from `atomic.ts`), so persisted
 // sequences are contiguous and replayable in lock-acquisition order. The
 // relative order of genuinely concurrent calls is scheduler-dependent
@@ -43,7 +43,7 @@
 // named in the message (operation field + message). A failed append is never
 // swallowed: it must abort the transition so the retry re-derives it. This
 // typed path covers the whole append: list failures, lock-acquire failures
-// (e.g. a file squatting on `events/append.lock`), filename computation, the
+// (e.g. a file squatting on events/append.lock), filename computation, the
 // 6-digit sequence capacity ceiling, and the atomic rename itself. Capacity
 // exhaustion is reported as the existing `cache-error` kind with operation
 // `appendEvent` and precise sequence/directory context, as required by ADR-0080.
@@ -56,7 +56,7 @@
 // `file-journal.test.ts` — the read/write read-through — and `file-atomic.
 // test.ts` — the rename-replaces-symlink mechanism): the journal FOLLOWS
 // symlinks. `listEventFiles`
-// `statSync`s each record name (following), a symlinked `events/` directory
+// `statSync`s each record name (following), a symlinked events/ directory
 // is listed and written through, and `atomicWriteFile`'s rename replaces
 // whatever entry — symlink included — sits at the target path. The
 // checkpointer instead establishes a NON-SYMLINK TRUST ANCHOR per
@@ -218,7 +218,7 @@ export const createFileJournal = (
    * List the durable event files (`*.json`) in append order (ADR-0076: the
    * 6-digit sequence prefix makes lexicographic order == append order).
    *
-   * Classification is by name SUFFIX only — `append.lock/` (a directory) and
+   * Classification is by name SUFFIX only — append.lock/ (a directory) and
    * `.tmp.<unique-token>` litter is invisible because it does not end in `.json`;
    * there is no stat in the filter, so a DIRECTORY wearing a `*.json` name
    * IS listed (a name-only counter would count it). Every listed name is
@@ -226,7 +226,7 @@ export const createFileJournal = (
    * (`parseEventFileName` — the single encoded inverse of the `eventFileName`
    * output shape in layout.ts: 6-digit zero-padded sequence + `-` + 64-hex
    * digest + `.json`) and its entry type
-   * (must be a regular file): a foreign `*.json` entry (e.g. `README.json`),
+   * (must be a regular file): a foreign `*.json` entry (e.g. README.json),
    * a renamed (externally moved) record, or a non-regular file squatting on
    * a record name would otherwise silently inflate `sequence = count` (and
    * a squat could dedup a keyed append as a no-op), committing a record the

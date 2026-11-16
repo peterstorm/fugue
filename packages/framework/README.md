@@ -5,7 +5,7 @@ DAG-shaped, durable runtime for LLM-bearing workflows. See [`docs/adr/`](../../d
 ## Docs
 
 Authoring guidance ships in this package, version-locked to the code — read it
-straight from `node_modules/@fuguejs/framework/docs/`:
+straight from node_modules/@fuguejs/framework/docs/:
 
 - [`docs/llm-dag-authoring.md`](./docs/llm-dag-authoring.md) — the primary authoring reference (node factories, constructors, `Result`, the `fugue` CLI). Start here.
 - [`docs/examples/`](./docs/examples/) — runnable, lint-tested golden DAGs, one per shape. The canonical copy-paste source.
@@ -29,7 +29,7 @@ The framework has no external consumers as of 2026-05-11; the surface is at its 
 
 Types and entry points that workflow authors touch.
 
-### `types/`
+### `src/types/`
 
 - `DagDef`, `DagDefInput`, `EdgeDef`, `EdgeDefInput`, `EdgeDefRawInput`, `Predicate` — the validated DAG shape and edge-predicate vocabulary (ADR 0015, ADR 0016).
 - `NodeDef`, `NodeKind`, `NodeRetryConfig`, `NodeHumanReviewConfig` — ordinary callable node authoring contract; `NodeDef.kind` excludes `map`.
@@ -40,20 +40,20 @@ Types and entry points that workflow authors touch.
 - `ClockCapability` plus the `systemClock` / `fixedClock` constructors — the `clock` capability (`requires: ["clock"]`); `fixedClock` pins time for deterministic tests, `systemClock` is the production default.
 - `RunId`, `NodeId`, `DagId` plus the `runId`, `nodeId`, `dagId` smart constructors — branded identifiers; raw strings cross the boundary at the entry points (`defineDag`, `makeNodeContext`, `runDag`) and become branded once.
 - `ContextCacheAdapter`, `CacheLookup`, `PromptAccess`, `Logger`, `Tracer` — pluggable seams.
-- `ObserverEvent` (and the per-event types `RunStartEvent`, `NodeStartEvent`, `NodeEndEvent`, `NodeSkippedEvent`, `NodeErrorEvent`, `SubSpanEvent`, `RunEndEvent`, `RouteDecidedEvent`, `NodePrunedEvent`, `WitnessCapturedEvent`, `WriteAttemptedEvent`, `FreshnessViolationEvent`, `HumanInterventionEvent`), `SpanKind` — the typed event envelope flowing through the `Observer` interface (which lives under `observer/`).
-- `Result`, `Ok`, `Err`, `ok`, `err`, `isOk`, `isErr`, `andThen`, `andThenAsync`, `map`, `mapAsync`, `mapErr`, `unwrapOr`, `fold`, `orElse`, `tryCatch`, `tryCatchAsync`, `sequenceFirst`, `sequenceAll`, `tap`, `tapErr`, `fromNullable` — the `Either` shape used everywhere errors are returned (no exceptions across module boundaries). (`unwrap` is available via direct path import for tests but intentionally excluded from the barrel.)
-- `FrameworkError` (re-exported from `types/errors.js`) — discriminated error union.
+- `ObserverEvent` (and the per-event types `RunStartEvent`, `NodeStartEvent`, `NodeEndEvent`, `NodeSkippedEvent`, `NodeErrorEvent`, `SubSpanEvent`, `RunEndEvent`, `RouteDecidedEvent`, `NodePrunedEvent`, `WitnessCapturedEvent`, `WriteAttemptedEvent`, `FreshnessViolationEvent`, `HumanInterventionEvent`), `SpanKind` — the typed event envelope flowing through the `Observer` interface (which lives under `src/observer/`).
+- `Result`, `Ok`, `Err`, `ok`, `err`, `isOk`, `isErr`, `andThen`, `andThenAsync`, `map`, `mapAsync`, `mapErr`, `unwrapOr`, `fold`, `orElse`, `tryCatch`, `tryCatchAsync`, `sequenceFirst`, `sequenceAll`, `tap`, `tapErr` — the Either shape used everywhere errors are returned (no exceptions across module boundaries). (`unwrap` is available via direct path import for tests but intentionally excluded from the barrel.)
+- `FrameworkError` (re-exported from `src/types/errors.ts`) — discriminated error union.
 
-Internal inference helpers (`ConsistentNodes`, `OutputOf`, `OutputsByNodeId`, `NodesRecord`) live with the mutually dependent DAG/map types in `types/dag.ts` and are intentionally absent from the main barrel. The former `types/dag-internals.ts` module was removed, not aliased.
+Internal inference helpers (`ConsistentNodes`, `OutputOf`, `OutputsByNodeId`, `NodesRecord`) live with the mutually dependent DAG/map types in `src/types/dag.ts` and are intentionally absent from the main barrel. The former types/dag-internals.ts module was removed, not aliased.
 
-### `executor/`
+### `src/executor/`
 
 - `defineDag`, `defineDagFromArray`, `DagDefinitionError` — type-driven DAG constructor(s) with `outputNodeId` enforcement.
 - `defineSources`, `SourcesDagConfig` — constructor for source-rooted DAGs; validates fan-in keys against source-node ids at definition time.
 - `validateDagShape`, `recordFromNodeArray`, `withRetryLimits` — pure validation utilities. `withRetryLimits` returns `Result<DagDef, FrameworkError>` and re-enters the same parser, so unknown node IDs and invalid counts cannot launder the validation brand.
 - `runDag`, `resumeRun`, `RunOptions` — execution entry points. Always route through the durable state machine (ADR 0021). `RunOptions` includes `jobLike`, `onHumanReview`, `onBackground`, `retryLimits`, and the ADR 0019 routing advisory toggle `suppressRoutingWarnings`. (`onTrace` is available on `RunOptions`.)
 
-### `nodes/`
+### `src/nodes/`
 
 Built-in node factories (each declares its capability `requires`):
 
@@ -65,47 +65,47 @@ Built-in node factories (each declares its capability `requires`):
 - `createLlmNode`, `LlmNodeConfig`
 - `createLlmWithToolsNode`, `LlmWithToolsNodeConfig`
 - `createGuardrailNode`, `GuardrailNodeConfig`, plus the `GuardrailResult` / `GuardrailSkipped` / `GuardrailValidated` / `GuardrailCheck` shapes
-- `createEvalJudgeNode`, `EvalJudgeNodeConfig`, `EvalJudgeNodeDef`, `EvalJudgeResult`, `EvalJudgeResponse`, `EvalJudgeResponseSchema`, `toEvalJudgeResult`, `failOpenResult`
+- `createEvalJudgeNode`, `EvalJudgeNodeConfig`, `EvalJudgeNodeDef`, `EvalJudgeResult`, `EvalJudgeResponse`, `EvalJudgeResponseSchema`, `toEvalJudgeResult`
 - `JUDGE_SYSTEM_FRAME`, `generateDefaultRubric`, `resolveRubric`, `assembleJudgeUserMessage` — prompt-assembly helpers for custom judge nodes.
 
-### `llm/`
+### `src/llm/`
 
-- `LlmClient`, `LlmRequest`, `LlmResponse`, `LlmRuntime`, `SendWithToolsRequest` — client contracts.
+- `LlmClient`, `LlmRequest`, `LlmResponse`, `SendWithToolsRequest` — client contracts.
 - `AnthropicLlmClient`, `OpenAILlmClient` — production clients. Both map provider-specific rate-limit errors to `Err({ kind: "transient" })`.
 - `FakeLlmClient` plus `FakeResponseProvider`, `FakeToolUseTurn`, `FakeFinalTurn`, `FakeWithToolsScript` — deterministic test client.
 - `ToolDef`, `tool`, `assertValidToolName`, `ensureToolNames` — typed tool-call surface (ADR 0012).
 - `withLlmSpan`, `withToolSpan`, `setLlmUsageAttributes`, `setToolIoAttributes`, `LlmSpanMeta`, `ToolSpanMeta` — span helpers for custom LLM integrations.
 - `computeCostUsd`, `PRICE_TABLE` — cost-attribution utilities.
 
-### `prompts/`, `cache/`
+### `src/prompts/`, `src/cache/`
 
 - `FilePromptRegistry`, `PromptRegistry`, `PromptEntry`, `computePromptHash` — filesystem-backed prompt registry.
 - `Cache` interface plus `InMemoryCache`, `RedisCache` — node-output cache backends.
 - `stableHash` — deterministic structural hash used by the cache layer.
 
-### `observer/`
+### `src/observer/`
 
-Domain event bus (typed). Tracing-specific concerns (OTel exporters, span helpers) live in `tracing/`:
+Domain event bus (typed). Tracing-specific concerns (OTel exporters, span helpers) live in `src/tracing/`:
 
 - `Observer` interface plus `NoopObserver`, `RecordingObserver`.
 - `BufferedObserver`, `computeRunSummary`, `dispatchEvent`, `RunSummary`, `AggregateCounters` — durable summary + dispatch helpers.
-- `PersistencePolicy` plus the policy combinators `alwaysOn`, `errorOnly`, `ratio`, `hadRetry`, `coldCache`, `anyOf`, `allOf`, `custom`.
-- `TailSamplingProcessor` — span tail-sampling (forwards to `tracing/`).
+- `PersistencePolicy` plus the policy combinators `alwaysOn`, `errorOnly`, `ratio`, `hadRetry`, `anyOf`, `allOf`, `custom`.
+- `TailSamplingProcessor` — span tail-sampling (forwards to `src/tracing/`).
 - The `OBSERVER_STRICT` env toggle rethrows observer exceptions in tests.
 
-### `tracing/`
+### `src/tracing/`
 
 - `TracingConfig`, `TracingHandle`, `initTracing` — OpenTelemetry SDK wiring with env-driven sample ratio.
 - `MlflowOtlpExporter`, `createMlflowExporter`, `MlflowOtlpExporterConfig` — MLflow-shaped OTLP exporter.
 - `enrichLlmSpan`, `EnrichLlmSpanOpts` — span-enrichment helper.
 - Re-exports from `semantic-conventions.js` — GenAI/MLflow attribute keys.
 
-### `checkpoint/`
+### `src/checkpoint/`
 
 - `Checkpointer` interface plus `RunMeta`, `NodeState`, `RunState`, `InMemoryCheckpointer`, `RedisCheckpointer`. Both backends enforce framework-version stamping on resume — see the §"Versioning" section — and the `checkpoint-expired` / `checkpoint-corrupt` / `checkpoint-version-mismatch` error kinds.
 - Mapped fans reject every nonempty loaded `corruptNodeAddresses`, including unrelated/old-epoch keys, opaque digest filenames and zero width, before fan work. Adapters still warn/drop; public `runDag` preserves the original cause in `retry-exhausted` with `rootErrorKind: checkpoint-corrupt`. No automatic destructive cleanup: inspect/repair storage and rerun, rather than treating corrupt work as a healthy miss. See [mapped recovery](./docs/llm-dag-authoring.md#createmapnode--runtime-width-fan-out).
 - `dagFingerprint`, `FRAMEWORK_VERSION` — byte-stable DAG hash and the version constant stamped into checkpoint meta. Map closure does not add recursive child-implementation fingerprinting.
-- `compositeNodeKey`, `parseCompositeNodeKey`, `DEFAULT_NODE_NAMESPACE`, `CompositeNodeKeyOpts`, `ParsedCompositeNodeKey` — unchanged named exports. The pure implementation now lives in `src/shared/composite-node-key.ts`; `checkpoint/index.ts` re-exports it. No forwarding implementation remains at the former checkpoint source path.
+- `compositeNodeKey`, `parseCompositeNodeKey`, `DEFAULT_NODE_NAMESPACE`, `CompositeNodeKeyOpts`, `ParsedCompositeNodeKey` — unchanged named exports. The pure implementation now lives in `src/shared/composite-node-key.ts`; `src/checkpoint/index.ts` re-exports it. No forwarding implementation remains at the former checkpoint source path.
 
 ## State-machine kernel (durability core)
 
@@ -127,7 +127,7 @@ The compilation layer between `DagDef` and the kernel.
 - `dagTransition` — pure transition function for the DAG machine.
 - `compileDagToMachine` — `DagDef` → `Machine<DagPhase, DagEvent, DagMachineContext>`.
 - `buildDagExecutor` — the `Executor` side: takes a `DagPhase`, runs the wave, returns a `DagEvent`.
-- `topoSort` — wave decomposition utility (re-exported from `shared/`).
+- `topoSort` — wave decomposition utility (re-exported from `src/shared/`).
 - `runDagStateful`, `runDagAsWorkerJob`, `DagRunOpts` — direct kernel-mode entry points. `runDag` is the recommended entry; these exist for callers that want kernel control.
 
 ## Queue layer
@@ -146,7 +146,7 @@ Transport-agnostic durable-queue contract.
 
 ## Scheduler
 
-NFR-021. Transport-agnostic cron scheduler (the BullMQ-or-other binding is the caller's concern; `scheduler/**` is forbidden from importing `queue-bullmq/**` by `scripts/check-imports.ts`).
+NFR-021. Transport-agnostic cron scheduler (the BullMQ-or-other binding is the caller's concern; `scheduler/**` is forbidden from importing `queue-bullmq/**` by `src/scripts/check-imports.ts`).
 
 - `TaskConfig`, `TaskRegistry`, `RegistryDiff`, `CatchUpDecision` — scheduler types.
 - `decideCatchUp` — pure decision helper for missed cron fires.
@@ -163,19 +163,19 @@ Internals (`hasCycle`, `diffRegistry`) are not re-exported.
 
 ## Boundary rules
 
-Enforced by `scripts/check-imports.ts` and `__tests__/boundary-imports.test.ts`:
+Enforced by `src/scripts/check-imports.ts` and `src/__tests__/boundary-imports.test.ts`:
 
-- `state-machine/**`, `dag-runtime/**`, and `scheduler/**` must not import `bullmq` / `ioredis` / `queue-bullmq/**`. Transport adapters live in `queue-bullmq/`; the kernel and scheduler stay transport-agnostic.
-- `dag-runtime/**` must not import from `executor/**`. The reverse direction (`executor/` → `dag-runtime/`) is allowed: `executor/` is the public-API wrapper around the runtime.
-- Pure-core modules (`state-machine/**`, `dag-runtime/transition.ts`, `dag-runtime/retry-policy.ts`, `dag-runtime/wave-resolution.ts`, `dag-runtime/human-resolution.ts`, `dag-runtime/machine.ts`) must not import `@opentelemetry/*`. Tracing belongs to the imperative shell.
-- `shared/**` must not import `@opentelemetry/*`, `observer/**`, or `tracing/**`. Telemetry-aware helpers (`run-node.ts`, `node-span.ts`) moved into `dag-runtime/` during pass 3 — the only legitimate consumer. The two NodeContext-stub constructors (`shared/defaults.ts`, `shared/make-node-context.ts`) are exempted by `scopeExcludes`.
+- `state-machine/**`, `dag-runtime/**`, and `scheduler/**` must not import `bullmq` / `ioredis` / `queue-bullmq/**`. Transport adapters live in `src/queue-bullmq/`; the kernel and scheduler stay transport-agnostic.
+- `dag-runtime/**` must not import from `executor/**`. The reverse direction (`src/executor/` → `src/dag-runtime/`) is allowed: `src/executor/` is the public-API wrapper around the runtime.
+- Pure-core modules (`state-machine/**`, `src/dag-runtime/transition.ts`, `src/dag-runtime/retry-policy.ts`, `src/dag-runtime/wave-resolution.ts`, `src/dag-runtime/human-resolution.ts`, `src/dag-runtime/machine.ts`) must not import `@opentelemetry/*`. Tracing belongs to the imperative shell.
+- `shared/**` must not import `@opentelemetry/*`, `observer/**`, or `tracing/**`. Telemetry-aware helpers (`run-node.ts`, `node-span.ts`) moved into `src/dag-runtime/` during pass 3 — the only legitimate consumer. The two NodeContext-stub constructors (`src/shared/defaults.ts`, `src/shared/make-node-context.ts`) are exempted by `scopeExcludes`.
 
 Adding a new layer? Add a rule. Adding a cross-layer import? It will fail CI.
 
 ## Public surface
 
 - `@fuguejs/framework` — the recommended consumer barrel: `runDag`, observer/tracing init, node-authoring types.
-- `@fuguejs/framework/advanced` — kernel-mode entry points (`runDagAsWorkerJob`, `runResumableDagJob`, `compileDagToMachine`, `buildDagExecutor`, `dagTransition`, `topoSort`, and the DAG persistence helpers) for callers building custom machines on top of the framework. Reaching for these is a deliberate choice; the main barrel keeps them off the surface. `runDagStateful` is deliberately on neither barrel — import it directly from `dag-runtime/run-dag-stateful.js`, or prefer `runDagStatefulOutcome` / `runResumableDagJob` for suspendable runs.
+- `@fuguejs/framework/advanced` — kernel-mode entry points (`runDagAsWorkerJob`, `runResumableDagJob`, `compileDagToMachine`, `buildDagExecutor`, `dagTransition`, `topoSort`, and the DAG persistence helpers) for callers building custom machines on top of the framework. Reaching for these is a deliberate choice; the main barrel keeps them off the surface. `runDagStateful` is deliberately on neither barrel — import it directly from `src/dag-runtime/run-dag-stateful.ts`, or prefer `runDagStatefulOutcome` / `runResumableDagJob` for suspendable runs.
 - `@fuguejs/framework/bullmq` — the BullMQ transport adapter (`createBullMQBackend`, `adaptBullMQJob`, `createRedisMarkerStore`, `createRedisStreamReader`). Pulls in the optional `bullmq` / `ioredis` peer deps; isolated off the main barrel so transport-agnostic consumers stay clean.
 - `@fuguejs/framework/redis` — Redis-backed durable adapters (`RedisCache`, `RedisCheckpointer`, `RedisFreshnessIndex`). Requires the optional `ioredis` peer dep.
 - `@fuguejs/framework/testing` — stable import path for test tooling (`FakeLlmClient`, `createFakeHttpCapability`).
@@ -214,4 +214,4 @@ These package-only commands are narrower than the repository gate. Redis suites 
 
 ## Versioning
 
-`FRAMEWORK_VERSION` (in `src/checkpoint/fingerprint.ts`) is stamped into every checkpoint meta row by `Checkpointer.write` and verified by `Checkpointer.read`. A mismatched value on resume returns `Err({ kind: "checkpoint-version-mismatch" })` rather than corrupting state silently. Bump it whenever validation, retry, or output-coercion semantics change. ADR 0017 records the most recent bump (`"1"` → `"2"`); the enforcement mechanism itself lives in `checkpoint/checkpointer.ts`.
+`FRAMEWORK_VERSION` (in `src/checkpoint/fingerprint.ts`) is stamped into every checkpoint meta row by `Checkpointer.write` and verified by `Checkpointer.read`. A mismatched value on resume returns `Err({ kind: "checkpoint-version-mismatch" })` rather than corrupting state silently. Bump it whenever validation, retry, or output-coercion semantics change. ADR 0017 records the most recent bump (`"1"` → `"2"`); the enforcement mechanism itself lives in `src/checkpoint/checkpointer.ts`.

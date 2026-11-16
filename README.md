@@ -37,7 +37,7 @@ This delegates to all 12 workspace `typecheck` and `test` scripts, including the
 
 ### Scaffold a DAG with the CLI
 
-The framework ships a `fugue` CLI. Run it via `bunx` from a package that depends on `@fuguejs/framework`:
+The framework ships a `fugue` CLI. Run it via bunx from a package that depends on `@fuguejs/framework`:
 
 ```bash
 bunx fugue new my-team/my-dag --shape linear --llm   # scaffold a lint-clean DAG

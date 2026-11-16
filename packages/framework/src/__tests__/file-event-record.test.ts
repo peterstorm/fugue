@@ -1032,7 +1032,7 @@ describe("parseFileEventRecord — valid records", () => {
       sequence: 7,
       dedupKey: "agent:run-1",
       // Structurally a plain number at runtime — the parsed record carries
-      // the `RecordedAtMs` brand; `toEqual` compares by structure.
+      // the `RecordedAtMs` brand; toEqual compares by structure.
       recordedAtMs: 1_700_000_000_000 as unknown as RecordedAtMs,
       event: { kind: "step", n: 2 },
     };

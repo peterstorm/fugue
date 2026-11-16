@@ -491,7 +491,7 @@ describe("sendWithTools span emission (GenAI semconv)", () => {
     const recorded: RecordedSpan[] = [];
     const tracer = makeRecordingTracer(recorded);
 
-    // Open a synthetic outer span mirroring `withNodeSpan` so the OTel
+    // Open a synthetic outer span mirroring `withTracedNodeSpan` so the OTel
     // context-with(...) chain has something other than the root to inherit from.
     const otelMod = require("@opentelemetry/api") as typeof import("@opentelemetry/api");
     const outerSpanId = nextSpanId();

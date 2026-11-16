@@ -1,6 +1,6 @@
 # Plan: Identity-Scoped Capabilities
 
-**Spec:** `/Users/hansen142/dev/agentic/fugue/.claude/specs/2026-06-10-identity-scoped-capabilities/spec.md`
+**Spec:** `.claude/specs/2026-06-10-identity-scoped-capabilities/spec.md`
 **Design doc (locked approach):** `/Users/hansen142/dev/agentic/fugue/docs/plans/2026-06-10-identity-scoped-capabilities.md`
 **Created:** 2026-06-10
 

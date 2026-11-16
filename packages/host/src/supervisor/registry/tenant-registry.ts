@@ -62,7 +62,7 @@ type ValidatedTenantConfig = {
  * against, the supervisor-facing OIDC client id used to resolve identities for
  * this tenant, and the per-DAG → agent-client-id mapping the worker uses when
  * minting downstream capability tokens (mirrors the existing
- * `AGENT_CLIENT_IDS_BY_DAG` config shape, scoped per tenant). Held as plain,
+ * `AGENT_CLIENT_MAP` config shape, scoped per tenant). Held as plain,
  * already-validated data — this is config the registry carries, not a secret.
  */
 interface KeycloakClientMapping {

@@ -103,7 +103,7 @@ const stripCodeFences = (text: string): string =>
  *
  * When the underlying error already carries its own `usage` (the provider
  * reported partial tokens for the in-flight turn that just failed — these have
- * NOT yet been added to `priorIn`/`priorOut`), the two are summed. Otherwise
+ * NOT yet been added to `prior`), the two are summed. Otherwise
  * the accumulated totals stand alone.
  */
 const withAccumulatedUsage = (

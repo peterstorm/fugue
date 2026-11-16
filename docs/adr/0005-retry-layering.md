@@ -7,7 +7,7 @@
 
 ## Context
 
-The durable runtime sits between two retry-capable layers. The state machine has its own per-state and per-node retry budgets (`Machine.maxRetries`, `DagDef.retryLimits`, `NodeDef.retry`) for handling expected transient failures — LLM timeouts, HTTP 429s, brief upstream blips. BullMQ, sitting above the runner, has its own `attempts` / `backoff` knobs that re-pick a job after a worker crash, lock loss, or unhandled exception.
+The durable runtime sits between two retry-capable layers. The state machine has its own per-state and per-node retry budgets (`Machine.maxRetries`, `DagDef.retryLimits`, `NodeDef.retry`) for handling expected transient failures — LLM timeouts, HTTP 429s, brief upstream blips. BullMQ, sitting above the runner, has its own `attempts` / backoff knobs that re-pick a job after a worker crash, lock loss, or unhandled exception.
 
 Both can fire on the same failure. Without an explicit precedence rule:
 
@@ -61,7 +61,7 @@ Layering rules:
 
 1. **Inner loop (machine-level).** `Machine.maxRetries` (kernel) and `DagDef.retryLimits` / `NodeDef.retry` (DAG layer) handle expected transient failures *inside one queue attempt*. The runner does **not** give the job back to the queue between machine retries — it loops in `runStateMachine` applying `dagTransition` outputs (`retrying` / `retrying-hook` phases) and sleeping per-attempt backoff (FR-027: exponential, 1s/2s/4s default + jitter, configurable per-node via `NodeDef.retry`).
 
-2. **Outer fallback (queue-level).** BullMQ `attempts` / `backoff` cover process crashes, lock loss, and exhaustion of the inner loop. The queue is the only authority for "the worker is gone."
+2. **Outer fallback (queue-level).** BullMQ `attempts` / backoff cover process crashes, lock loss, and exhaustion of the inner loop. The queue is the only authority for "the worker is gone."
 
 3. **Throw on terminal failed (FR-007).** When `dagTransition` produces a terminal `failed` phase, `runStateMachine` throws after persisting the final checkpoint. The thrown error is what the queue's outer loop sees — the queue then applies its own `attempts` policy. If the queue exhausts, the dead-letter handler fires (FR-044).
 
@@ -71,7 +71,7 @@ Concrete components:
 
 - `packages/framework/src/state-machine/runner.ts` — owns the inner loop. Resets counters on entry. Throws on terminal `failed`.
 - `packages/framework/src/dag-runtime/transition.ts` — pure. Decides `retrying` vs. terminal `failed` from `ctx.retries.get(nodeId)` against `retryLimits`. No knowledge of the queue.
-- `packages/framework/src/queue/bullmq-adapter.ts` — passes through BullMQ's native `attempts` / `backoff` config. Does not parse or interpret machine retries.
+- `packages/framework/src/queue-bullmq/adapter.ts` — passes through BullMQ's native `attempts` / backoff config. Does not parse or interpret machine retries.
 
 Invariant: **the inner loop never enqueues, and the outer loop never inspects machine state.** They communicate exclusively through `throw` (machine → queue) and `runStateMachine` invocation (queue → machine).
 
@@ -89,5 +89,5 @@ Invariant: **the inner loop never enqueues, and the outer loop never inspects ma
 
 - Two policies to configure. Callers who want a single budget have to compute it themselves (e.g. "I want at most 6 total tries: set node retries to 2 and queue attempts to 3").
 - Counter reset on fresh attempt means a pathological crash loop *could* burn far more retries than either policy alone permits (a node that crashes the worker on every attempt gets a fresh inner budget on each queue re-pickup). Mitigation: queue `attempts` caps the outer loop; dead-letter notifier (FR-044) fires once at exhaustion. Accepted: this is the cost of crash recovery without inter-layer counter sync.
-- The "machine retries don't survive a crash" property must be communicated to operators reading metrics — a `retry_count` from the trace stream is per-attempt, not lifetime.
+- The "machine retries don't survive a crash" property must be communicated to operators reading metrics — a retry_count from the trace stream is per-attempt, not lifetime.
 - Future requirement to cap totals across layers would require either (a) plumbing queue-attempt count into `Machine` context, or (b) a thin wrapper above `runStateMachine` that does the math. Either is doable, but neither is built today.

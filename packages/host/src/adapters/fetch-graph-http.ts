@@ -17,7 +17,7 @@
  *     STATUS (4xx → denied, 5xx → unreachable) — a parse hiccup never looks like
  *     a transport fault.
  *   - A TRANSPORT-LEVEL fault REJECTS (per the port docs) so `runGraph`'s
- *     `try/catch` maps it to `infra-unreachable`. The bearer is presented as
+ *     try/catch maps it to `infra-unreachable`. The bearer is presented as
  *     `Authorization: Bearer <token>` and a POST body is JSON-encoded with the
  *     matching `Content-Type`.
  *
@@ -50,7 +50,7 @@ export type GraphFetchLike = (
 /**
  * The default request deadline (ms) for a downstream Graph call. Bounds the
  * `await` so a hung Graph endpoint can never wedge the broker indefinitely; the
- * resulting `AbortError` rejection is mapped by `runGraph`'s `try/catch` to the
+ * resulting `AbortError` rejection is mapped by `runGraph`'s try/catch to the
  * retriable `infra-unreachable` (NFR-020) — same channel as a DNS/socket fault.
  */
 const DEFAULT_GRAPH_HTTP_TIMEOUT_MS = 30_000;

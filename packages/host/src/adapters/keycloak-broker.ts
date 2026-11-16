@@ -4,7 +4,7 @@
  * `requires` it declares, it resolves a scoped, operation-narrowed handle per
  * capability, minting downstream authority through an INJECTED token endpoint.
  *
- * Authority strategy is selected by `invocation.origin.kind`, exhaustively:
+ * Authority strategy is selected by the invocation's `origin.kind`, exhaustively:
  *   - `agent`  → `client_credentials` minted AS the agent's Keycloak client,
  *     requesting EXACTLY the scopes `requires` names. NO token exchange
  *     (FR-W3-009 / SC-010).

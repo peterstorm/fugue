@@ -127,7 +127,7 @@ return 1
 /**
  * The driver seam this adapter actually needs, owned by this consumer rather
  * than by `ioredis` (architecture.md, "Ports at I/O Boundaries"; the shape is
- * `typescript-patterns.md`'s object type of call signatures, so a fake is a
+ * typescript-patterns.md's object type of call signatures, so a fake is a
  * plain object literal, not a mock).
  *
  * Every signature carries the EXACT arity of the call below it, not a
@@ -352,7 +352,7 @@ export class RedisCheckpointer implements Checkpointer {
         // port structurally with no cast. Narrowing it here with a runtime
         // check rather than an `as string` assertion keeps that property AND
         // fails closed — an assertion would let a driver returning a Buffer
-        // (e.g. under `returnBuffers`) thread a non-string into `evalsha` as
+        // (e.g. under returnBuffers) thread a non-string into `evalsha` as
         // if it were a validated SHA, and the failure would surface later, on
         // a different call, as an opaque driver error.
         const sha = await this.redis.script("LOAD", SAVE_NODE_SCRIPT);

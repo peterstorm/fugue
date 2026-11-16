@@ -269,7 +269,7 @@ describe("createHost — UDS bind + chmod 0600 (FR-007)", () => {
       // Restore the REAL `node:fs` before any other test runs (the harness's
       // top-level statSync/existsSync/rmSync bindings, and any later
       // `await import("node:fs")` in host.ts, must point at the real impl).
-      // NOTE: in Bun 1.3.x `mock.restore()` does NOT clear a `mock.module`
+      // NOTE: in Bun 1.3.x mock.restore() does NOT clear a mock.module
       // override — you must re-mock with the real exports, and the throwing
       // `chmodSync` must be replaced EXPLICITLY with the captured real fn.
       mock.module("node:fs", () => ({ ...actualFs, default: actualFs, chmodSync: realChmodSync }));

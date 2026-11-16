@@ -28,7 +28,7 @@ describe("runStateMachine — appendEvent dedup across simulated crash", () => {
 
   /**
    * In-memory crash-simulating job. Tracks last `dedupKey` for the most
-   * recent appended event and exposes a `simulateCrashAfterAppend` toggle so
+   * recent appended event and exposes a simulateCrashAfterAppend toggle so
    * the test can interrupt between `appendEvent` and `updateData`.
    */
   type CrashingJob = JobLike<S, unknown, C> & {

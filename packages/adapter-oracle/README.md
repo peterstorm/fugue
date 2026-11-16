@@ -121,12 +121,12 @@ amortizing connection cost.
 ### `mapOracleError(error, sql)`
 
 Classifies an `oracledb` error. Connection-class ORA- codes
-(`ORA-03113/03114/12541/12170/12514`) → `transient` (retriable); everything
+(ORA-03113/03114/12541/12170/12514) → `transient` (retriable); everything
 else → non-retriable `node-crash`. Oracle stacks multiple ORA codes in one
 message, so classification prefers the structured `errorNum` and then scans
 **all** `ORA-NNNNN` tokens — if any is connection-class the error is
 `transient`. **Credentials are stripped** from every message: the DSN
-`user/password@host` form and the `password=` / `pwd=` / `user=` / `uid=`
+user/password@host form and the `password=` / `pwd=` / `user=` / `uid=`
 key-value forms are redacted to `***` before the message is surfaced or logged.
 
 ### `createFakeOracleCapability(routes)`

@@ -89,7 +89,7 @@ const jsonObjectEnv = <T>(
 
 /**
  * A boolean env flag. Env vars arrive as strings, so the accepted spellings are
- * fixed here once — an enum, not a loose `truthy` coercion, so a typo fails the
+ * fixed here once — an enum, not a loose truthy coercion, so a typo fails the
  * parse loudly instead of silently reading as `false`.
  */
 const booleanEnvFlag = () =>
@@ -298,7 +298,7 @@ export const HostConfigSchema = z.object({
    *
    * KEYS ARE REAL KEYCLOAK CLIENT IDS (FR-040 (keycloak-entra-wiring)): a DAG id is first resolved to its
    * agent-type client id through `AGENT_CLIENT_MAP` (`agentClientIdForDag`), and
-   * the resulting REAL client id (`fugue-agent-mail`, …) is what the broker's
+   * the resulting REAL client id (fugue-agent-mail, …) is what the broker's
    * fail-closed gate looks up here. They are NOT DAG ids — the dagId→client
    * placeholder identity is gone.
    */
@@ -398,7 +398,7 @@ export const HostConfigSchema = z.object({
   ),
   /**
    * The Dynamics 365 organization host the host's `dynamics:*` capabilities read
-   * from (e.g. `org.crm4.dynamics.com`), used to build the per-org Graph/Dataverse
+   * from (e.g. org.crm4.dynamics.com), used to build the per-org Graph/Dataverse
    * audience + handle (FR-042). Optional — DAGs requiring `dynamics` fail the
    * boot-time capability check when unset, exactly as today (SC-001).
    */

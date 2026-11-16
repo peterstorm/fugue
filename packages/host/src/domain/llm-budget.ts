@@ -106,7 +106,7 @@ export const ceilingsOf = (declared: LlmBudgetDeclaration): Ceilings | undefined
  * The three merge points on the registration chain (`applyFugueYaml`,
  * `resolveDefaults`, and the resolved-config build in `dag-factory`) each
  * hand-listed the same conditional spreads. Absence has to stay absence rather
- * than becoming an explicit `undefined` — `exactOptionalPropertyTypes` aside,
+ * than becoming an explicit `undefined` — exactOptionalPropertyTypes aside,
  * a present-but-undefined key would make "declared no budget" and "declared a
  * budget of nothing" different values of the same shape. One carrier means a
  * field added to `LlmBudgetDeclaration` reaches all three sites at once instead

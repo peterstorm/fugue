@@ -30,7 +30,7 @@
 // resume layer re-tags corruption as `checkpoint-corrupt` with the runId.
 //
 // Readers need NO lock: event files are immutable and written atomically
-// (rename is the commit point); `append.lock/` is a directory and `.tmp.<unique-token>`
+// (rename is the commit point); append.lock/ is a directory and `.tmp.<unique-token>`
 // litter never matches `*.json`, so they are invisible to this reader (any
 // number of concurrent readers is part of the ADR-0078 single-writer contract).
 //

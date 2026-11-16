@@ -4,7 +4,7 @@
  * WHY THIS EXISTS (the operational blocker it removes): the multi-tenant
  * supervisor exposes NO team-minting endpoint, and `POST /admin/tenants` requires
  * in-cluster reach to a Route-less host. On a locked-down OpenShift namespace
- * with no `exec`/`port-forward` RBAC there is no way to drive those imperative
+ * with no `exec`/port-forward RBAC there is no way to drive those imperative
  * calls. So tenants + team tokens must instead seed from MOUNTED files at
  * supervisor startup (GitOps: a ConfigMap of tenants + a SealedSecret of team
  * tokens), with no admin API call ever needed (ADR-0064 single-host topology).
@@ -37,7 +37,7 @@ import type { ActiveTenantConfig } from "../registry/tenant-registry.js";
 const fileError = (source: string, reason: string): Result<never, HostError> =>
   err({ kind: "config-invalid", message: `bootstrap '${source}': ${reason}` });
 
-/** Same DNS-label shape the admin team-token path enforces (`admin/teams.ts`). */
+/** Same DNS-label shape the admin team-token path enforces (`http/handlers/admin/teams.ts`). */
 const TEAM_NAME_REGEX = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 
 // ── Tenants bootstrap ────────────────────────────────────────────────────────

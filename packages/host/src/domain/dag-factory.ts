@@ -54,9 +54,9 @@ export const loadResultsToSnapshots = (results: readonly LoadResult[], sha: GitS
 
 /**
  * Extract team name from a module path following the `dags/{team}/.../{name}/dag.ts`
- * convention. The team is the FIRST folder under `dags/`; any intermediate
- * folders are intra-team grouping (e.g. `dags/business-sales/leads/lead-scoring/dag.ts`
- * → team `business-sales`). Returns "unknown" when the path does not follow it —
+ * convention. The team is the FIRST folder under dags/; any intermediate
+ * folders are intra-team grouping (e.g. dags/business-sales/leads/lead-scoring/dag.ts
+ * → team business-sales). Returns "unknown" when the path does not follow it —
  * the caller (sync-callbacks) warns on "unknown", and team drives authorization
  * isolation, so a wrong-but-plausible team must NOT slip through.
  *
@@ -96,7 +96,7 @@ export const loadResultToRegisteredDag = (
   // team. This is the DAG-ownership team boundary: brand it a CANONICAL `Team`
   // (trim + lowercase) so every downstream authz comparison (`canAccessDag`) is
   // type-checked AND `===`-matches the registered, always-canonical team — a
-  // `fugue.yaml` `team: Foo` must not mismatch a tenant registered as `foo`.
+  // `fugue.yaml` `team: Foo` must not mismatch a tenant registered as foo.
   const team = canonicalTeam(result.team && result.team.length > 0 ? result.team : extractTeam(result.modulePath));
   const regConfig = result.registration.config;
 

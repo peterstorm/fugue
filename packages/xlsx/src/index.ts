@@ -6,7 +6,7 @@
  * deterministic within one process: the same bytes always yield the same result,
  * including under concurrent parses. Date cells are the exception across
  * processes. Like SheetJS, `serialToDate` builds them in the process's local time
- * zone, so the same bytes read under a different `TZ` give `Date`s at different
+ * zone, so the same bytes read under a different TZ give `Date`s at different
  * instants. The byte fetching is a `documents`
  * capability concern (`@fuguejs/ms-graph`, `@fuguejs/fs`); parsing stays here so it
  * is fixture-testable and provider-agnostic. See ADR-0052.

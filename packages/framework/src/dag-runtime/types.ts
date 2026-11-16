@@ -110,7 +110,7 @@ export type DagPhase =
  * Runtime-enumerable set of every `DagPhase` discriminant. The single source of
  * truth a deserialization boundary uses to validate a checkpoint's `state.kind`
  * BEFORE it drives an exhaustive `match` (a corrupt/unknown kind otherwise
- * surfaces as a raw `NonExhaustiveError` instead of a clean handled error).
+ * surfaces as a raw NonExhaustiveError instead of a clean handled error).
  *
  * Derived from a `Record<DagPhase["kind"], true>` so the compiler keeps it in
  * lockstep with the union in BOTH directions: adding a `DagPhase` kind without
@@ -145,7 +145,7 @@ export type DagEvent =
       readonly wave: number;
       readonly outputs: ReadonlyMap<NodeId, unknown>;
       /**
-       * Per-source-node routing decision computed once by `runWave` after the
+       * Per-source-node routing decision computed once by `executeWave` after the
        * wave completes. Computed once per wave to avoid re-evaluating
        * predicates twice — the executor already evaluates them for
        * observer-event emission. Only nodes whose out-edges carry at least
@@ -361,7 +361,7 @@ export interface DagMachineContext extends DagMachineContextPersisted {
   readonly outgoingByNode: ReadonlyMap<NodeId, readonly EdgeDef[]>;
   /**
    * Precomputed `{ required, optional }` source partition per node, derived
-   * from the edges at compile time. Used by `runNode` to assemble `nodeInput`
+   * from the edges at compile time. Used by `runNodeShared` to assemble `nodeInput`
    * without consulting any author-supplied `deps` field (which no longer
    * exists — edges are the single source of truth, see ADR 0017).
    */

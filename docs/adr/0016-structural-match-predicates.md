@@ -39,7 +39,7 @@ The predicate's keys are top-level field names of the upstream output; the value
 
 **Empty predicate rejected.** `{}` is vacuously true; the validator rejects it because an "always-true" routing edge should be unconditional instead.
 
-**Evaluator is pure and total.** `evaluatePredicate(pred, output)` iterates the predicate's keys, checks each against `output` (by `===` for literals, `includes` for `oneOf`), returns boolean. Cannot throw. The previous `guard-threw` error is gone; in its place, `predicate-malformed` exists as defense-in-depth against predicates introduced via `as`-casts that bypass the type system.
+**Evaluator is pure and total.** `evaluatePredicate(pred, output)` iterates the predicate's keys, checks each against `output` (by `===` for literals, `includes` for `oneOf`), returns boolean. Cannot throw. The previous guard-threw error is gone; in its place, `predicate-malformed` exists as defense-in-depth against predicates introduced via `as`-casts that bypass the type system.
 
 **Observer event payload.** `RouteDecidedEvent` carries `matchedPredicate: Predicate<unknown> | null` — the literal predicate object that fired, or `null` when the default fired or no conditional edges exist on the source.
 
@@ -58,7 +58,7 @@ The predicate's keys are top-level field names of the upstream output; the value
 **Costs**
 
 - **Expressivity squeeze.** Authors needing `and`/`or`/`not`/comparisons must upstream-classify. The classifier-node pattern is documented in `library-ux.md` §8 with a worked example.
-- **`Predicate<unknown>` for hand-rolled DAGs.** When the upstream output type isn't inferred (`defineDagFromArray`, `as`-casts), `keyof unknown = never` and the predicate degrades to `{}` at edit time. The module-load validator and the runtime `validatePredicateShape` defense-in-depth catch malformed predicates either way.
+- **`Predicate<unknown>` for hand-rolled DAGs.** When the upstream output type isn't inferred (`defineDagFromArray`, `as`-casts), `keyof unknown = never` and the predicate degrades to `{}` at edit time. The module-load validator and the runtime validatePredicateShape defense-in-depth catch malformed predicates either way.
 - **Total rewrite of conditional-edge tests.** Mechanical (one-shot search-and-replace from `when: () => ...` to `when: { ... }`); no production code used closures.
 
 **Out of scope**

@@ -27,7 +27,7 @@ export type MapIndex = number & { readonly [__mapIndexBrand]: void };
 /** Option-returning gateway to {@link MapIndex}. */
 export const asMapIndex = (raw: number): MapIndex | undefined =>
   // `typeof` first: `>=` coerces, so a guard leading with the comparison would
-  // admit a forged `"3"` (or consult a hostile `valueOf`) as a durable address
+  // admit a forged `"3"` (or consult a hostile valueOf) as a durable address
   // component.
   typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0 ? (raw as MapIndex) : undefined;
 

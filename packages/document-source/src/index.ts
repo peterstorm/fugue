@@ -34,7 +34,7 @@ import { ok, err, nodeId } from "@fuguejs/framework";
  * illegal states (a drive id without an item id, a half-specified SharePoint
  * path, mixed addressing modes) cannot be represented. New providers extend
  * this union additively. Each adapter handles the variants it understands and
- * fails closed (an `unsupported-ref` error) on the rest — see ADR-0052.
+ * fails closed (an `unsupportedRefError`) on the rest — see ADR-0052.
  */
 export type FileRef =
   /** SharePoint (MS Graph): site host + server-relative site path + file path. */
@@ -243,10 +243,10 @@ declare module "@fuguejs/framework" {
  * instances/runs. Where that module lives decides its lifetime under the
  * host's hot reload, which re-imports only the DAG entry module as
  * `dag.ts?v=<sha>`:
- * - In a `lib/` module or a package (the usual place): the module is
+ * - In a lib/ module or a package (the usual place): the module is
  *   imported by its plain specifier, so it is evaluated once per worker
  *   process and shared by every `?v=<sha>` re-import. The memo survives
- *   deploys, and changes to `lib/` code (including the `parse` function)
+ *   deploys, and changes to lib/ code (including the `parse` function)
  *   take effect only when the worker restarts. The memo still re-parses a
  *   file whose fingerprint changed.
  * - In the DAG entry module itself: each deployed version evaluates a fresh

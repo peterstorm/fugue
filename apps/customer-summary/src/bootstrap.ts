@@ -341,7 +341,7 @@ const resolveModel = (config: Config): string => {
  * Which LLM client the app runs on, as a tagged union. `fake-fallback` is the
  * no-API-key fallback onto the unconfigured FakeLlmClient — every /summarize
  * is then guaranteed to fail, so readiness must report not-ready (checkLlm)
- * instead of serving traffic into it. The tag replaces a free `llmIsFake`
+ * instead of serving traffic into it. The tag replaces a free llmIsFake
  * boolean so the two states cannot be read apart from the client they name.
  */
 type LlmSetup =

@@ -30,7 +30,7 @@ export { topoSort } from "../shared/topo.js";
 export { buildDagExecutor } from "./executor.js";
 
 // runDagStateful is the internal kernel-mode entry point. It is reachable via
-// direct file imports (`dag-runtime/run-dag-stateful.js`) for tests and the
+// direct file imports (`dag-runtime/run-dag-stateful.ts`) for tests and the
 // public wrapper in `executor/run-dag.ts`. It is intentionally NOT re-exported
 // from this barrel — the public surface for orchestrator concerns is `runDag`.
 

@@ -1,6 +1,6 @@
 // Wave 6 §6.6 — concurrent resolveDependents for the same upstream task.
 //
-// Two parallel callers race on the dependent's `alreadyFired` check. With a
+// Two parallel callers race on the dependent's alreadyFired check. With a
 // delayed in-memory marker store (forces the read/write window to overlap),
 // without an atomic guard the dependent would be enqueued twice.
 //
@@ -17,7 +17,7 @@ import type { MarkerStore } from "../queue/types.js";
 import type { TaskConfig, TaskRegistry } from "../scheduler/types.js";
 
 /**
- * In-memory marker store with an optional `existsDelayMs` to force the
+ * In-memory marker store with an optional existsDelayMs to force the
  * concurrent-window overlap. TTL is honored against `nowMs()` so callers
  * can advance time deterministically.
  */

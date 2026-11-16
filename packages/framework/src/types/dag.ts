@@ -168,7 +168,7 @@ export type PredicateResult = {
 
 // evaluatePredicate lives in `dag-runtime/routing.ts` where it belongs
 // (it contains business logic, not type definitions). Import from
-// `dag-runtime/routing.js` directly.
+// `dag-runtime/routing.ts` directly.
 
 /**
  * Edge variants (runtime shape, after `defineDag` strips literal id types).

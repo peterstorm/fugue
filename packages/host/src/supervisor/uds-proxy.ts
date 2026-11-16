@@ -198,7 +198,7 @@ export const buildForwardRequest = (
 ): Request => {
   const headers = new Headers(inbound.headers);
   // Strip any client-supplied tenant header — the supervisor is the sole signer.
-  // `Headers.delete` is case-insensitive, so a `x-fugue-tenant` / `X-FUGUE-TENANT`
+  // `Headers.delete` is case-insensitive, so a x-fugue-tenant / X-FUGUE-TENANT
   // smuggling attempt is removed too before the supervisor stamps its own value.
   headers.delete(TENANT_HEADER_NAME);
   // Stamp the supervisor's freshly-signed header (canonical synchronous signer,

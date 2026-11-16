@@ -17,7 +17,7 @@ import { __resetFrameworkLogger, setFrameworkLogger } from "../logger.js";
 // behavior (the NOSCRIPT/EVAL recovery path).
 
 // Test-owned meta store adopted by the checkpointer (the deepening-round seam
-// that replaced `__testRawMetas`): the suite seeds stored records DIRECTLY —
+// that replaced __testRawMetas): the suite seeds stored records DIRECTLY —
 // the Redis-raw-set analog — so the in-memory leg mirrors the Redis leg's
 // bypass shape, and nothing on the adapter exposes its internals.
 const inMemoryStore = new Map<string, InMemoryStoredMeta>();
@@ -893,7 +893,7 @@ describe("RedisCheckpointer — hostile seams without a live server", () => {
     // Round-21 type-design-analyzer-2. The port types `script` as
     // `Promise<unknown>` because that is ioredis's own return type; the
     // adapter used to close the gap with `as string`. An assertion would let a
-    // driver returning a Buffer (`returnBuffers`) be stored as the SHA and
+    // driver returning a Buffer (returnBuffers) be stored as the SHA and
     // handed to `evalsha`, where it fails later as an opaque driver error on a
     // different call. `evalsha` stays at its named-throw default, so reaching
     // it would fail loudly rather than pass quietly.

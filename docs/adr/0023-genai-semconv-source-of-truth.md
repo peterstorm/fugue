@@ -8,7 +8,7 @@
 
 Two prior decisions accreted into a parallel-namespace problem:
 
-1. The **MLflow-decoupling plan** (2026-05-06) established the principle "the framework speaks generic semantic conventions; the exporter speaks vendor." It chose a framework-owned `ai.*` namespace as the source of truth and built the MLflow exporter as the vendor translator. Five attributes carried the LLM call: `ai.llm.model`, `ai.llm.provider`, `ai.llm.tokens_in`, `ai.llm.tokens_out`, `ai.llm.cost_usd`.
+1. The **MLflow-decoupling plan** (2026-05-06) established the principle "the framework speaks generic semantic conventions; the exporter speaks vendor." It chose a framework-owned `ai.*` namespace as the source of truth and built the MLflow exporter as the vendor translator. Five attributes carried the LLM call: `ai.llm.model`, `ai.llm.provider`, ai.llm.tokens_in, ai.llm.tokens_out, `ai.llm.cost_usd`.
 
 2. The **tool-call surface plan** (2026-05-10, ADR 0012) then layered the OTel GenAI semantic conventions on top, explicitly as "belt-and-suspenders" — `gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.{input,output}_tokens` were emitted alongside the `ai.llm.*` versions of the same fields. Reason: MLflow's typed-span UI keys off the `gen_ai.*` names, and so does every other GenAI-aware backend (Phoenix, Langfuse, Honeycomb, Tempo).
 
@@ -68,7 +68,7 @@ Adding a new vendor adapter (Langfuse, Phoenix) means writing analogous tables, 
 - `gen_ai.user.message` with body `{ role: "user", content }`
 - `gen_ai.assistant.message` with body `{ role: "assistant", reasoning_content }` when thinking is present
 
-The PII gate (`includeContent`) is preserved — when off, content fields are replaced with `*_redacted: "true"` and `*_chars: <length>`. The `gen_ai.assistant.message`'s `reasoning_content` body field is framework convention (the OTel spec doesn't yet standardize reasoning capture), but the event name and role follow the spec so any GenAI-aware consumer sees a recognisable event.
+The PII gate (includeContent) is preserved — when off, content fields are replaced with `*_redacted: "true"` and `*_chars: <length>`. The `gen_ai.assistant.message`'s `reasoning_content` body field is framework convention (the OTel spec doesn't yet standardize reasoning capture), but the event name and role follow the spec so any GenAI-aware consumer sees a recognisable event.
 
 ### Response attributes
 
@@ -88,11 +88,11 @@ The PII gate (`includeContent`) is preserved — when off, content fields are re
 
 - The framework's old `ai.llm.{model,provider,tokens_in,tokens_out}` constants are gone. Anyone depending on those attribute names in custom dashboards needs to switch to `gen_ai.*`. Nothing in this repo relied on them — only the framework itself emitted and consumed them.
 - The framework now leans on the OTel GenAI semconv staying stable. The semconv is still marked "incubating" — but the attributes used here (`gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.*`, etc.) are the most stable subset and are emitted by every GenAI-aware OTel instrumentation today.
-- The PII-redaction story now sits inside the spec's event family rather than custom events. Operators reviewing PII handling need to know the redaction fields (`content_redacted`, `content_chars`) live as body attributes on `gen_ai.{system,user,assistant}.message` events.
+- The PII-redaction story now sits inside the spec's event family rather than custom events. Operators reviewing PII handling need to know the redaction fields (content_redacted, content_chars) live as body attributes on `gen_ai.{system,user,assistant}.message` events.
 
 ## Non-goals
 
 - Building a generic vendor-translation framework. One adapter (MLflow) is sufficient. Generalize when there's a second.
 - Adding a per-call request-parameter API (`temperature`, `top_p`, `max_tokens` on `LlmRequest`). The `setLlmRequestAttributes` helper is in place; expanding the request envelope is a separate API change.
-- Cross-provider parity on `finish_reasons`. Anthropic emits `stop_reason` values (`end_turn`, `max_tokens`, `tool_use`, …); OpenAI's Responses API emits status (`completed`, `failed`, `incomplete`). Both flow through `gen_ai.response.finish_reasons[]` as-is.
+- Cross-provider parity on `finish_reasons`. Anthropic emits `stop_reason` values (end_turn, `max_tokens`, `tool_use`, …); OpenAI's Responses API emits status (`completed`, `failed`, `incomplete`). Both flow through `gen_ai.response.finish_reasons[]` as-is.
 - Replacing `mlflow.spanType` with a vendor-neutral mechanism. MLflow's typed-span UI keys off this attribute, and the OTel GenAI spec uses span-name patterns (`{operation} {model}`) plus `gen_ai.operation.name` to classify rather than a "span type" attribute. The framework continues to emit both — `mlflow.spanType` for the MLflow UI, the spec pattern for everything else.

@@ -83,11 +83,11 @@ Concretely, four seams change:
 2. **Two-path resolution in the middleware**
    (`packages/host/src/http/middleware/auth.ts`), in fail-safe order:
    1. constant-time compare against `adminToken` → `{ kind: "admin" }`;
-   2. JWT path — *only* entered when a `verifyRealmJwt` verifier is configured,
+   2. JWT path — *only* entered when a `VerifyRealmJwt` verifier is configured,
       the token does **not** have the `fug_` team-token shape (the explicit
       `!isTeamTokenShape(token)` guard in `auth.ts`), **and** the token matches
       the JWT compact-serialization shape
-      (`isJwtShape`). Signature is verified by the **injected** `verifyRealmJwt`
+      (`isJwtShape`). Signature is verified by the **injected** `VerifyRealmJwt`
       port (JWKS-backed in prod, fake in tests); claims are then checked by the
       pure `validateRealmJwtClaims` against `expectedIss` / `expectedAud`. Only
       on full success does it resolve `{ kind: "user", sub, azp }`;
@@ -111,7 +111,7 @@ Concretely, four seams change:
    ready to construct the group when the verifier lands.
 
 3. **`sub` threads into `Invocation.origin`** via the pure, exported
-   `invocationOriginForIdentity` (`domain/run-context.ts` — the domain-owned
+   `invocationOriginForIdentity` (`packages/host/src/domain/run-context.ts` — the domain-owned
    contract; `node-context-factory.ts` keeps a backward-compat re-export),
    exhaustive over `AuthIdentity`:
    - `user`  → `{ kind: "user", sub, agentClientId: dagId }`. `agentClientId`
@@ -225,7 +225,7 @@ but unverifiable JWT is rejected, not downgraded.
 **Status:** Accepted. Decides a gap the original decision left implicit.
 
 The decision above threads the user's `sub` into `InvocationOrigin`, and the
-`exchangeV2` port (`adapters/keycloak-token-endpoint.ts`) carries only
+`exchangeV2` port (`packages/host/src/adapters/keycloak-token-endpoint.ts`) carries only
 `userSub: string`. But a *real* Standard Token Exchange (RFC 8693 / Keycloak
 Token Exchange V2) requires presenting the user's actual verified JWT as the
 `subject_token` proof — and no value in the current chain carries it: the auth
@@ -239,7 +239,7 @@ gap.
 
 - The verified subject token threads **host-side only**: the middleware retains
   the raw verified bearer as a branded, opaque reference (e.g.
-  `VerifiedSubjectToken` — branded so it stays out of logs and audit payloads
+  `SubjectToken` — branded so it stays out of logs and audit payloads
   by convention, mirroring how `canRunDag` carries a capability rather than
   data) carried on the host's run context next to the identity, and injected
   into the broker deps at the wiring site.

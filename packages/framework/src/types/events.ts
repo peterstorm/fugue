@@ -48,7 +48,7 @@ export interface NodeSkippedEvent {
   readonly timestamp: Date;
   /**
    * Why the node was skipped. The two producers are `runNodeShared` on a
-   * checkpoint hit and `runWave` when an already-succeeded sibling is
+   * checkpoint hit and `executeWave` when an already-succeeded sibling is
    * encountered on a retry pass. Narrowing the type lets observers
    * exhaustively match — and keeps the contract aligned with
    * `NodePrunedEvent.reason: "branch-not-taken"`, the only other narrow-reason
@@ -249,7 +249,7 @@ export interface HumanInterventionEvent {
  * equivalence and trace consumers are not taught about them.
  *
  * The union stays CLOSED but EXTENSIBLE (AD-2): D3 (adaptive concurrency)
- * later adds a `throttle` event and an `adaptiveTarget` field WITHOUT
+ * later adds a throttle event and an adaptiveTarget field WITHOUT
  * reshaping any variant. Keep field shapes stable and additive — never
  * repurpose or retype an existing field.
  *

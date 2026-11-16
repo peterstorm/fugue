@@ -5,7 +5,7 @@
 //   Two fan outcome kinds, built ONLY through the sole constructors in
 //   `types/error-factories.ts` (`frameworkError.fanBudgetRefused` /
 //   `.fanChildFailed`; INV-2, enforced fail-closed by the
-//   `inv-2-fan-errors-via-factory` lint rule, tests excepted):
+//   `.claude/linter/rules/inv-2-fan-errors-via-factory.json` lint rule, tests excepted):
 //
 //   - `fan-budget-refused { nodeId; refusal }` — the drain cause was a
 //     projection refusal and NO child failed (FR-014, FR-015). It is

@@ -117,13 +117,13 @@ Mapping to code:
   decision. The lifecycle source documents this directly: "Sync runs fail-fast
   (the crash already surfaced as 503 to in-flight callers)."
 - **HITL / suspended = durable resume.** Resume reuses the existing
-  `packages/host/src/hitl/` primitive: `processRun` (`hitl/service.ts`, ADR-0060)
+  `packages/host/src/hitl/` primitive: `processRun` (`packages/host/src/hitl/service.ts`, ADR-0060)
   is idempotent — its own guards come from terminal-status checks plus the
   decision-store pending marker — and is additionally single-flighted by a
-  self-healing `SET NX EX` lock that wraps it in `hitl/adapters/run-queue.ts`. It
+  self-healing `SET NX EX` lock that wraps it in `packages/host/src/hitl/adapters/run-queue.ts`. It
   rehydrates from the durable `{state, context}` checkpoint persisted by
   `makeRunStoreJobLike`
-  (`hitl/run-store-job.ts`) backed by `RunStorePort` (ADR-0003/0008/0014). A
+  (`packages/host/src/hitl/run-store-job.ts`) backed by `RunStorePort` (ADR-0003/0008/0014). A
   restarted worker re-adopts and continues from the last good checkpoint. **No
   new resume engine is introduced** (FR-016) — `onCrash` deliberately builds none.
 - **Supervisor-side recovery.** A supervisor restart (distinct from a worker
@@ -178,7 +178,7 @@ Key invariants:
   clients.
 - HITL durable-resume correctness is only as strong as the checkpoint: a
   torn/corrupt checkpoint settles the run `failed` rather than resuming (by
-  design, since it cannot heal on retry — see `hitl/service.ts`). Crash recovery
+  design, since it cannot heal on retry — see `packages/host/src/hitl/service.ts`). Crash recovery
   for HITL inherits the durability characteristics, and limits, of ADR-0060 and
   the underlying event-sourced store.
 

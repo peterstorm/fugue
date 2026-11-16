@@ -593,7 +593,7 @@ describe("RunSpendAuthority", () => {
   // ── The Result-boundary fence ──────────────────────────────────────────────
   // Every other malformed-client case above returns a bad VALUE. These two
   // break the contract the other way — by throwing — which is the case the
-  // `try/catch` around `call()` exists for. Without it the exception escapes
+  // try/catch around `call()` exists for. Without it the exception escapes
   // `execute` and crashes the node run instead of degrading to a typed error,
   // and the call is never settled, so its reservation leaks and its spend is
   // never recorded.

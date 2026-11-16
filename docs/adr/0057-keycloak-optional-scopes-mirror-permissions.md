@@ -26,7 +26,7 @@ The forces at play:
   network call to Entra (FR-W3-003, SC-006). A policy model that can only be
   evaluated after a token reaches the downstream resource is unacceptable.
 - **Config-as-code governance.** The `fugue-platform` realm is already managed by
-  the `keycloakConfigAsCode` repository: declarative steps, a golden-export test,
+  the keycloakConfigAsCode repository: declarative steps, a golden-export test,
   and PR review. The capability grant should inherit that same governance gate
   rather than introducing a second, weaker control plane (manual admin console
   clicks, runtime role assignment, or an out-of-band ACL).
@@ -43,8 +43,8 @@ downstream-permission vocabulary the broker speaks.
 1. **Optional client scopes mirroring each downstream permission** (chosen)
    - One Keycloak optional client scope per downstream operation
      (`msgraph:mail.send`, `msgraph:sites.read`, `dynamics:read`, …), created in
-     the `fugue-platform` realm's `ClientScopesStep`. Assigning a scope to an
-     agent-type client in `ClientStep` *is* the grant.
+     the `fugue-platform` realm's ClientScopesStep. Assigning a scope to an
+     agent-type client in ClientStep *is* the grant.
    - Pros: The grant is a declarative line in config-as-code — PR-reviewed,
      golden-export-tested, same governance gate as the agent code. The broker
      requests exactly the scopes `requires` names; an unassigned scope fails the
@@ -74,24 +74,24 @@ downstream-permission vocabulary the broker speaks.
 ## Decision
 
 **Mirror each downstream permission as a Keycloak optional client scope in the
-`fugue-platform` realm; assigning the scope to an agent client in `ClientStep` is
+`fugue-platform` realm; assigning the scope to an agent client in ClientStep is
 the policy grant, and the broker requests exactly those scopes — an unassigned
 scope fails fail-closed at the Keycloak hop before any Entra call.**
 
 Concretely:
 
-- **Scope definitions.** The `fugue-platform` realm's `ClientScopesStep`
-  (`keycloakConfigAsCode`, `.../fugueplatform/steps/ClientScopesStep.java`)
-  declares one optional `ClientScopeRepresentation` per downstream operation,
+- **Scope definitions.** The `fugue-platform` realm's ClientScopesStep
+  (keycloakConfigAsCode, `.../fugueplatform/steps/ClientScopesStep.java`)
+  declares one optional ClientScopeRepresentation per downstream operation,
   named `<provider>:<operation>` — `msgraph:mail.send`, `msgraph:sites.read`,
   `dynamics:read`. The companion `entra-exchange` scope (audience mapper for
   `api://AzureADTokenExchange`) lives in the same step but is the WIF bridge, not
   a grant.
-- **Grant = assignment.** `ClientStep`
+- **Grant = assignment.** ClientStep
   (`.../fugueplatform/steps/ClientStep.java`) assigns the subset of optional
   scopes each agent-type service-account client is entitled to. This assignment
   is the entire policy: it is a declarative line in the realm config, covered by
-  `FuguePlatformRealmGoldenTest` (SC-012), and merged only through PR review — the
+  FuguePlatformRealmGoldenTest (SC-012), and merged only through PR review — the
   same gate the agent's own code passes through.
 - **Broker enforcement (the gate).** The host broker
   (`packages/host/src/adapters/keycloak-broker.ts`) holds an injected

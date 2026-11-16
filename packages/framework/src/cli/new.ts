@@ -76,7 +76,7 @@ export interface NewOptions {
   /** Add a human-review gate (ADR-0060). Linear shape only. */
   readonly review: boolean;
   readonly owner?: string;
-  /** Root dir that contains `dags/`; defaults to `process.cwd()`. */
+  /** Root dir that contains dags/; defaults to `process.cwd()`. */
   readonly root?: string;
   /** Overwrite a non-empty target dir. */
   readonly force: boolean;
@@ -498,7 +498,7 @@ interface NewFromOptions {
   /** Path to the dag.authored.json file. */
   readonly from: string;
   readonly owner?: string;
-  /** Root dir that contains `dags/`; defaults to `process.cwd()`. */
+  /** Root dir that contains dags/; defaults to `process.cwd()`. */
   readonly root?: string;
   readonly force: boolean;
 }

@@ -50,12 +50,12 @@ import type { SyncLogger } from "../sync/sync-loop.js";
  *   2. a password CONTAINING `@`, e.g. `u/p@ss@host:1521/SVC` — the naive
  *      "strip up to the first `@`" leaked the `ss@host` remainder.
  *   3. a TNS/JDBC long-form DSN `(DESCRIPTION=...(PASSWORD=secret)...)` — no
- *      leading `user/pass@` at all, so a prefix-only strip logged the whole
+ *      leading user/pass@ at all, so a prefix-only strip logged the whole
  *      string, password included.
  *
  * Rather than re-implement (and get wrong) credential stripping here, we DELEGATE
  * to `@fuguejs/oracle`'s robust, tested `stripCredentials` — which redacts the
- * greedy `user/password@` run (handling embedded `@`) AND the
+ * greedy user/password@ run (handling embedded `@`) AND the
  * `password=`/`pwd=`/`user=`/`uid=` key-value forms — then drop any remaining
  * redacted `***@` credential prefix to leave only the host:port/service tail.
  * Composition: strip credentials, then extract the host. Pure: no I/O.

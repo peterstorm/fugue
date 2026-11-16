@@ -136,7 +136,7 @@ export const computeUnconditionalAdj = (
 // ---------------------------------------------------------------------------
 // Per-node incoming sources — derived input-wiring contract.
 //
-// Replaces the author-supplied `deps` / `optionalDeps` fields. Each edge into
+// Replaces the author-supplied `deps` / optionalDeps fields. Each edge into
 // `toNodeId` lands in one of two buckets:
 //
 //   required — the upstream is **guaranteed to run** AND its edge always

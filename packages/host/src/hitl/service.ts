@@ -151,7 +151,7 @@ const requestDirectWakeup = async (
  * the bound by at most the number of concurrent starters. The overshoot
  * self-heals as runs settle and `countActiveRuns` prunes, and is acceptable:
  * a counter-based hard ceiling
- * (`INCR`/`DECR`) would add a counter-vs-SET consistency invariant that drifts
+ * (INCR/DECR) would add a counter-vs-SET consistency invariant that drifts
  * on crashes. Non-durable load is bounded separately by the supervisor's
  * request-scoped `maxConcurrentRuns` gate.
  */

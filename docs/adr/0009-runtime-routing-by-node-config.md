@@ -43,7 +43,7 @@ Callers who supply `onHumanReview` against a DAG that does not declare any `huma
 
 **Source of truth for HITL routing is node config. Opts only supply hooks and toggles, never silently flip routing for HITL.**
 
-Concrete shape (in `packages/framework/src/executor/executor.ts`):
+Concrete shape (in `packages/framework/src/executor/run-dag.ts`):
 
 ```ts
 const hitlNodes = dag.nodes.filter((n) => n.humanReview !== undefined);
@@ -73,7 +73,7 @@ const useStateMachinePath =
 **Invariants preserved:**
 
 - `resume` and `onBackground` remain incompatible with the state-machine path (unchanged from ADR 0007); the rejection message is updated to name the new triggers (`humanReview` node, `jobLike`, `retryLimits`).
-- The legacy fast path (no `humanReview` nodes, no `jobLike`, no `retryLimits`) continues to take `runDagInner` byte-for-byte.
+- The legacy fast path (no `humanReview` nodes, no `jobLike`, no `retryLimits`) continues to take runDagInner byte-for-byte.
 
 ## Consequences
 
@@ -97,4 +97,4 @@ const useStateMachinePath =
 
 ## Open question deferred
 
-Phase 5 of the durable-runtime migration (collapsing the two paths once all consumers move to durable runs) is unchanged by this ADR. When the legacy path is removed, the validation rules in this ADR move into `runDagStateful`'s entry, and the `useStateMachinePath` disjunction goes away.
+Phase 5 of the durable-runtime migration (collapsing the two paths once all consumers move to durable runs) is unchanged by this ADR. When the legacy path is removed, the validation rules in this ADR move into `runDagStateful`'s entry, and the useStateMachinePath disjunction goes away.

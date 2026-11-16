@@ -1328,7 +1328,7 @@ describe("createNodeContextForDag — one authority across main/judge/custom LLM
 
 describe("invocationOriginForIdentity — user sub threading + real-client resolution (FR-W3-007, FR-040)", () => {
   // FR-040: the DAG id resolves to its REAL Keycloak agent client via the map,
-  // not the dag-id placeholder. `test-dag` → `fugue-agent-test`.
+  // not the dag-id placeholder. test-dag → fugue-agent-test.
   const AGENT_MAP = { [testDagId as string]: "fugue-agent-test" };
 
   it("a user identity produces origin { kind: 'user', sub, agentClientId: <REAL client> } — sub lands, agent client is the mapped client, NOT the dagId nor the frontend azp (I3, FR-040)", () => {

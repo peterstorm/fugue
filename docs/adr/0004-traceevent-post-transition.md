@@ -74,4 +74,4 @@ See **Options Considered** above. Pre-only and pre+post both rejected for the re
 
 ## Implementation note
 
-The `outcome` discriminator is computed from the *post-transition* phase, not from the event kind. A `retry` outcome means the runtime ended up in a retrying variant — regardless of whether the triggering event was `node-failed`, `hook-failed`, or a manual `force-retry`. This keeps the discriminator stable as new event kinds are added.
+The `outcome` discriminator is computed from the *post-transition* phase, not from the event kind. A `retry` outcome means the runtime ended up in a retrying variant — regardless of whether the triggering event was `node-failed`, hook-failed, or a manual force-retry. This keeps the discriminator stable as new event kinds are added.

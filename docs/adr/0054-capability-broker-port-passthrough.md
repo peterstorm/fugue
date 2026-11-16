@@ -151,7 +151,7 @@ migration step because the unbrokered path is unchanged (FR-W2-002/003, US3).
 
 `packages/host/src/adapters/keycloak-broker.ts` implements the same
 `CapabilityBroker` port against Keycloak + Entra WIF. It dispatches on
-`invocation.origin.kind` (agent → `client_credentials`; user → Token Exchange
+`inv.origin.kind` (agent → `client_credentials`; user → Token Exchange
 V2), runs a local fail-closed policy gate that refuses unassigned scopes
 **before any Entra call**, mints/exchanges tokens through injected endpoints with
 a pure `(identity, audience, scope)`-keyed cache, and returns operation-narrowed

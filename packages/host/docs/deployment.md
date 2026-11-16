@@ -33,11 +33,11 @@ Deploy a Fugue Host instance for a team on OpenShift with their own LLM credenti
 
 ## Prerequisites
 
-- OpenShift CLI (`oc`) with project-admin privileges
+- OpenShift CLI (oc) with project-admin privileges
 - Container registry access
 - Team's DAGs git repository (HTTPS or SSH)
 - Team's LLM API credentials (OpenAI, Anthropic, or Azure)
-- `openssl` for generating secrets
+- openssl for generating secrets
 
 ---
 
@@ -56,7 +56,7 @@ podman push your-registry.example.com/fugue/host:0.2.0
 
 **What's in the image:**
 - Bun 1.2 runtime (Alpine-based, ~50MB)
-- `git` + `openssh-client` (for DAG repo sync over https/ssh)
+- `git` + openssh-client (for DAG repo sync over https/ssh)
 - `packages/framework/`, `packages/host/`, `packages/adapter-fs/`, `packages/adapter-ms-graph/`, and
   `packages/document-source/` source (the adapter packages back
   `DOCUMENTS_ADAPTER=fs` / `ms-graph`, which the entries import dynamically)
@@ -148,7 +148,7 @@ patterns.
 | Checkpoints | Depends on DAG complexity; TTL auto-cleanup |
 | **Total** (3 teams, light usage) | ~500MB—1GB |
 
-Monitor Redis memory with `redis-cli INFO memory` and alert before capacity is exhausted. Accounting Redis must use `noeviction`: an LRU policy can evict a live `$spend` hash independently of its checkpoint, and an absent hash is the valid zero-spend representation for a new run. Eviction would therefore refill a resumed run's budget. Size persistent storage and `maxmemory` with headroom instead of relying on key eviction:
+Monitor Redis memory with `redis-cli INFO memory` and alert before capacity is exhausted. Accounting Redis must use noeviction: an LRU policy can evict a live `$spend` hash independently of its checkpoint, and an absent hash is the valid zero-spend representation for a new run. Eviction would therefore refill a resumed run's budget. Size persistent storage and maxmemory with headroom instead of relying on key eviction:
 
 ```bash
 helm install platform-redis bitnami/redis \

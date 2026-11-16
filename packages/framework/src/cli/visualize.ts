@@ -39,7 +39,7 @@ type VisualizeResult =
 // Mermaid node ids must avoid `:`/`$` and other specials — map ids to safe
 // tokens. Two properties the encoding must hold:
 //   1. INJECTIVE — node ids may contain `_`, `:` and `-` (ID_PATTERN), and
-//      distinct ids must map to distinct Mermaid tokens (`a:b` and `a_b` must
+//      distinct ids must map to distinct Mermaid tokens (`a:b` and a_b must
 //      never merge into one node). The escape scheme below (`_` doubles as
 //      the lead-in, `:`/`-` get fixed 2-char escapes, anything else a
 //      `_x<hex>_` escape) is decodable left-to-right, hence injective.

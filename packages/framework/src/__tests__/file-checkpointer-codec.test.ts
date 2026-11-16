@@ -68,7 +68,7 @@ import type { RunMeta } from "../checkpoint/checkpointer.js";
 
 /** Narrow the `FrameworkError` union onto the `checkpoint-write-failed`
  * variant after asserting the discriminant (TS cannot narrow through
- * `expect`). */
+ * expect). */
 const asWriteFailed = (
   failure: FrameworkError,
 ): Extract<FrameworkError, { readonly kind: "checkpoint-write-failed" }> => {

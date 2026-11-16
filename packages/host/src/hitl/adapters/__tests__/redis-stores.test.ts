@@ -984,7 +984,7 @@ const setBackedRedis = () => {
     async sRem(k, m) { const s = sets.get(k); if (!s || !s.has(m)) return ok(0); s.delete(m); if (s.size === 0) sets.delete(k); return ok(1); },
     async sMembers(k) { return ok([...(sets.get(k) ?? [])]); },
   };
-  // `expireRunKey` simulates a TTL-expired / hard-deleted run record while leaving
+  // expireRunKey simulates a TTL-expired / hard-deleted run record while leaving
   // a stale entry in the active SET — the leak the self-heal must prune.
   return {
     redis,

@@ -33,7 +33,7 @@ TypeScript module augmentation:
 
 2. **`Capability`** — derived as `keyof CapabilityRegistry` (was a hardcoded union).
 
-3. **`CapabilityFields`** — becomes a type alias for `CapabilityRegistry` (backward compat).
+3. **CapabilityFields** — becomes a type alias for `CapabilityRegistry` (backward compat).
 
 4. **`CapabilityHandle<K>`** — runtime lifecycle wrapper: `{ name, client, connect?, close?, healthCheck? }`.
    Adapters produce these; the runtime calls `connect()` at boot and `close()` at shutdown.

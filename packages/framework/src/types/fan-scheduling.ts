@@ -73,7 +73,7 @@ export type FanConcurrencyCap = number & { readonly [__fanConcurrencyCapBrand]: 
 /**
  * The single positivity rule both brands share. `typeof` first, as in
  * `asMaxWidth`: the guard must reject before any comparison coerces a forged
- * value (`"3"`, a hostile `valueOf`).
+ * value (`"3"`, a hostile valueOf).
  */
 const isPositiveSafeInteger = (raw: unknown): raw is number =>
   typeof raw === "number" && Number.isSafeInteger(raw) && raw > 0;

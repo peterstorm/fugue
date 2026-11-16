@@ -45,7 +45,7 @@ confidentiality leak — and running two teams on one host is impossible anyway
 2. **One repo per team**
    - Pros: the boundary is structural — an image physically cannot contain another
      team's code.
-   - Cons: loses the shared-monorepo ergonomics (shared `lib/`, the workspace
+   - Cons: loses the shared-monorepo ergonomics (shared lib/, the workspace
      contract package); more repos to wire CI/governance for.
 
 3. **Shared monorepo + per-team scoped images (chosen)**
@@ -59,11 +59,11 @@ confidentiality leak — and running two teams on one host is impossible anyway
 team's host MUST contain only that team's DAGs + data.** Build one image per team.
 
 Concretely:
-- The **top-level folder under `dags/`** is the team and the image-scope unit
+- The **top-level folder under dags/** is the team and the image-scope unit
   (`dags/{team}/…`); it must equal the `fugue.yaml` `team` field. Folders below
-  it are free-form intra-team grouping (e.g. `dags/business-sales/leads/lead-scoring/`).
+  it are free-form intra-team grouping (e.g. dags/business-sales/leads/lead-scoring/).
 - The baked-image `Dockerfile` takes `ARG TEAM` and copies **only**
-  `dags/${TEAM}/` (plus shared `lib/`/`packages/` + that team's data image) —
+  `dags/${TEAM}/` (plus shared lib//`packages/` + that team's data image) —
   never `COPY . .`. This makes the scoping explicit and reviewable rather than an
   implicit property of a whole-repo copy.
 - **Never** ship a single all-teams image to multiple hosts, and **never** run
@@ -83,11 +83,11 @@ while the team stays the first path segment.
 
 **Negative / watch-outs:**
 - CI must build N images (one per team) from the monorepo; the team list is the
-  set of top-level folders under `dags/`.
+  set of top-level folders under dags/.
 - **Git-sync deployments are not yet scoped.** The host's git-sync path clones the
   **whole** repo (no sparse-checkout/subdir knob; config is only `DAGS_REPO_URL`,
   `DAGS_REPO_BRANCH`, `DAGS_LOCAL_PATH`). For git-sync, either deploy the
-  baked-image path, use a repo per team, or add a `DAGS_SUBDIR`/sparse-checkout
+  baked-image path, use a repo per team, or add a DAGS_SUBDIR/sparse-checkout
   option (not built). This limitation is logged, not silently accepted.
 - Deploy-side identifiers keyed on the team (Keycloak agent clients, `fug_` team
   token label, image tag) must track the team folder name.

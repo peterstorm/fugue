@@ -1,8 +1,8 @@
 # Plan: AI Summary Tool with DAG-Based Workflow Framework
 
-**Spec:** `/Users/hansen142/dev/agentic/ai-summary/.claude/specs/2026-04-28-ai-summary-dag/spec.md`
-**Brainstorm:** `/Users/hansen142/dev/agentic/ai-summary/.claude/specs/2026-04-28-ai-summary-dag/brainstorm.md`
-**Research:** `/Users/hansen142/dev/agentic/ai-summary/.claude/specs/2026-04-28-ai-summary-dag/mlflow-research.md`
+**Spec:** `.claude/specs/2026-04-28-ai-summary-dag/spec.md`
+**Brainstorm:** `.claude/specs/2026-04-28-ai-summary-dag/brainstorm.md`
+**Research:** `.claude/specs/2026-04-28-ai-summary-dag/mlflow-research.md`
 
 ## Summary
 

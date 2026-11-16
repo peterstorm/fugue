@@ -11,7 +11,7 @@
 
 ## Context
 
-The durable state-machine runtime introduces a new execution path for DAGs: `runDagStateful` runs each wave through the state-machine kernel (`runStateMachine`), persists checkpoints via `JobLike`, and supports human-in-the-loop pauses (`onHumanReview`) and per-node retry budgets (`retryLimits`). The pre-existing `runDag` (now the body of `runDagInner`) had none of these — it was a straightforward `Promise.all`-per-wave loop with observer/OTel instrumentation.
+The durable state-machine runtime introduces a new execution path for DAGs: `runDagStateful` runs each wave through the state-machine kernel (`runStateMachine`), persists checkpoints via `JobLike`, and supports human-in-the-loop pauses (`onHumanReview`) and per-node retry budgets (`retryLimits`). The pre-existing `runDag` (now the body of runDagInner) had none of these — it was a straightforward `Promise.all`-per-wave loop with observer/OTel instrumentation.
 
 Two pressures are in tension:
 
@@ -34,7 +34,7 @@ A full migration of consumers ("Phase 5") was scoped out of this delivery. So th
      - Risks SC-006: each wave node now incurs kernel overhead, checkpoint serialize/deserialize (even against a no-op `JobLike`), and an extra transition match.
      - Couples a kernel rewrite to a callsite migration. If the kernel has a bug, every legacy caller is affected on day one.
 
-2. **Feature-detect at the shim; legacy callers take the unchanged fast path.** `runDag` inspects `opts` for `jobLike`, `onHumanReview`, or `retryLimits`. None present → call `runDagInner` (the old body, byte-for-byte). Any present → call `runDagStateful`.
+2. **Feature-detect at the shim; legacy callers take the unchanged fast path.** `runDag` inspects `opts` for `jobLike`, `onHumanReview`, or `retryLimits`. None present → call runDagInner (the old body, byte-for-byte). Any present → call `runDagStateful`.
    - Pros:
      - SC-001 is enforced trivially: legacy callers execute literally the old code, so existing tests are an exact oracle.
      - SC-006 is unaffected for legacy callers (no kernel involvement at all) and bounded for new callers (only paths that opt in pay).
@@ -49,7 +49,7 @@ A full migration of consumers ("Phase 5") was scoped out of this delivery. So th
 
 **`runDag` is a feature-detection shim. No durability features requested → unchanged fast path. Any durability feature requested → state-machine path.**
 
-Concrete shape (in `packages/framework/src/executor/executor.ts`):
+Concrete shape (in `packages/framework/src/executor/run-dag.ts`):
 
 ```ts
 export const runDag = (opts: RunDagOpts) => {
@@ -69,8 +69,8 @@ export const runDag = (opts: RunDagOpts) => {
 };
 ```
 
-- `runDagInner` is the **byte-for-byte previous body** of `runDag`. No refactors, no "while we're here" cleanups. SC-001's oracle is the existing test suite running against unchanged code.
-- `runDagStateful` lives in `packages/framework/src/dag-runtime/run-dag-stateful.ts` and drives `runStateMachine` against a `dag-machine` definition. It calls into the same node execution helpers and observer/OTel dispatch as `runDagInner` so behavior matches at the leaf level.
+- runDagInner is the **byte-for-byte previous body** of `runDag`. No refactors, no "while we're here" cleanups. SC-001's oracle is the existing test suite running against unchanged code.
+- `runDagStateful` lives in `packages/framework/src/dag-runtime/run-dag-stateful.ts` and drives `runStateMachine` against a dag-machine definition. It calls into the same node execution helpers and observer/OTel dispatch as runDagInner so behavior matches at the leaf level.
 - The feature-detect predicate is a single `||` chain. Adding a new opt-in feature means adding one disjunct here and updating this ADR's predicate snippet.
 - ~~**`onBackground` guard:** `onBackground` is a legacy fast-path-only option. If a caller opts into the state-machine path *and* passes `onBackground`, `runDag` returns `err({ kind: "invalid-input", ... })` rather than silently dropping the option. Background work belongs in a separate job under the state-machine model, not in a per-wave hook.~~ **Superseded by ADR 0018:** `onBackground` is now supported on both paths. `runDagStateful` schedules `finalize()` (judges + span close + `run-end`) detached when `opts.onBackground` is supplied.
 - **Resume guard:** `runDagStateful` is also the resume entry point. When `runStateMachine` rehydrates a paused DAG (HITL or hook-crash retry), it dispatches back through this same path — ensuring resumed runs and fresh runs share one code body.
@@ -106,8 +106,8 @@ export const runDag = (opts: RunDagOpts) => {
 
 2. **Boolean opt-in flag (`opts.useStateMachine: true`) instead of feature-detection.** Rejected: forces every new-feature caller to remember an extra flag, and creates a confusing state where `onHumanReview` is supplied but the flag isn't. Feature-detection is self-consistent — passing a durability feature implies wanting the durable runtime.
 
-3. **Branch in `runDagInner` itself rather than at a shim.** Rejected: would mean modifying the legacy code body, defeating the SC-001 "literally unchanged" oracle.
+3. **Branch in runDagInner itself rather than at a shim.** Rejected: would mean modifying the legacy code body, defeating the SC-001 "literally unchanged" oracle.
 
 ## Implementation note
 
-The byte-for-byte preservation of `runDagInner` is load-bearing. Reviewers of this PR should diff `runDagInner` against the pre-refactor `runDag` and confirm zero semantic changes — only the rename and the extraction of the shim above it. Any "drive-by" refactor of `runDagInner` belongs in a separate PR with its own test justification.
+The byte-for-byte preservation of runDagInner is load-bearing. Reviewers of this PR should diff runDagInner against the pre-refactor `runDag` and confirm zero semantic changes — only the rename and the extraction of the shim above it. Any "drive-by" refactor of runDagInner belongs in a separate PR with its own test justification.

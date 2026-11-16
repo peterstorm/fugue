@@ -199,7 +199,7 @@ Public surface added to `@fuguejs/framework`: the `WitnessValue` type and the
 `witnessValue(kind, value)` smart constructor. The stamping itself is performed
 by an internal `stampWitness(resource: ResourceName, wv: WitnessValue)` helper
 that is **not** exported from the package barrel — only
-`dag-runtime/freshness-emission.ts` calls it; DAG authors never stamp.
+`packages/framework/src/dag-runtime/freshness-emission.ts` calls it; DAG authors never stamp.
 
 The `Witness` type is unchanged, but `witness(...)` is tightened to take a
 branded `ResourceName` (mint with `resourceName(...)`) rather than a raw
@@ -273,7 +273,7 @@ acknowledgement of an earlier logical write. `FreshnessIndex` therefore exposes
 `hasRecordedWrite(identity)` separately from `findConflict(conditionedOn,
 sinceMs)`. Emission asks the acknowledgement question first and suppresses both
 observer and index duplication when it is true. Redis answers with exact-member
-`ZSCORE`; the in-memory adapter keeps an identity-key ledger; the file singleton
+ZSCORE; the in-memory adapter keeps an identity-key ledger; the file singleton
 atomically carries a TTL-bounded `acknowledgedWriteKeys` set alongside its one
 latest conflict candidate. The file set is not conflict history and is never
 used by `findConflict`.

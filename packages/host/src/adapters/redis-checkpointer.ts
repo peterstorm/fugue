@@ -22,9 +22,9 @@
  *   2. A per-tenant worker authenticates as a credential scoped to exactly one
  *      key pattern, `~fugue:<tenant>:*` (`supervisor/secrets/redis-acl.ts`), so
  *      a `chkpt:*` write is DENIED by the ACL at runtime, not merely untidy.
- *   3. It needs `EVAL`/`EVALSHA`/`SCRIPT`, which `RedisPort` does not expose.
+ *   3. It needs EVAL/EVALSHA/`SCRIPT`, which `RedisPort` does not expose.
  *      Reaching them means handing this factory a raw ioredis client and
- *      discarding the port seam — the boundary where `architecture.md` says a
+ *      discarding the port seam — the boundary where architecture.md says a
  *      port is mandatory, and the seam every test fake in this package depends
  *      on.
  *

@@ -91,7 +91,7 @@ export interface FreshnessIndex {
 }
 
 // Re-export the public event types used in this contract so consumers
-// importing `types/freshness.js` get the full surface without cross-import.
+// importing `types/freshness.ts` get the full surface without cross-import.
 export type { WitnessCapturedEvent, WriteAttemptedEvent };
 
 /**

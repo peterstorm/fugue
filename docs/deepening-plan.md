@@ -54,7 +54,7 @@ Step 5: context interface narrowing (widest blast radius, benefits from all prio
 
 ---
 
-## Step 1: Split `conditional.ts` → `topology.ts` + `routing.ts`
+## Step 1: Split conditional.ts → `topology.ts` + `routing.ts`
 
 **Risk:** Low  
 **Blast radius:** Import path updates across ~8 files  
@@ -62,7 +62,7 @@ Step 5: context interface narrowing (widest blast radius, benefits from all prio
 
 ### Problem
 
-`dag-runtime/conditional.ts` (448 lines) serves two distinct audiences at different rates of change:
+dag-runtime/conditional.ts (448 lines) serves two distinct audiences at different rates of change:
 
 - **Topology helpers** — static graph analysis, called once at compile time, consumed by the transition layer and `machine.ts`.
 - **Routing decision logic** — business-rule evaluation with confidence gating, called every wave, consumed by `route-emission.ts` and `reroute.ts`.
@@ -71,40 +71,40 @@ Understanding "how the DAG routes" requires parsing 448 lines that are 50% topol
 
 ### Actions
 
-1. **Create `dag-runtime/topology.ts`** — move:
-   - `buildOutgoing`, `buildIncoming` (private helpers)
+1. **Create `packages/framework/src/dag-runtime/topology.ts`** — move:
+   - buildOutgoing, buildIncoming (private helpers)
    - `seedInitialActiveSet` (both overloads)
    - `expandActive`
-   - `outgoingOf`
+   - outgoingOf
    - `computeOutgoingByNode`
    - `computeUnconditionalAdj`
    - `computeIncomingByNode`
-   - `incomingSources`, `incomingSourcesFor` (private)
-   - Type re-export: `IncomingSources` (from `../shared/incoming.js`)
+   - incomingSources, `incomingSourcesFor` (private)
+   - Type re-export: `IncomingSources` (from `packages/framework/src/shared/incoming.ts`)
 
-2. **Create `dag-runtime/routing.ts`** — move:
+2. **Create `packages/framework/src/dag-runtime/routing.ts`** — move:
    - `evaluatePredicate`
    - `decideRoute`
    - Type: `Decision`
-   - Imports `EdgeDef`, `Predicate`, `isConditionalEdge`, etc. from `../types/dag.js`
-   - Imports `Confidence`, `meetsConfidence` from `../types/confidence.js`
-   - Imports `RouteEvidence` from `../types/events.js`
+   - Imports `EdgeDef`, `Predicate`, `isConditionalEdge`, etc. from `packages/framework/src/types/dag.ts`
+   - Imports `Confidence`, `meetsConfidence` from `packages/framework/src/types/confidence.ts`
+   - Imports `RouteEvidence` from `packages/framework/src/types/events.ts`
 
-3. **Delete `conditional.ts`**.
+3. **Delete conditional.ts**.
 
 4. **Update imports:**
 
    | File | Was importing from | Now imports from |
    |------|--------------------|------------------|
-   | `wave-resolution.ts` | `./conditional.js` | `./topology.js` |
-   | `route-emission.ts` | `./conditional.js` | `./routing.js` |
-   | `machine.ts` | `./conditional.js` | `./topology.js` |
-   | `reroute.ts` | `./conditional.js` | `./routing.js` + `./topology.js` |
+   | `wave-resolution.ts` | ./conditional.js | `packages/framework/src/dag-runtime/topology.ts` |
+   | `route-emission.ts` | ./conditional.js | `packages/framework/src/dag-runtime/routing.ts` |
+   | `machine.ts` | ./conditional.js | `packages/framework/src/dag-runtime/topology.ts` |
+   | `reroute.ts` | ./conditional.js | `packages/framework/src/dag-runtime/routing.ts` + `packages/framework/src/dag-runtime/topology.ts` |
    | `run-dag-stateful.ts` | (no direct import) | unchanged |
-   | `executor.ts` | `./conditional.js` | `./routing.js` (for `Decision` type only) |
-   | `dag-runtime/index.ts` | `./conditional.js` | `./topology.js` + `./routing.js` |
+   | `executor.ts` | ./conditional.js | `packages/framework/src/dag-runtime/routing.ts` (for `Decision` type only) |
+   | `packages/framework/src/dag-runtime/index.ts` | ./conditional.js | `packages/framework/src/dag-runtime/topology.ts` + `packages/framework/src/dag-runtime/routing.ts` |
 
-5. **Update barrel** (`dag-runtime/index.ts`):
+5. **Update barrel** (`packages/framework/src/dag-runtime/index.ts`):
    ```ts
    export { decideRoute, evaluatePredicate, type Decision } from "./routing.js";
    export { expandActive, outgoingOf, seedInitialActiveSet, topoSort } from "./topology.js";
@@ -205,7 +205,7 @@ A bug in human-review emission must be fixed in two places. The `retrying` and `
 ## Step 3: Encapsulate wave pipeline internals
 
 **Risk:** Medium  
-**Blast radius:** `wave-execution.ts`, `freshness-emission.ts`, `route-emission.ts`, `dag-runtime/index.ts`  
+**Blast radius:** `wave-execution.ts`, `freshness-emission.ts`, `route-emission.ts`, `packages/framework/src/dag-runtime/index.ts`  
 **Estimated effort:** 40 min
 
 ### Problem
@@ -214,7 +214,7 @@ A bug in human-review emission must be fixed in two places. The `retrying` and `
 
 ### Actions
 
-1. **Define `WaveContext`** in `wave-execution.ts`:
+1. **Define WaveContext** in `wave-execution.ts`:
    ```ts
    /** All state a wave's post-dispatch pipeline needs. Constructed once per wave invocation. */
    interface WaveContext {
@@ -251,9 +251,9 @@ A bug in human-review emission must be fixed in two places. The `retrying` and `
    emitRoutingDecisions(waveCtx: WaveContext, newOutputs: ReadonlyMap<NodeId, unknown>)
    ```
 
-4. **Remove from barrel:** `emitFreshnessWitnessEvents` and `emitRoutingDecisions` are not currently exported from `dag-runtime/index.ts` — verify this stays true. They're module-internal (reachable via direct path for tests).
+4. **Remove from barrel:** `emitFreshnessWitnessEvents` and `emitRoutingDecisions` are not currently exported from `packages/framework/src/dag-runtime/index.ts` — verify this stays true. They're module-internal (reachable via direct path for tests).
 
-5. **Construct `WaveContext`** at the top of `executeWave` and thread through.
+5. **Construct WaveContext** at the top of `executeWave` and thread through.
 
 6. **Simplify `WaveConfig`** — it now only carries the per-executor-lifetime fields (the subset that doesn't change per wave):
    ```ts
@@ -267,7 +267,7 @@ A bug in human-review emission must be fixed in two places. The `retrying` and `
      readonly witnessAccumulator?: Map<string, Witness>;
    }
    ```
-   (This is unchanged — the `WaveContext` wraps it with per-invocation state.)
+   (This is unchanged — the WaveContext wraps it with per-invocation state.)
 
 ### Test checkpoint
 
@@ -286,7 +286,7 @@ A bug in human-review emission must be fixed in two places. The `retrying` and `
 ## Step 4: Decompose `runDagStateful` into pipeline steps
 
 **Risk:** Medium  
-**Blast radius:** `run-dag-stateful.ts`, potentially `executor/run-dag.ts`  
+**Blast radius:** `run-dag-stateful.ts`, potentially `packages/framework/src/executor/run-dag.ts`  
 **Estimated effort:** 45 min
 
 ### Problem
@@ -400,7 +400,7 @@ Each contributes 40–60 lines; none is individually complex, but together they 
 
 ### Actions
 
-1. **Define focused slice types** in `dag-runtime/types.ts`:
+1. **Define focused slice types** in `packages/framework/src/dag-runtime/types.ts`:
    ```ts
    /** Topology facts computed once at compile time. Immutable after construction. */
    export interface DagTopology {
@@ -561,7 +561,7 @@ Each contributes 40–60 lines; none is individually complex, but together they 
 
 | Step | What | Risk | Lines Changed | Key Metric |
 |------|------|------|---------------|------------|
-| 1 | `conditional.ts` → `topology.ts` + `routing.ts` | Low | ~50 (imports) | 448 lines → 220 + 180 |
+| 1 | conditional.ts → `topology.ts` + `routing.ts` | Low | ~50 (imports) | 448 lines → 220 + 180 |
 | 2 | Extract `handleHumanGate` | Low | ~80 | 4 match arms → 2 delegations |
 | 3 | Wave pipeline encapsulation | Medium | ~120 | 10-param → 2-param functions |
 | 4 | `runDagStateful` decomposition | Medium | ~180 | 349 → ~50 line orchestrator |

@@ -24,9 +24,9 @@ const RowSchema = z.object({
 });
 
 /**
- * Build the fixture, injecting `filtersInner` as the children of `<filters>` on
- * the date column. Defaults to the self-closing `dateGroupItem` nodes Dynamics
- * emits (which `stripDateGroupItems` removes losslessly).
+ * Build the fixture, injecting filtersInner as the children of `<filters>` on
+ * the date column. Defaults to the self-closing dateGroupItem nodes Dynamics
+ * emits (which stripDateGroupItems removes losslessly).
  */
 const buildFixture = async (
   filtersInner = '<dateGroupItem year="2023" dateTimeGrouping="year"/>' +
@@ -80,7 +80,7 @@ describe("dateGroupItem table autofilters", () => {
 
   test("malformed table XML does not affect row extraction (tables are never parsed)", async () => {
     // A broken XML entity (`&nope;`) injected into the table part would crash the
-    // old full-load + strip path. The streaming reader never reads `xl/tables`, so
+    // old full-load + strip path. The streaming reader never reads xl/tables, so
     // row extraction from the worksheet is unaffected — proving the table part is
     // out of the parse path entirely.
     const bytes = await buildFixture(

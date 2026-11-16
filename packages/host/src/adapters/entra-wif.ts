@@ -126,8 +126,8 @@ export interface EntraWifConfig {
 
 /**
  * A tenant id Entra accepts AND that is safe to interpolate into the token URL:
- * a GUID, a verified domain (`contoso.onmicrosoft.com`), or a well-known alias
- * (`common`/`organizations`/`consumers`). The charset `[A-Za-z0-9.-]` admits all
+ * a GUID, a verified domain (contoso.onmicrosoft.com), or a well-known alias
+ * (`common`/organizations/`consumers`). The charset `[A-Za-z0-9.-]` admits all
  * three and ADMITS NO path separator, query, or fragment — so a typo'd or hostile
  * value cannot inject extra URL segments rather than failing loudly (review
  * suggestion).

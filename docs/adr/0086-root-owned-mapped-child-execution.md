@@ -48,8 +48,8 @@ Its type also fixes `isSource?: false`, fan-checkpoint `writes`, and confidence
 Typed constructor literals restrict `widthFrom` to array-valued input keys, while
 pre-parsed or dynamic strings retain runtime validation. `DagNodeDef` is the
 ordinary-or-map dispatch union. DAG/map/inference types live
-together in `types/dag.ts`; ordinary types stay in `types/node.ts`. The former
-`types/dag-internals.ts` is removed, not compatibility-aliased.
+together in `packages/framework/src/types/dag.ts`; ordinary types stay in `packages/framework/src/types/node.ts`. The former
+types/dag-internals.ts is removed, not compatibility-aliased.
 
 `createMapNode` captures child/schema/reducer/width policy once.
 `validateDagShape` snapshots the descriptor and bounded child through the same
@@ -131,10 +131,10 @@ entry, before scope/value observation, encoding, serialization, diagnostics or
 Redis/checkpoint-spend effects. Matching-run keys and retention are unchanged;
 the addressable writer port is not redesigned as an unforgeable capability.
 
-The pure codec moved inward to `shared/composite-node-key.ts`, byte-identical.
+The pure codec moved inward to `packages/framework/src/shared/composite-node-key.ts`, byte-identical.
 Existing named exports (`compositeNodeKey`, `parseCompositeNodeKey`,
 `DEFAULT_NODE_NAMESPACE`, `CompositeNodeKeyOpts`, `ParsedCompositeNodeKey`) and
-main/file entry points are unchanged. `checkpoint/index.ts` re-exports the shared
+main/file entry points are unchanged. `packages/framework/src/checkpoint/index.ts` re-exports the shared
 implementation; no forwarding source module or second encoder remains.
 
 ### Corrupt fan state is not missing work

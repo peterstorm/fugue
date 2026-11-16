@@ -22,7 +22,7 @@ import { testRuntimeContext } from "./_context-factories.js";
 import { unmappedRootScope } from "./_execution-scope.js";
 
 /**
- * A node that fails `failuresBeforeSuccess` times with a RETRIABLE crash and
+ * A node that fails failuresBeforeSuccess times with a RETRIABLE crash and
  * then succeeds. Four retry tests hand-rolled a 15–25 line `NodeDef` that
  * differed only in the failure count, message, output and backoff — so the
  * retriability that makes the test meaningful was restated four times and could

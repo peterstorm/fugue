@@ -637,7 +637,7 @@ const nodeKeyAddress = (nodeKey: string): CorruptCheckpointAddress => ({
  * - pollution-filtered keys are forbidden at every depth;
  * - a reserved tag object has exactly one field;
  * - Map entries are exact two-element tuples with no duplicate primitive keys;
- * - Date strings are the exact ISO form emitted by `Date#toISOString`;
+ * - Date strings are the exact ISO form emitted by Date#toISOString;
  * - Set arrays contain no duplicate primitive values under SameValueZero;
  * - Set/undefined payloads have their one canonical shape.
  *

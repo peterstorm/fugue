@@ -121,7 +121,7 @@ pre-1.0, so a minor bump may carry breaking changes.
 ### Fixed
 
 - Release CI now installs the Redis binary required by the BullMQ integration
-  test before running the publish gate. The `v0.5.0` workflow stopped before
+  test before running the publish gate. The v0.5.0 workflow stopped before
   publication, so `0.5.1` is the first npm release containing the changes
   described below.
 
@@ -190,7 +190,7 @@ pre-1.0, so a minor bump may carry breaking changes.
 - **`Clock` capability (C2).** A first-class injected clock (`systemClock` /
   `fixedClock`) so nodes read time through a capability instead of ambient `Date`.
 - **`fugue new` scaffold (C3).** Generates a lint-clean DAG (`dag.ts`, `fugue.yaml`,
-  `README.md`, optional `prompts/`) for each shape, with `--llm` and `--review`
+  `README.md`, optional prompts/) for each shape, with `--llm` and `--review`
   variants. Plus `fugue lint` / `describe` / `capabilities`.
 - **First-class human-review gates (ADR-0060).** `createHumanReviewNode` and
   `withHumanReview` declare an HITL gate that suspends the run for an approve /

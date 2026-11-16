@@ -15,7 +15,7 @@
  *     kept DISTINCT.
  *
  * Everything below runs against an injected fake HTTP transport — NO live network,
- * NO `fetch` mock. The live WIF round-trip is SKIPPED unless `ENTRA_LIVE` is set.
+ * NO `fetch` mock. The live WIF round-trip is SKIPPED unless ENTRA_LIVE is set.
  */
 
 import { describe, it, expect } from "bun:test";

@@ -15,7 +15,7 @@ via workload identity federation (WIF) and receives an app-only downstream token
 (US7, FR-W4-001..006, SC-011). To do this Entra needs at least one **app
 registration** that (a) trusts the `fugue-platform` realm as an external OIDC
 issuer and (b) holds the *application* (app-only) permissions the agents exercise
-(`Mail.Send`, `Sites.Selected`, the Dynamics/Dataverse read grant).
+(Mail.Send, Sites.Selected, the Dynamics/Dataverse read grant).
 
 The open question is the **granularity** of that registration. Each distinct
 agent (mail, sites, dynamics, …) needs a different downstream permission. The
@@ -42,7 +42,7 @@ app boundary there, then recover per-agent containment by other means.
 
 ## Options Considered
 
-1. **One app per agent (`fugue-agent-mail`, `fugue-agent-sites`, … each an Entra
+1. **One app per agent (fugue-agent-mail, fugue-agent-sites, … each an Entra
    app holding a single permission)**
    - Pros: superficially tightest least privilege — a single app holds a single
      permission; deleting one app revokes exactly one integration.
@@ -85,9 +85,9 @@ the deployed host process, not the agent.**
 
 - **One app, union permissions, consented once.** `fugue-agents` holds the union
   of *application* (app-only) permissions across all agents the host serves —
-  today `Mail.Send`, `Sites.Selected`, and the Dynamics/Dataverse read grant —
+  today Mail.Send, Sites.Selected, and the Dynamics/Dataverse read grant —
   granted via a single tenant-admin consent (FR-W4-001). No per-agent app
-  registration exists; `fugue-agent-mail` / `fugue-agent-sites` exist **only** as
+  registration exists; fugue-agent-mail / fugue-agent-sites exist **only** as
   Keycloak clients, never as Entra app registrations.
 
 - **The trust boundary is the host process.** The blast-radius unit is the
@@ -107,8 +107,8 @@ the deployed host process, not the agent.**
 - **The union is bounded *at* Entra by resource-scoping policies.** Because the
   app-only `.default` token carries the union and cannot be downscoped per
   request, containment on the Entra side comes from resource scoping, not
-  permission count: `Sites.Selected` (per-site grant — never `Sites.Read.All`),
-  Exchange application access policies (per-mailbox `RestrictAccess`), and the
+  permission count: Sites.Selected (per-site grant — never Sites.Read.All),
+  Exchange application access policies (per-mailbox RestrictAccess), and the
   Dataverse application-user security role. Both **coverage** and **denial** of
   these are mandatory acceptance gates.
 
@@ -125,7 +125,7 @@ the deployed host process, not the agent.**
 
 - **Provisioning of this single app is human-executed and gated.** The Azure-portal
   steps — register `fugue-agents`, add the union, admin-consent once, add the
-  variant-A FICs, apply `Sites.Selected` and Exchange access policies, confirm
+  variant-A FICs, apply Sites.Selected and Exchange access policies, confirm
   zero secrets/certs — live in
   `docs/team-security-and-capabilities.md (Appendix A)` (FR-W4-006), each
   step with an explicit, checkable acceptance and gated by the Wave 4 spikes.
@@ -133,8 +133,8 @@ the deployed host process, not the agent.**
 ### Escalation rule
 
 If a future sensitivity split is warranted, split `fugue-agents` by **sensitivity
-tier**, never per agent: e.g. `fugue-agents-read` (read-only union) and
-`fugue-agents-act` (mutating union), so a compromise of a read-only host segment
+tier**, never per agent: e.g. fugue-agents-read (read-only union) and
+fugue-agents-act (mutating union), so a compromise of a read-only host segment
 cannot reach act-capable permissions. The boundary stays on a trust/blast-radius
 unit, not on agent identity.
 
@@ -158,7 +158,7 @@ unit, not on agent identity.
 
 - The app-only `.default` token carries the **full union** on every call and
   cannot be downscoped per request. Entra-side containment depends entirely on
-  resource-scoping policies (`Sites.Selected`, Exchange access policies, Dataverse
+  resource-scoping policies (Sites.Selected, Exchange access policies, Dataverse
   role) being present and correct — a missing or misconfigured policy silently
   widens the realized blast radius. Mitigated by making both the *coverage* and
   the *denial* of each policy mandatory, spike-verified acceptance gates in the

@@ -110,7 +110,7 @@ const writeTtlOf = (cache: MeteredRequestBase["cache"]): CacheTtl =>
 const isNonNegativeSafeInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
-// The descriptor read is `types/own-data.ts`; the wording stays local.
+// The descriptor read is `framework/src/types/own-data.ts`; the wording stays local.
 const ownDataValue = (value: object, key: PropertyKey): Result<unknown, string> => {
   const read = readOwnDataProperty(value, key);
   return read !== undefined

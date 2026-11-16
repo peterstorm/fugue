@@ -11,7 +11,7 @@ The host platform clones a separate git repository containing DAG code at startu
 
 These are simple, well-defined git operations — not complex graph traversals or merge resolution. The host needs a reliable way to invoke them with proper error handling (timeout, exit code mapping, stderr capture).
 
-The host runs in a Docker container (`oven/bun:1.2-alpine` with `git` installed via `apk`). Git CLI is guaranteed available in the production environment. The question is whether to use a JavaScript git library or shell out to the CLI.
+The host runs in a Docker container (`oven/bun:1.2-alpine` with `git` installed via apk). Git CLI is guaranteed available in the production environment. The question is whether to use a JavaScript git library or shell out to the CLI.
 
 ## Options Considered
 
@@ -21,7 +21,7 @@ The host runs in a Docker container (`oven/bun:1.2-alpine` with `git` installed 
      - Full feature parity with git CLI — shallow clone, sparse checkout, SSH auth, credential helpers all work exactly as documented.
      - Simple implementation: spawn process, collect stdout/stderr, map exit code to `Result<T, HostError>`.
      - `GitPort` interface decouples the domain from the implementation — tests use a fake that returns predetermined results.
-     - `Bun.spawn` is fast (no Node.js `child_process` overhead) and provides native `AbortSignal` support for timeouts.
+     - `Bun.spawn` is fast (no Node.js child_process overhead) and provides native `AbortSignal` support for timeouts.
    - Cons:
      - Requires `git` binary in the runtime environment. Docker image must include it (already accounted for in Dockerfile: `apk add --no-cache git`).
      - String parsing of git output (e.g., parsing SHA from `rev-parse`) is fragile if git changes output format. Mitigated: `rev-parse HEAD` output format hasn't changed in 15+ years.
@@ -44,9 +44,9 @@ The host runs in a Docker container (`oven/bun:1.2-alpine` with `git` installed 
      - Handles process spawning and output parsing.
    - Cons:
      - Adds a dependency that provides no value over direct `Bun.spawn`. The library is a thin wrapper; we'd be depending on someone else's spawn + parse logic when ours is ~50 lines.
-     - Node.js-oriented: uses `child_process` under the hood, not `Bun.spawn`. May not leverage Bun's faster process spawning.
+     - Node.js-oriented: uses child_process under the hood, not `Bun.spawn`. May not leverage Bun's faster process spawning.
      - Another package to audit, update, and track CVEs for.
-     - The `GitPort` interface already gives us a clean API boundary — `simple-git` would sit between our port and the CLI with no added value.
+     - The `GitPort` interface already gives us a clean API boundary — simple-git would sit between our port and the CLI with no added value.
 
 ## Decision
 
@@ -63,14 +63,14 @@ Concrete design:
     readonly hasLockfileChanged: (repoPath: string, fromSha: string, toSha: string) => Promise<Result<boolean, HostError>>;
   }
   ```
-- **Implementation:** `BunGitAdapter` implements `GitPort` using `Bun.spawn("git", [...args])`.
+- **Implementation:** BunGitAdapter implements `GitPort` using `Bun.spawn("git", [...args])`.
   - Each operation has a configurable timeout (default 60s for clone, 30s for pull/rev-parse).
   - Non-zero exit codes map to specific `HostError` variants (`git-clone-failed`, `git-pull-failed`, `git-timeout`).
   - stderr is captured and included in error messages for debugging.
   - `AbortSignal` passed to `Bun.spawn` for timeout enforcement.
-- **Test fake:** `FakeGitPort` in test utilities returns predetermined `Result` values. No actual git processes in unit tests.
-- **Integration tests:** Create temporary bare repos with `git init --bare`, push fixture DAGs, exercise the real `BunGitAdapter` against them.
-- **Dev mode:** When `DAGS_LOCAL_PATH` is configured, a `LocalGitAdapter` implements `GitPort` with no-ops for clone/pull and a file-mtime hash for `currentSha`. Same interface, different behavior.
+- **Test fake:** FakeGitPort in test utilities returns predetermined `Result` values. No actual git processes in unit tests.
+- **Integration tests:** Create temporary bare repos with `git init --bare`, push fixture DAGs, exercise the real BunGitAdapter against them.
+- **Dev mode:** When `DAGS_LOCAL_PATH` is configured, a LocalGitAdapter implements `GitPort` with no-ops for clone/pull and a file-mtime hash for `currentSha`. Same interface, different behavior.
 
 ## Consequences
 

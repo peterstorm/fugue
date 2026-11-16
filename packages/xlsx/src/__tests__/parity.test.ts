@@ -4,10 +4,10 @@
  * same order, same keys in the same order, same value types, same `Date` epoch
  * milliseconds, same prototype-free rows, and the same error outcome.
  *
- * Every fixture runs in this process (whatever `TZ` it was started with) and the
- * whole file is then re-run in child processes with `TZ` pinned BEFORE any module
+ * Every fixture runs in this process (whatever TZ it was started with) and the
+ * whole file is then re-run in child processes with TZ pinned BEFORE any module
  * loads — once under UTC and once under Europe/Copenhagen. SheetJS caches its date
- * base at module load, so flipping `process.env.TZ` mid-process would not prove
+ * base at module load, so flipping process.env.TZ mid-process would not prove
  * parity; a pinned child process does.
  */
 import { describe, expect, it } from "bun:test";
@@ -122,7 +122,7 @@ describe("canonical error messages", () => {
 /**
  * Digest of an archive's file entries (name + uncompressed bytes, in archive order).
  * Bytes are not compared because the rebuilt fixtures of the existing xlsx tests
- * are ExcelJS's own archives, with wall-clock entry dates, and `docProps/` is
+ * are ExcelJS's own archives, with wall-clock entry dates, and docProps/ is
  * skipped because ExcelJS writes wall-clock created/modified stamps there in
  * those fixtures; the workbook content is what the parity gate reads.
  */

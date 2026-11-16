@@ -175,7 +175,7 @@ export interface RunStorePort {
  * intentionally NON-idempotent — each call creates a fresh queue job (no `jobId`
  * dedup) so a resume re-enqueue is never silently dropped. Safety against running
  * the same parked run twice concurrently comes from the single-flight Redis lock
- * the worker takes around `processRun` (see `run-queue.ts#startWorker`), NOT from
+ * the worker takes around `processRun` (see `adapters/run-queue.ts#startWorker`), NOT from
  * enqueue dedup. The durable state lives in the `RunStorePort`, NOT in the queue
  * payload — the queue only carries the id.
  */
