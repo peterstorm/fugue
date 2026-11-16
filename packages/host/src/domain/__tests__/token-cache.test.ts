@@ -16,6 +16,8 @@ import {
   lookup,
   store,
   emptyCache,
+  effectiveTtlMs,
+  TOKEN_REFRESH_SKEW_MS,
   type CachedToken,
 } from "../token-cache.js";
 
@@ -203,6 +205,45 @@ describe("SC-008 property: a key is reused (not re-minted) within its TTL window
           expect(lookup(cache, key, now)).toBeUndefined();
         },
       ),
+    );
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Early-refresh margin (review I2): the effective TTL a freshly minted token is
+// cached for. Bounds, not a recomputation: never longer than the token's real
+// lifetime, never shorter than half of it, and short of it by exactly the skew
+// once the lifetime is long enough to afford the full margin.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("effectiveTtlMs — early-refresh margin with a half-lifetime floor", () => {
+  const expiresInSec = fc.integer({ min: 1, max: 86_400 });
+
+  it("caches strictly inside the real lifetime and never below half of it", () => {
+    fc.assert(
+      fc.property(expiresInSec, (sec) => {
+        const lifetimeMs = sec * 1000;
+        const ttl = effectiveTtlMs(sec);
+        expect(ttl).toBeLessThan(lifetimeMs);
+        expect(ttl * 2).toBeGreaterThanOrEqual(lifetimeMs);
+      }),
+    );
+  });
+
+  it("refreshes exactly TOKEN_REFRESH_SKEW_MS early once the lifetime affords the full margin", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: (2 * TOKEN_REFRESH_SKEW_MS) / 1000, max: 86_400 }), (sec) => {
+        expect(sec * 1000 - effectiveTtlMs(sec)).toBe(TOKEN_REFRESH_SKEW_MS);
+      }),
+    );
+  });
+
+  it("is monotone: a longer-lived token is never cached for less time", () => {
+    fc.assert(
+      fc.property(expiresInSec, expiresInSec, (a, b) => {
+        const [shorter, longer] = a <= b ? [a, b] : [b, a];
+        expect(effectiveTtlMs(shorter)).toBeLessThanOrEqual(effectiveTtlMs(longer));
+      }),
     );
   });
 });

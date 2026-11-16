@@ -82,6 +82,28 @@ export const cacheToken = (token: string, storedAt: number, ttlMs: number): Cach
 });
 
 /**
+ * Early-refresh skew margin — a DURATION in milliseconds (not an instant). A
+ * cached token is treated as stale this many millis BEFORE its real
+ * `expires_in`, so a token looked up just before expiry is re-minted rather
+ * than presented downstream microseconds before it lapses — which would 401 and
+ * (mis)map to `downstream-denied`, the never-retried category (review I2,
+ * ADR-0059).
+ */
+export const TOKEN_REFRESH_SKEW_MS = 60_000;
+
+/**
+ * Effective cache TTL for a freshly minted token whose issuer reported
+ * `expiresInSec`: its lifetime minus `TOKEN_REFRESH_SKEW_MS`, but never less
+ * than half its lifetime, so a token whose own lifetime is below `2 × skew`
+ * still caches for a useful window instead of being born stale.
+ */
+export const effectiveTtlMs = (expiresInSec: number): number => {
+  const lifetimeMs = expiresInSec * 1000;
+  const margin = Math.min(TOKEN_REFRESH_SKEW_MS, Math.floor(lifetimeMs / 2));
+  return lifetimeMs - margin;
+};
+
+/**
  * Freshness predicate with an EXPLICIT boundary: an entry is fresh iff
  * `now < entry.expiresAt` — strictly less-than. At the exact expiry instant
  * (`now === expiresAt`) the entry is STALE. Rationale: `expiresAt` is the first

@@ -42,7 +42,7 @@
 
 import type { Result, FrameworkError } from "@fuguejs/framework";
 import { err, safeErrorMessage } from "@fuguejs/framework";
-import type { DownstreamScope } from "../domain/capability-scope.js";
+import { scopeName } from "../domain/capability-scope.js";
 import { agentClientIdFromFrameworkOrigin } from "../domain/auth.js";
 import type { HttpPost, HttpPostResponse } from "./fetch-http-post.js";
 import type {
@@ -91,13 +91,6 @@ interface KeycloakTokenEndpointConfig {
 // ───────────────────────────────────────────────────────────────────────────
 // Pure body-builders — emit the EXACT form body with NO extra params
 // ───────────────────────────────────────────────────────────────────────────
-
-/**
- * The canonical `"<provider>:<operation>"` scope string Keycloak narrows the SA
- * token to. Pure; mirrors the broker's `scopeName` (kept local so this module
- * carries no broker dependency).
- */
-const scopeName = (scope: DownstreamScope): string => `${scope.provider}:${scope.operation}`;
 
 /**
  * Build the URL-encoded `client_credentials` form body for a Keycloak SA-token

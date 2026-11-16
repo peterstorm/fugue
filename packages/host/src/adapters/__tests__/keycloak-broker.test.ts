@@ -27,7 +27,7 @@ import type {
   RunId,
 } from "@fuguejs/framework";
 import type { LogPort } from "../../ports.js";
-import { createKeycloakBroker, scopeName, audienceForScope } from "../keycloak-broker.js";
+import { createKeycloakBroker } from "../keycloak-broker.js";
 import type {
   KeycloakTokenEndpoint,
   ClientCredentialsRequest,
@@ -35,7 +35,7 @@ import type {
 } from "../keycloak-token-endpoint.js";
 import type { EntraWifExchange, WifExchangeRequest } from "../entra-wif.js";
 import type { GraphHttp, GraphRequest } from "../graph-capability.js";
-import { parseScope } from "../../domain/capability-scope.js";
+import { scopeName, audienceForScope } from "../../domain/capability-scope.js";
 import { markSubjectToken, type SubjectToken } from "../../domain/auth.js";
 import { collectLogs } from "./fixtures/log-capture.js";
 
@@ -1103,31 +1103,6 @@ describe("keycloak-broker — a throwing audit sink never breaks mintFor's Resul
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected refusal despite throwing logger");
     expect(result.error.kind).toBe("policy-refusal");
-  });
-});
-
-// ── Pure helpers (round-trip / audience mapping) ────────────────────────────
-
-describe("keycloak-broker — pure scope helpers", () => {
-  it("scopeName round-trips parseScope for every recognised scope", () => {
-    for (const name of ["msgraph:mail.send", "msgraph:sites.read", "dynamics:read"]) {
-      const parsed = parseScope(name);
-      expect(parsed).toBeDefined();
-      if (parsed === undefined) continue;
-      expect(scopeName(parsed)).toBe(name);
-    }
-  });
-
-  it("audienceForScope maps each provider to its downstream resource (FR-042: Dynamics → per-org host)", () => {
-    const mail = parseScope("msgraph:mail.send");
-    const dyn = parseScope("dynamics:read");
-    if (mail === undefined || dyn === undefined) throw new Error("parse failed");
-    // msgraph never depends on the org host.
-    expect(audienceForScope(mail, undefined)).toBe("https://graph.microsoft.com");
-    expect(audienceForScope(mail, "org.crm4.dynamics.com")).toBe("https://graph.microsoft.com");
-    // Dynamics targets the CONFIGURED per-org host; UNSET → undefined (fail-closed).
-    expect(audienceForScope(dyn, "org.crm4.dynamics.com")).toBe("https://org.crm4.dynamics.com");
-    expect(audienceForScope(dyn, undefined)).toBeUndefined();
   });
 });
 

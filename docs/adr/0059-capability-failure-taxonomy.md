@@ -160,8 +160,8 @@ mapper. The invariant is: **transport rejection or an unhandled status →
   `formatFrameworkError`'s `.exhaustive()` (`errors.ts`). Adding a kind
   without a case is a compile error.
 - A **token-cache miss is not an error** (FR-X-003): in the broker it is the
-  normal path that triggers a mint/exchange (the miss/acquire path in
-  `doAcquireAppToken`, `keycloak-broker.ts`), never a `FrameworkError`.
+  normal path that triggers a mint/exchange (the miss/acquire path of the
+  token cell's `obtain`, `token-cell.ts`), never a `FrameworkError`.
 - `policy-refusal` is raised strictly before any egress; `infra-unreachable` and
   `downstream-denied` only after a real reach attempt.
 - The four variants serialize cleanly through `FrameworkAugmentedError`

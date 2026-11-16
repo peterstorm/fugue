@@ -186,6 +186,36 @@ export const parseScope = (name: string): DownstreamScope | undefined => {
 };
 
 /**
+ * Canonical `"<provider>:<operation>"` name for a parsed scope — the inverse of
+ * `parseScope` (`parseScope(scopeName(s))` is `s`). The single source for the
+ * scope string the policy gate, the token-cache key, the audit record and the
+ * Keycloak `scope` form parameter all use.
+ */
+export const scopeName = (scope: DownstreamScope): string => `${scope.provider}:${scope.operation}`;
+
+/**
+ * Downstream resource/audience a scope's token is narrowed to. Graph operations
+ * target the Microsoft Graph resource; Dynamics targets the configured per-org
+ * Dataverse host (FR-042), `https://<DYNAMICS_ORG_HOST>` (its `/.default` scope
+ * is requested at the WIF egress). Exhaustive over the scope ADT.
+ *
+ * FAIL CLOSED (FR-042): when `dynamicsOrgHost` is UNSET a `dynamics:read` scope
+ * resolves to `undefined`, and the capability gate (`capability-gate.ts`)
+ * refuses it with zero egress rather than minting against a placeholder
+ * audience. `msgraph` never depends on the org host, so it always resolves.
+ */
+export const audienceForScope = (
+  scope: DownstreamScope,
+  dynamicsOrgHost: string | undefined,
+): string | undefined =>
+  match(scope)
+    .with({ provider: "msgraph" }, () => "https://graph.microsoft.com")
+    .with({ provider: "dynamics" }, () =>
+      dynamicsOrgHost !== undefined ? `https://${dynamicsOrgHost}` : undefined,
+    )
+    .exhaustive();
+
+/**
  * The narrowed-handle KIND a parsed scope resolves to, as a stable string tag.
  * Pure mapping naming which concrete handle a scope yields — the same
  * scope→handle selection `buildGraphHandle` (`adapters/graph-capability.ts`)
