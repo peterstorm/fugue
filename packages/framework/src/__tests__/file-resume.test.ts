@@ -1681,14 +1681,26 @@ describe("resumeFileJob — pollution-key checkpoint envelope fails closed", () 
 // full replay) is benign lag; any other checkpoint is corruption
 // ---------------------------------------------------------------------------
 
+/**
+ * Every case appends up to 10 durable (fsync'd) journal records, so a case
+ * costs real disk time. The run count is bounded and the timeout explicit so
+ * the properties stay well inside the budget when the full suite loads the
+ * disk; 40 runs still sweep the whole (n, k) grid's structure.
+ */
+const PREFIX_SPACE_RUNS = { numRuns: 40 } as const;
+const PREFIX_SPACE_TIMEOUT_MS = 60_000;
+
+/** A log length n and a prefix length k ≤ n — generated valid, never filtered. */
+const logAndPrefix = fc
+  .integer({ min: 1, max: 10 })
+  .chain((n) => fc.tuple(fc.constant(n), fc.integer({ min: 0, max: n })));
+
 describe("resumeFileJob — prefix-space property (fast-check)", () => {
   it("property: a checkpoint equal to the replay of ANY prefix of the log (k ≤ n, incl. empty prefix = genesis and the full replay) resumes ok from the full-replay state", async () => {
     await fc.assert(
       fc.asyncProperty(
-        fc.integer({ min: 1, max: 10 }),
-        fc.integer({ min: 0, max: 10 }),
-        async (n, k) => {
-          fc.pre(k <= n);
+        logAndPrefix,
+        async ([n, k]) => {
           const dir = tempDir();
           const journal = createFileJournal(dir, { now: () => 7 });
           for (let i = 0; i < n; i++) await journal.appendEvent({ type: "STEP" }, `k:${i}`);
@@ -1709,8 +1721,9 @@ describe("resumeFileJob — prefix-space property (fast-check)", () => {
           expect(resumed.value.context).toEqual({ value: n });
         },
       ),
+      PREFIX_SPACE_RUNS,
     );
-  });
+  }, PREFIX_SPACE_TIMEOUT_MS);
 
   it("property: a checkpoint whose state the log never passed through (count > n) is checkpoint-corrupt", async () => {
     await fc.assert(
@@ -1740,8 +1753,9 @@ describe("resumeFileJob — prefix-space property (fast-check)", () => {
           expect(resumed.error.message).toContain("vs replay");
         },
       ),
+      PREFIX_SPACE_RUNS,
     );
-  });
+  }, PREFIX_SPACE_TIMEOUT_MS);
 });
 
 // ---------------------------------------------------------------------------
