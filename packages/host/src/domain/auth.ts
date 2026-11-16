@@ -132,7 +132,7 @@ export const markSubjectToken = (verifiedCompactJwt: string): SubjectToken =>
  * The Keycloak client id an agent acts AS — the identity the broker's policy
  * gate (`AssignedScopes`), the token-cache identity, and the audit `azp` are
  * all keyed on. It is the REAL Keycloak agent-type client id (e.g.
- * fugue-agent-mail), resolved from a DAG id through the config-mapped
+ * `fugue-agent-mail`), resolved from a DAG id through the config-mapped
  * `AgentClientMap` by `agentClientIdForDag` (FR-040, ADR-0056). The DAG-id
  * placeholder is gone: a DAG with no mapping fails closed (no identity
  * passthrough), so a node can never mint as the wrong/absent client.
@@ -154,7 +154,7 @@ export type AgentClientId = string & { readonly __brand: "AgentClientId" };
 /**
  * The config-mapped DAG-id → real-Keycloak-agent-client-id registry (FR-040,
  * ADR-0056 Variant A: one Keycloak service-account client per agent TYPE). Keys
- * are DAG ids; values are the real client ids (fugue-agent-mail, …) on which
+ * are DAG ids; values are the real client ids (`fugue-agent-mail`, …) on which
  * `AGENT_CLIENT_SCOPES` and `KEYCLOAK_AGENT_CLIENT_CREDENTIALS` are keyed. A DAG
  * id absent from this map has NO agent client — its origin resolution fails
  * closed (see `agentClientIdForDag`).

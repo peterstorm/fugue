@@ -14,7 +14,7 @@ A separate concern is **replay**: rebuilding `{state, context}` by folding the e
 The question is whether the read-side (event-log iteration for replay) belongs on `JobLike` or somewhere else. The forces:
 
 - The runner itself never reads events — it only appends them after each successful transition (FR-005, FR-006). Adding a read API to `JobLike` would put a method on the type that the runner cannot call.
-- Read-side access patterns differ from write-side. Writes are one-shot per transition. Reads stream a range, may need a cursor, may want batch sizing, and (in BullMQ/Redis Streams) map to XRANGE with pagination — not a single `XADD`.
+- Read-side access patterns differ from write-side. Writes are one-shot per transition. Reads stream a range, may need a cursor, may want batch sizing, and (in BullMQ/Redis Streams) map to `XRANGE` with pagination — not a single `XADD`.
 - Test ergonomics matter. A small `JobLike` is trivial to fake. A large one bleeds adapter detail into every test.
 - The "did we append?" invariant of FR-006/SC-004 should be visible in the type signature, not buried inside an `updateData` side-effect.
 
@@ -68,7 +68,7 @@ interface JobLike<S, C> {
 
 Defined in `packages/framework/src/state-machine/types.ts` alongside `Machine`, `Executor`, `RunOptions`, and `TraceEvent`.
 
-`EventLogReader` is a separate, adapter-implemented interface used only by `replay.ts`. The in-memory adapter ships both (`adaptInMemoryJob` and an array-backed reader) under `packages/framework/src/queue/in-memory-job.ts`. The BullMQ adapter ships `adaptBullMQJob` in `packages/framework/src/queue-bullmq/job.ts` (writes via `XADD`) and `createRedisStreamReader` in `packages/framework/src/queue-bullmq/event-log.ts` (reads via XRANGE).
+`EventLogReader` is a separate, adapter-implemented interface used only by `replay.ts`. The in-memory adapter ships both (`adaptInMemoryJob` and an array-backed reader) under `packages/framework/src/queue/in-memory-job.ts`. The BullMQ adapter ships `adaptBullMQJob` in `packages/framework/src/queue-bullmq/job.ts` (writes via `XADD`) and `createRedisStreamReader` in `packages/framework/src/queue-bullmq/event-log.ts` (reads via `XRANGE`).
 
 `replayEvents(events, machine, initial)` is a pure function — it does not take a `JobLike`. The caller is responsible for fetching events via the reader and threading them in. This keeps `replay.ts` independent of any backend.
 

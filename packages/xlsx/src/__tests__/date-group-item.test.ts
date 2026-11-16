@@ -25,7 +25,7 @@ const RowSchema = z.object({
 
 /**
  * Build the fixture, injecting filtersInner as the children of `<filters>` on
- * the date column. Defaults to the self-closing dateGroupItem nodes Dynamics
+ * the date column. Defaults to the self-closing `dateGroupItem` nodes Dynamics
  * emits (which stripDateGroupItems removes losslessly).
  */
 const buildFixture = async (

@@ -147,7 +147,7 @@ step, not be relied upon from `canAccessDag`. The baked-image path now does this
 
 ### 2.3 Current state of `fugue-dags`
 
-One repo, **currently one team** (business-sales), ADR-0041 layout with
+One repo, **currently one team** (`business-sales`), ADR-0041 layout with
 intra-team grouping under leads/:
 
 ```
@@ -179,7 +179,7 @@ Remaining options if needed later:
   git-sync path (not built); until then, git-sync clones the whole repo, so prefer
   the baked-image path or a repo per team for git-sync deployments.
 - **repo per team** — the simplest way to make the guarantee structural rather
-  than dependent on a correct COPY.
+  than dependent on a correct `COPY`.
 
 Never ship a single all-teams image to multiple hosts, and never run more than one
 team on one host.
@@ -261,8 +261,8 @@ in the design.
 
 ### 4.1 The `fugue-platform` Keycloak realm
 
-- A **new, dedicated realm** — **not** toolbox, **not** bare `fugue`. (The only
-  pre-existing realms are toolbox and `2ndbrands`/secondbrands, one
+- A **new, dedicated realm** — **not** `toolbox`, **not** bare `fugue`. (The only
+  pre-existing realms are `toolbox` and `2ndbrands`/secondbrands, one
   self-contained config-as-code package per realm in
   `~/dev/java/keycloakConfigAsCode`.) `fugue-platform` is the third.
 - A Keycloak realm is an **isolated identity & trust domain** — its own issuer,
@@ -271,17 +271,17 @@ in the design.
   boundary**, never the underlying engine — hence `fugue-platform` (the trust
   domain of deployed fugue actors + apps), not `fugue` (the engine).
 - Humans come from the **3.dk / mother-company Entra tenant via brokering** (an
-  azuread IdP). No realm "owns" the humans; each realm stands up its own broker
+  `azuread` IdP). No realm "owns" the humans; each realm stands up its own broker
   and maps only the Azure groups it cares about.
 - Issuer URL: `https://<kc-host>/realms/fugue-platform` (exact scheme/host/port,
   **no trailing slash** — this string must match the Entra FIC byte-for-byte).
-- Governed as **config-as-code** (Java steps in keycloakConfigAsCode,
+- Governed as **config-as-code** (Java steps in `keycloakConfigAsCode`,
   PR-reviewed, golden-export-tested). Realm build steps:
-  RealmStep → create realm; AzureIdpStep → broker Entra + map Azure groups →
+  `RealmStep` → create realm; `AzureIdpStep` → broker Entra + map Azure groups →
   realm roles (role name == team name, the namespace reserved for teams — ADR-0062);
-  ClientStep → declare clients (BFF + per-agent service accounts);
-  ClientScopesStep → optional scopes mirroring downstream permissions;
-  RolesStep + ValidationStep → seal the realm.
+  `ClientStep` → declare clients (BFF + per-agent service accounts);
+  `ClientScopesStep` → optional scopes mirroring downstream permissions;
+  `RolesStep` + `ValidationStep` → seal the realm.
 
 ### 4.2 The two run origins
 
@@ -361,7 +361,7 @@ a credential (SC-007).
 **Keycloak is the policy enforcement point.** Each downstream permission is an
 **optional client scope** named `<provider>:<operation>` (e.g. `msgraph:mail.send`,
 `msgraph:sites.read`, `dynamics:read`). **Assigning a scope to an agent's client
-in ClientStep *is* the policy grant** — config-as-code, PR-reviewed,
+in `ClientStep` *is* the policy grant** — config-as-code, PR-reviewed,
 golden-export-tested (ADR-0057). If the agent's client lacks the scope, the
 `client_credentials` mint fails **at the Keycloak hop with zero egress to Entra**
 (SC-006, fail-closed). Defense in depth: both the broker's `assignedScopes` gate
@@ -414,8 +414,8 @@ is the simplest correct choice** — you don't need the broker/minting machinery
 all.
 
 **Provisioning is the same either way** (it's an Entra-side requirement, not a
-code one): SharePoint needs Sites.Selected on `fugue-agents` with the target
-site(s) explicitly added (never Sites.Read.All); Dynamics needs `fugue-agents`
+code one): SharePoint needs `Sites.Selected` on `fugue-agents` with the target
+site(s) explicitly added (never `Sites.Read.All`); Dynamics needs `fugue-agents`
 registered as a **Dataverse application user** with a read security role plus
 `DYNAMICS_ORG_HOST` set (else the `dynamics:read` audience resolves to `undefined`
 and the capability **fails closed with zero egress** — `audienceForScope` in
@@ -434,12 +434,12 @@ building waves 3–4:
   *in the same realm* ("supports only use-case (1)"). It does **not** stamp the
   RFC 8693 `act` claim, has no actor_token/delegation/impersonation, requires
   `subject_token` to be an access token, and **rejects DPoP/mTLS subject tokens**
-  with invalid_request (though it *can* emit a DPoP-bound token as output).
+  with `invalid_request` (though it *can* emit a DPoP-bound token as output).
 - Therefore "one agent token carries both its own + the user's identity
   downstream" is **not possible** in Keycloak today. Entra On-Behalf-Of also
   cannot run through the Keycloak broker (OBO needs Entra-issued tokens).
 - Consequence: identity is preserved by `sub`+`azp` on the V2-exchanged token
-  (`sub` = user, `azp` = requesting agent) plus traceparent chain logging — not
+  (`sub` = user, `azp` = requesting agent) plus `traceparent` chain logging — not
   by an `act` delegation chain. Adopt `act` when Keycloak ships it.
 - **JWT Authorization Grant (RFC 7523)** was promoted preview→SUPPORTED in
   Keycloak 26.6.0 — a distinct, complementary feature; not required for the paths
@@ -448,7 +448,7 @@ building waves 3–4:
 ### 4.6 One Entra app, union permissions (ADR-0055)
 
 **ONE** Entra app registration, **`fugue-agents`**, holds the **union** of all
-application permissions any agent needs (e.g. Mail.Send, Sites.Selected,
+application permissions any agent needs (e.g. `Mail.Send`, `Sites.Selected`,
 Dynamics read), admin-consented **once**. **No per-agent apps.**
 
 Why one app is sound: **the trust boundary is the deployed host process, not the
@@ -462,25 +462,25 @@ The honest trade-off: **app-only tokens cannot be downscoped per request**
 (`client_credentials` against Entra is `scope=.default` — the token carries all
 granted app roles every time). So the union is bounded **at Entra** by
 resource-scoping policies:
-- **Sites.Selected** (never Sites.Read.All) — only explicitly granted
+- **`Sites.Selected`** (never `Sites.Read.All`) — only explicitly granted
   SharePoint sites.
-- **Exchange application access policies** — Mail.Send restricted to specific
+- **Exchange application access policies** — `Mail.Send` restricted to specific
   mailboxes (e.g. the lead-desk shared mailbox).
 - **Dataverse application user** + scoped security role — row/table-level read.
 
 **Escalation path** (the *only* sanctioned reason to add an Entra app): split by
-**sensitivity tier** — fugue-agents-read / fugue-agents-act — never per agent.
+**sensitivity tier** — `fugue-agents-read` / `fugue-agents-act` — never per agent.
 2–3 apps total, an order of magnitude below per-agent registrations.
 
 ### 4.7 Federated Identity Credentials — Variant A (ADR-0056)
 
-**One FIC per agent-type Keycloak client** (fugue-agent-mail,
-fugue-agent-sites), well under Entra's **20-FIC/app cap**. Each FIC matches,
+**One FIC per agent-type Keycloak client** (`fugue-agent-mail`,
+`fugue-agent-sites`), well under Entra's **20-FIC/app cap**. Each FIC matches,
 **exactly and case-sensitively**:
 - `issuer` = `https://<kc-host>/realms/fugue-platform`
 - `subject` = that client's service-account `sub` (predictable as
   `service-account-<client_id>` if the sub-claim mapper is in use — gated by spike
-  #2; otherwise read-then-pin the UUID after ClientStep)
+  #2; otherwise read-then-pin the UUID after `ClientStep`)
 - `audience` = `api://AzureADTokenExchange`
 
 This preserves **per-agent-type attribution at Entra's sign-in log** (the matched
@@ -588,7 +588,7 @@ KeycloakClientCredential | undefined` — resolved from `KEYCLOAK_AGENT_CLIENT_C
 (JSON `{ clientId: clientSecret }`), injected into the live token-endpoint
 adapter. A miss is **fail-closed** (`policy-refusal`-shaped, no egress).
 **Why:** each agent client is a confidential service-account client; to mint AS
-fugue-agent-mail the host must present that client's secret. One host owns only
+`fugue-agent-mail` the host must present that client's secret. One host owns only
 a small fixed set of agent clients (one-host-per-team), so a config/secret map
 suffices. Keeping it a **port** lets a Vault/Key Vault adapter replace the env map
 later with no broker change.
@@ -613,7 +613,7 @@ invariant that keeps security tests network-free).
 fail-closed stub + one-time boot warn.
 **Why:** lets the agent path, user path, and Entra leg light up **independently**
 as each is provisioned and spike-verified; each partial state stays provably
-fail-closed. **Rejected:** a single CAPABILITY_MINTING_ENABLED flag (forces all
+fail-closed. **Rejected:** a single `CAPABILITY_MINTING_ENABLED` flag (forces all
 three egresses live at once — the four-spike gate forbids it).
 
 ### AD-4 — Realm JWT verifier mirrors the Bot token verifier
@@ -785,7 +785,7 @@ golden-export-tested realm policy.
 5. Phase 1/5 manual: agent run sends mail via a minted scoped handle; out-of-scope
    `requires` refused with zero egress (check audit log).
 6. Phase 1′ manual: suspend a HITL DAG, approve the Teams card in-channel, confirm resume.
-7. Phase 3 manual: user run reads a Sites.Selected site it's entitled to; a
+7. Phase 3 manual: user run reads a `Sites.Selected` site it's entitled to; a
    non-entitled site returns `downstream-denied`.
 
 ---
@@ -835,12 +835,12 @@ step runs against a real tenant.
 
 | Spike | Gates | Required outcome |
 |---|---|---|
-| #1 FIC sign-in attribution | Step 3 (variant A), Step 6 (attribution) | PASS — sign-in log names the matched FIC (federatedCredentialId) |
+| #1 FIC sign-in attribution | Step 3 (variant A), Step 6 (attribution) | PASS — sign-in log names the matched FIC (`federatedCredentialId`) |
 | #2 sub-claim × FIC matching | Step 3 (subject/issuer/aud exact match + case-sensitivity) | PASS — minted `sub` matches FIC verbatim; case-flip fails `AADSTS70021` |
-| #3 resource-scoping coverage | Step 4 (Sites.Selected + Exchange policy coverage AND denial) | PASS — in-scope granted, out-of-scope denied |
+| #3 resource-scoping coverage | Step 4 (`Sites.Selected` + Exchange policy coverage AND denial) | PASS — in-scope granted, out-of-scope denied |
 | #4 identity-chaining e2e | the user-initiated chain feeding the WIF assertion | PASS/PARTIAL — chain composes, `aud: api://AzureADTokenExchange` pinned |
 
-> **Status (2026-06-10):** all four spikes are PENDING-LIVE-VERIFICATION (no
+> **Status (2026-06-10):** all four spikes are `PENDING-LIVE-VERIFICATION` (no
 > Entra tenant + no live `fugue-platform` realm reachable at authoring time). **Do
 > not execute against a production tenant until spikes #1–#3 PASS.**
 
@@ -854,8 +854,8 @@ step runs against a real tenant.
 
    | Keycloak optional scope | Entra application permission | API | Used by |
    |---|---|---|---|
-   | `msgraph:mail.send` | Mail.Send | Graph | fugue-agent-mail |
-   | `msgraph:sites.read` | Sites.Selected (never Sites.Read.All) | Graph | fugue-agent-sites |
+   | `msgraph:mail.send` | `Mail.Send` | Graph | `fugue-agent-mail` |
+   | `msgraph:sites.read` | `Sites.Selected` (never `Sites.Read.All`) | Graph | `fugue-agent-sites` |
    | `dynamics:read` | Dataverse application user + read security role | Dynamics 365 | unassigned (host path unwired) |
 
    > Dynamics has no classic Graph `*.All` app permission; app-only access = register
@@ -874,16 +874,16 @@ role).
 level; no per-agent consent, no runtime consent prompt possible on the app-only path.
 
 ### A.3 Add Federated Identity Credentials — Variant A (FR-402 / AD-4)
-For each agent-type client (fugue-agent-mail, then fugue-agent-sites):
+For each agent-type client (`fugue-agent-mail`, then `fugue-agent-sites`):
 1. App → Certificates & secrets → Federated credentials → Add → **Other issuer**.
 2. Set the three match fields, **copy-pasted verbatim** (Entra matches exactly,
    case-sensitively):
    - **Issuer** = `https://<kc-host>/realms/fugue-platform` (no trailing slash).
    - **Subject** = the client's service-account `sub` (e.g.
-     service-account-fugue-agent-mail if the predictable-`sub` mapper is in use
-     per spike #2 PASS; else the UUID read after ClientStep).
+     `service-account-fugue-agent-mail` if the predictable-`sub` mapper is in use
+     per spike #2 PASS; else the UUID read after `ClientStep`).
    - **Audience** = `api://AzureADTokenExchange`.
-   - **Name** = fugue-agent-mail-fic / fugue-agent-sites-fic.
+   - **Name** = `fugue-agent-mail-fic` / `fugue-agent-sites-fic`.
 3. Record each FIC's name + credential object id (for Step 6).
 
 **Acceptance:** exactly **two** FICs (under the 20-cap), no FIC for any other
@@ -900,17 +900,17 @@ The app-only `.default` token carries the full union every call and **cannot be
 downscoped per request** — these two mechanisms are the *only* Entra-side
 containment. Spike #3 must prove both **coverage** and **denial**.
 
-**4a — Sites.Selected per-site grant (sites-agent):** with a Graph admin token,
+**4a — `Sites.Selected` per-site grant (sites-agent):** with a Graph admin token,
 `POST /sites/{IN_SCOPE_SITE_ID}/permissions` `{ "roles":["read"],
 "grantedToIdentities":[{"application":{"id":"<fugue-agents app id>","displayName":"fugue-agents"}}] }`
 — only the specific site(s), not tenant-wide. **Acceptance:** positive —
 `GET /sites/{IN_SCOPE}/drive/root/children` → 200; negative — out-of-scope site →
-403 accessDenied.
+403 `accessDenied`.
 
 **4b — Exchange application access policy (mail-agent):** in Exchange Online
 PowerShell, `New-ApplicationAccessPolicy -AppId <id> -PolicyScopeGroupId
 leaddesk-scope@<tenant> -AccessRight RestrictAccess`; verify with
-Test-ApplicationAccessPolicy (Granted for lead-desk, Denied for a control
+`Test-ApplicationAccessPolicy` (Granted for lead-desk, Denied for a control
 mailbox; allow ~30 min propagation). **Acceptance:** positive —
 `POST /users/leaddesk@<tenant>/sendMail` → 202 and message lands; negative —
 control mailbox → 403 ErrorAccessDenied/ApplicationAccessPolicy. (Dynamics:
@@ -927,18 +927,18 @@ references no Entra secret/cert (only app/tenant IDs + the Keycloak assertion as
 credential. Any secret/cert present is a hard stop.
 
 ### A.6 Sign-in attribution check (spike #1)
-Run a real federated exchange as fugue-agent-mail, note UTC time (allow ~15 min),
+Run a real federated exchange as `fugue-agent-mail`, note UTC time (allow ~15 min),
 then read service-principal sign-in logs:
 ```sh
 curl -s -H "Authorization: Bearer ${GRAPH_ADMIN_TOKEN}" \
   "https://graph.microsoft.com/v1.0/auditLogs/signIns?\$filter=appId eq '<fugue-agents app id>' and signInEventTypes/any(t: t eq 'servicePrincipal')&\$top=20" \
   | jq '.value[] | {createdDateTime, appId, servicePrincipalId, federatedCredentialId, tokenIssuerName, status}'
 ```
-**Acceptance:** an entry shows federatedCredentialId resolving to
-fugue-agent-mail-fic; a second run as fugue-agent-sites is distinguishable
-(resolves to fugue-agent-sites-fic). If spike #1 is PARTIAL (no
-federatedCredentialId), record the actual discriminating field and note that
-host-side traceparent attribution carries the remaining weight.
+**Acceptance:** an entry shows `federatedCredentialId` resolving to
+`fugue-agent-mail-fic`; a second run as `fugue-agent-sites` is distinguishable
+(resolves to `fugue-agent-sites-fic`). If spike #1 is PARTIAL (no
+`federatedCredentialId`), record the actual discriminating field and note that
+host-side `traceparent` attribution carries the remaining weight.
 
 ### A.7 Whole-runbook acceptance
 - [ ] Steps 1–2: one app, union exactly, admin-consented once, no per-agent app.
@@ -955,10 +955,10 @@ Lives in the `fugue-platform` realm package
   optional client scope — a hardcoded-audience protocol mapper stamping
   `aud: api://AzureADTokenExchange` on the **access token only**, exactly one
   mapper (FR-403). Every FIC's `audience` must equal this.
-- Agent-type clients **fugue-agent-mail** / **fugue-agent-sites** are
+- Agent-type clients **`fugue-agent-mail`** / **`fugue-agent-sites`** are
   confidential service-account (client-credentials only; ROPC/standard-flow
   disabled), each carrying the optional scope mapping to its Entra permission.
-  Assigning the scope in ClientStep **is** the policy grant (AD-5); the broker
+  Assigning the scope in `ClientStep` **is** the policy grant (AD-5); the broker
   fails closed at the Keycloak hop with zero Entra egress if unassigned.
 - Realm issuer URL `https://<kc-host>/realms/fugue-platform` — the exact string
   each FIC's `issuer` must equal.
@@ -981,7 +981,7 @@ Located in `docs/spikes/`. Run waves 3–4 only after these PASS:
    Entra's case-sensitive issuer/subject/audience match (negative control: a
    case-flip fails `AADSTS70021`).
 3. **Resource-scoping coverage** (`2026-06-10-spike-3-resource-scoping-coverage.md`) —
-   Sites.Selected + Exchange application access policies must **cover** the
+   `Sites.Selected` + Exchange application access policies must **cover** the
    needed Graph surfaces **and deny** everything else.
 4. **Identity-chaining end-to-end on 26.6** (`2026-06-10-spike-4-identity-chaining-e2e.md`) —
    the constituent features are individually supported; the composed
@@ -999,7 +999,7 @@ Located in `docs/spikes/`. Run waves 3–4 only after these PASS:
 | Entra app | `fugue-agents` (one app; the deployed host process is the trust boundary) | AD-3 / FR-401 |
 | Federation audience | `api://AzureADTokenExchange` | minted by the `entra-exchange` Keycloak scope; every FIC's `audience` |
 | Issuer | `https://<kc-host>/realms/fugue-platform` (no trailing slash) | the `fugue-platform` realm; every FIC's `issuer` |
-| Agent-type clients | fugue-agent-mail, fugue-agent-sites | `fugue-platform` ClientStep (one FIC each, variant A) |
+| Agent-type clients | `fugue-agent-mail`, `fugue-agent-sites` | `fugue-platform` `ClientStep` (one FIC each, variant A) |
 | FIC `subject` | the agent client's service-account `sub` (`service-account-<client_id>` per spike #2, or read-then-pinned) | Keycloak-minted assertion `sub` |
 
 ### Config / environment variables

@@ -322,7 +322,7 @@ input schema: linear positions, fan-out/diamond source or branch positions, and
 router case/default handlers. Collect-only v1 maps cannot be fan-in joins, any
 `sources` role, or a router classifier (routing requires a direct enum output field).
 It is not a `DAG_SHAPES` member and does not add `fugue new --shape map` or a
-defineMap helper.
+`defineMap` helper.
 
 ```json
 {
@@ -497,7 +497,7 @@ createEvalJudgeNode({
 client — the framework does not validate it (`fugue capabilities` lists
 *capabilities*, not models). Use a **current** id; ids carrying an explicit
 release date (e.g. `claude-sonnet-4-5`) are usually the stale form and get
-retired. As of this writing the current Claude ids are claude-opus-4-8
+retired. As of this writing the current Claude ids are `claude-opus-4-8`
 (most capable) and `claude-sonnet-4-6` (speed/intelligence balance); the
 authoritative list lives in the host's LLM-provider configuration, not in
 this doc.
@@ -632,7 +632,7 @@ the node closed if the closure throws** (no key ⇒ no safe write).
 
 The framework does **not** itself store or dedupe on the key — it computes and
 propagates it, and the **downstream sink must honor it**: Stripe/SendGrid
-Idempotency-Key headers, `INSERT … ON CONFLICT DO NOTHING`, an upsert keyed on
+`Idempotency-Key` headers, `INSERT … ON CONFLICT DO NOTHING`, an upsert keyed on
 the value, etc. The key is your contract with that sink, made deterministic and
 observable.
 
@@ -1299,7 +1299,7 @@ bare Mermaid text for piping into documentation.
 
 > Run `bunx fugue …` from a directory whose package depends on
 > `@fuguejs/framework` (bun links the bin per dependent). From an unrelated
-> directory bunx falls through to the npm registry — and rewrites the
+> directory `bunx` falls through to the npm registry — and rewrites the
 > lockfile while failing. Equivalent direct form:
 > `bun node_modules/@fuguejs/framework/bin/fugue.ts lint <path>`.
 

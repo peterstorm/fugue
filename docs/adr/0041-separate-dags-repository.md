@@ -50,7 +50,7 @@ fugue-dags/                     # Separate git repo
 ```
 
 Example with grouping: dags/business-sales/leads/lead-scoring/dag.ts
-(team business-sales).
+(team `business-sales`).
 
 Host behavior:
 - **Startup:** `git clone --depth=1 --branch={branch} {DAGS_REPO_URL}` into a working directory, then `bun install --frozen-lockfile` (skipped when the repo has no `package.json`)

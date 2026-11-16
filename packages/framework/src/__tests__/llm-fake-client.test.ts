@@ -774,7 +774,7 @@ describe("FakeLlmClient: scripted prompt-cache figures", () => {
 // ── LlmClient port variance pin (round-14 C1) ───────────────────────────────
 // `LlmClient`'s members are declared as readonly ARROW PROPERTIES, not method
 // shorthand. TypeScript checks method-shorthand parameters BIVARIANTLY even
-// under strictFunctionTypes, so a shorthand declaration would let an
+// under `strictFunctionTypes`, so a shorthand declaration would let an
 // implementation narrow `ctx` to a type demanding fields a plain `NodeContext`
 // does not carry — satisfying the interface structurally, then crashing at
 // runtime when the framework invokes it with the context it built itself

@@ -106,7 +106,7 @@ describe("buildAclSpec — scope-only key pattern (SC-001, FR-009)", () => {
     const spec = buildAclSpec(mkTenant("acme"));
     expect(spec.rules).toContain("on");
     expect(spec.rules).toContain("resetchannels");
-    // No channel grant (`&…` or allchannels).
+    // No channel grant (`&…` or `allchannels`).
     expect(spec.rules.some((r) => r.startsWith("&") || r === "allchannels")).toBe(false);
   });
 });

@@ -51,14 +51,14 @@ one FIC per agent type (up to Entra's 20-FIC cap).**
 Concretely:
 
 - The `fugue-platform` realm holds one service-account client per agent *type*
-  (fugue-agent-mail, fugue-agent-sites, …), each minted via the realm's ClientStep.
-- The `fugue-agents` Entra app carries **one FIC per such client** — fugue-agent-mail-fic,
-  fugue-agent-sites-fic, … — each with:
+  (`fugue-agent-mail`, `fugue-agent-sites`, …), each minted via the realm's `ClientStep`.
+- The `fugue-agents` Entra app carries **one FIC per such client** — `fugue-agent-mail-fic`,
+  `fugue-agent-sites-fic`, … — each with:
   - `issuer` = the `fugue-platform` realm issuer URL, exact scheme/host/port, no trailing
     slash (identical across all FICs);
   - `subject` = that client's service-account `sub`, **`service-account-<client_id>`**,
     written as config-as-code ahead of client creation (spike #2 PASS) or read-then-pinned
-    after ClientStep if spike #2 records PARTIAL;
+    after `ClientStep` if spike #2 records PARTIAL;
   - `audience` = the exact string `api://AzureADTokenExchange` (identical across all FICs),
     minted by the `entra-exchange` scope (FR-403) and not an array.
 - The FIC count tracks **agent types**, not dynamic instances — bounded and small, well
@@ -70,14 +70,14 @@ Concretely:
 
 Spike outcomes that gate this decision (recorded in the wave-4 runbook
 `docs/team-security-and-capabilities.md (Appendix A)`, currently
-PENDING-LIVE-VERIFICATION against a live tenant + realm; the runbook's spike table
+`PENDING-LIVE-VERIFICATION` against a live tenant + realm; the runbook's spike table
 carries the expected PASS criteria each step asserts):
 
 - **Spike #1** (`docs/spikes/2026-06-10-spike-1-fic-signin-attribution.md`) — expected PASS:
-  the service-principal sign-in log surfaces the matched FIC via federatedCredentialId
+  the service-principal sign-in log surfaces the matched FIC via `federatedCredentialId`
   (resolving back to the named FIC), making per-agent-type attribution an Entra-side, tamper-
   evident artifact. If spike #1 returns FAIL, Variant A's marginal forensic value over
-  Variant B collapses to host logs + traceparent, and the A-vs-B choice must be re-weighed.
+  Variant B collapses to host logs + `traceparent`, and the A-vs-B choice must be re-weighed.
 - **Spike #2** (`docs/spikes/2026-06-10-spike-2-subclaim-fic-matching.md`) — expected PASS:
   the minted `sub` is byte-for-byte `service-account-<client_id>`, survives Entra's case-
   sensitive match (negative control: a single case-flip fails with `AADSTS70021`), and is
@@ -114,23 +114,23 @@ default and is committed here; the runbook Step 3 is gated on the live spike run
 - The 20-FIC cap is a hard ceiling on agent *types* under one app. Exceeding it forces either a
   second trust-boundary app (AD-3) or a fallback to Variant B's single funnel FIC.
 - The attribution benefit is contingent on spike #1 landing PASS against a live tenant. Until the
-  spike is run, the forensic value is a documented expectation (Microsoft's signIns schema
-  includes federatedCredentialId), not an observed result — the decision is committed but its
+  spike is run, the forensic value is a documented expectation (Microsoft's `signIns` schema
+  includes `federatedCredentialId`), not an observed result — the decision is committed but its
   primary justification carries this verification debt.
 - A dynamic/per-instance identity scheme is explicitly out of scope: FICs key on agent type only,
-  so instance-level attribution must come from host logs + traceparent, not from Entra.
+  so instance-level attribution must come from host logs + `traceparent`, not from Entra.
 
 ## Rejected Alternatives
 
-1. **Variant B — one funnel entra-bridge client, one FIC.**
-   A single Keycloak client (entra-bridge) fronts all agents; the `fugue-agents` app carries
+1. **Variant B — one funnel `entra-bridge` client, one FIC.**
+   A single Keycloak client (`entra-bridge`) fronts all agents; the `fugue-agents` app carries
    exactly one FIC whose `subject` is that client's pinned `sub`.
    - Pros: minimal Entra config (one FIC, one subject pinned once, never near the 20-FIC cap);
      the simplest possible federation surface; `sub` is fixed so spike #2's predictability concern
      is trivially satisfied.
    - Cons: collapses all Graph attribution to one identity — the sign-in log and the assertion
      `sub` are identical for every agent, so "which agent made this Graph call?" is answerable
-     only from host logs + traceparent, never Entra-side. Loses the tamper-evident, per-agent-
+     only from host logs + `traceparent`, never Entra-side. Loses the tamper-evident, per-agent-
      type forensic artifact that spike #1 targets, and dilutes per-agent-type identity into a
      shared funnel.
    - Verdict: rejected as the default. Variant B is the documented fallback, chosen only if even

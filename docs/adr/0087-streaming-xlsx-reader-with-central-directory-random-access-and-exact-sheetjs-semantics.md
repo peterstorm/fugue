@@ -25,7 +25,7 @@ Several forces constrain the fix:
   may place those parts after the sheet in the archive.
 - **Behaviour must not change.** Existing callers depend on SheetJS cell
   semantics, including its quirks: dates detected by number format, `Date`s
-  built in the local time zone, the 1900 leap-year bug, date1904, rich text,
+  built in the local time zone, the 1900 leap-year bug, `date1904`, rich text,
   \_xHHHH\_ escapes, error cells and the dimension-merged row range. The
   `parseWorkbook` signature, `Result` shape, error kinds, retriability and
   messages are a published contract (FR-030 to FR-037). Spec AS-009 requires
@@ -50,12 +50,12 @@ Several forces constrain the fix:
      whatever their archive position. Only the decompressed sheet XML is
      streamed. It has small, dependency-free building blocks (fflate, saxes).
      Inflating in slices gives natural points to yield to the event loop.
-   - Cons: Re-implements SheetJS cell semantics (numdate, SSF.is_date,
-     parse_ws_xml range logic, \_xHHHH\_ decoding). That is real code to own
+   - Cons: Re-implements SheetJS cell semantics (`numdate`, `SSF.is_date`,
+     `parse_ws_xml` range logic, \_xHHHH\_ decoding). That is real code to own
      and keep correct, and it needs a differential test against SheetJS. The
      2.1 MB compressed input stays resident for the whole fold.
 
-2. **Forward-only streaming unzip (fflate Unzip) feeding a SAX parser**
+2. **Forward-only streaming unzip (fflate `Unzip`) feeding a SAX parser**
    - Pros: Never needs the whole archive. It is the textbook streaming design.
    - Cons: The input is already fully in memory, so it saves nothing on that
      side. When sharedStrings.xml or styles.xml follows the sheet in the
@@ -69,12 +69,12 @@ Several forces constrain the fix:
      It is heavy. Its cell semantics differ from SheetJS, so parity (AS-009)
      would need adapting either way.
 
-4. **SheetJS with lean options (`dense`, no cellNF or `cellText`)**
+4. **SheetJS with lean options (`dense`, no `cellNF` or `cellText`)**
    - Pros: Smallest change. Parity holds by construction.
    - Cons: It still materialises the whole sheet and misses the 100 MB parse
      budget. It keeps SheetJS as a runtime dependency.
 
-5. **Expose rows as an AsyncIterable instead of a fold**
+5. **Expose rows as an `AsyncIterable` instead of a fold**
    - Pros: A familiar consumer shape that composes with `for await`.
    - Cons: Consumer abandonment (`break`, a thrown error) needs a cleanup path
      through `return()`. Backpressure and accumulation are split across the
@@ -128,7 +128,7 @@ sheet's XML through a SAX row assembler into a fold, and reproduces SheetJS
 
 - **Dates.** A cell is a date when its number format is one of the built-in ids
   14–22, 27–36, 45–47 or 50–58, or a custom format string that passes a port of
-  SSF.is_date. Serial-to-`Date` conversion ports numdate. It uses the local
+  `SSF.is_date`. Serial-to-`Date` conversion ports `numdate`. It uses the local
   time zone, keeps the 1900 leap-year bug for serials ≤ 60, and honours
   `workbookPr date1904`.
 - **Strings.** Shared strings, inline strings (`t="inlineStr"`) and formula
@@ -137,7 +137,7 @@ sheet's XML through a SAX row assembler into a fold, and reproduces SheetJS
 - **Other cell types.** Booleans (`t="b"`) are supported. Error cells (`t="e"`)
   become `null`. Formula cells use their cached `<v>` and are never evaluated.
 - **Row range.** `<dimension ref>` is merged with the observed cells as
-  parse_ws_xml does. Rows and cells with no `r` attribute advance implicitly.
+  `parse_ws_xml` does. Rows and cells with no `r` attribute advance implicitly.
 - **Sheet selection.** By exact name, or by 1-based index in `workbook.xml`
   `<sheets>` order, resolved through the rels.
 - **Rows.** Row objects are prototype-free. Blank header columns are skipped. A
@@ -157,7 +157,7 @@ a duplicate header, a foreign handle, and an invalid `yieldEveryBytes`.
 - `packages/xlsx/src/__tests__/parity.test.ts` runs the new reader against the
   SheetJS oracle (`packages/xlsx/src/__tests__/support/sheetjs-oracle.ts`) on deterministic
   synthetic fixtures (`packages/xlsx/src/__tests__/support/fixtures.ts`). It runs in-process, then
-  again in child processes with TZ pinned before module load (AS-009, AS-014,
+  again in child processes with `TZ` pinned before module load (AS-009, AS-014,
   AS-017). `real-data.local.test.ts` is an opt-in run of the same comparison on
   real workbooks.
 - `packages/xlsx/src/__tests__/memory-budget.test.ts` spawns
@@ -201,14 +201,14 @@ cadence with `yieldEveryBytes`.
   lighter, and the Bun-hostile ExcelJS is gone from production.
 
 **Negative:**
-- fugue now owns a port of SheetJS internals: numdate, SSF.is_date, the
-  parse_ws_xml range rules and string decoding. Any change risks drift. The
+- fugue now owns a port of SheetJS internals: `numdate`, `SSF.is_date`, the
+  `parse_ws_xml` range rules and string decoding. Any change risks drift. The
   differential suite is the only safeguard, and it covers only what the
   fixtures exercise.
-- Parity is deliberately bug-compatible. Dates depend on the process TZ, and
+- Parity is deliberately bug-compatible. Dates depend on the process `TZ`, and
   the 1900 leap-year bug is kept. The same bytes give different instants under
   different time zones. This is safe only because production containers run in
-  UTC and the tests pin TZ.
+  UTC and the tests pin `TZ`.
 - The whole compressed input and the full shared-strings table stay resident
   for the life of a handle. A workbook with a huge shared-strings table can
   still be large. The bound holds per row, not overall.

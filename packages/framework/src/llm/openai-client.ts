@@ -159,7 +159,7 @@ function responseFailedError(
 /**
  * Annotation for `response.status === "incomplete"` messages. Names the API's
  * stated reason (`incomplete_details.reason`) when present, so the two
- * truncation causes (max_output_tokens vs content_filter) are
+ * truncation causes (`max_output_tokens` vs `content_filter`) are
  * distinguishable from the error message alone — mirrors how `error.code`
  * is surfaced on the failed arm.
  */
@@ -383,9 +383,9 @@ export class OpenAILlmClient implements LlmClient {
       }
 
       // `response.status === "incomplete"` means the output was TRUNCATED or
-      // filtered (see `incomplete_details.reason`). max_output_tokens is
+      // filtered (see `incomplete_details.reason`). `max_output_tokens` is
       // deterministic — the identical request hits the identical cap.
-      // content_filter is NOT guaranteed to reproduce (filtering depends on
+      // `content_filter` is NOT guaranteed to reproduce (filtering depends on
       // the sampled output), but it signals a policy response to this input,
       // so retrying against the budget is not worth it. Hence a non-retriable
       // failure on every arm below (mirrors the Anthropic stop_reason
@@ -552,9 +552,9 @@ export class OpenAILlmClient implements LlmClient {
 
         // `response.status === "incomplete"` means this turn's output was
         // TRUNCATED or filtered (see `incomplete_details.reason`) — the tool
-        // calls / final answer are unreliable. max_output_tokens is
+        // calls / final answer are unreliable. `max_output_tokens` is
         // deterministic (the identical request hits the identical cap);
-        // content_filter is NOT guaranteed to reproduce (filtering depends
+        // `content_filter` is NOT guaranteed to reproduce (filtering depends
         // on the sampled output) but signals a policy response to this input,
         // so retrying against the budget is not worth it. Hence a
         // non-retriable failure (mirrors the Anthropic stop_reason max_tokens

@@ -12,7 +12,7 @@ Single-host multi-tenancy (`.claude/plans/2026-06-18-multi-tenant-single-host.md
 **AD-4**) gives each tenant's worker a **Redis ACL user scoped to one key
 prefix**: `~fugue:<tenant>:*`, `+@all` within that keyspace. A compromised /
 RCE'd worker that runs `SCAN fugue:*` or `GET fugue:<other>:...` is then
-**refused by Redis** with a NOPERM error — isolation is enforced by Redis, not
+**refused by Redis** with a `NOPERM` error — isolation is enforced by Redis, not
 by application code the attacker controls.
 
 That ACL scoping is only **sound if no key escapes the tenant prefix.** Before
@@ -218,7 +218,7 @@ spawns fail closed (`worker-unavailable`) — leave the flag off until the admin
 credential is provisioned.
 
 Verify isolation (SC-001): connected as `fugue-tenant-<tenantA>`, the following must
-return NOPERM, proving zero bytes escape the prefix:
+return `NOPERM`, proving zero bytes escape the prefix:
 
 ```
 SCAN 0 MATCH fugue:*
@@ -238,4 +238,4 @@ GET  fugue:<tenantB>:tokens:<anyhash>
       revoke/list/resolve never cross tenants.
 - [ ] `tenantId` rejects a `:`-containing id AND a glob-metacharacter id (`*`,
       `?`, `[`, `]`) — see `packages/host/src/__tests__/domain/tenant.test.ts`.
-- [ ] After rekey: `SCAN fugue:*` as a tenant ACL user returns NOPERM.
+- [ ] After rekey: `SCAN fugue:*` as a tenant ACL user returns `NOPERM`.

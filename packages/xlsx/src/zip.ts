@@ -12,7 +12,7 @@
  * values (`ZipError`), never exceptions.
  *
  * Mirrors SheetJS's reader where it matters: entries are found by path
- * case-insensitively (safegetzipfile), the encrypted-flag mask is `0x2041`, and
+ * case-insensitively (`safegetzipfile`), the encrypted-flag mask is `0x2041`, and
  * only STORED (0) and DEFLATE (8) are supported. ZIP64 is refused: no Office
  * workbook needs it, and a 4 GiB part is far beyond the inflate cap anyway.
  */

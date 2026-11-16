@@ -53,7 +53,7 @@ export interface EventLogReader {
 
   /**
    * Read only events recorded in the half-open interval `[fromMs, toMs)`.
-   * Backends that can push the filter down (Redis: XRANGE with
+   * Backends that can push the filter down (Redis: `XRANGE` with
    * ms-prefixed entry IDs) should do so. Backends without ID-based
    * filtering should filter post-fetch.
    */
@@ -197,7 +197,7 @@ export interface DeadLetterOpts {
    * Called only when `attempts >= max` (i.e. job is exhausted).
    *
    * Receives `id` (the job id) and `err` (the raw error value from `onFailed`) so callers can
-   * route notifications based on job identity or error type without needing a separate getData
+   * route notifications based on job identity or error type without needing a separate `getData`
    * lookup. This matches the `WorkerHandle.onFailed` signature which does not expose job data.
    */
   readonly getRecipients: (id: string, err: unknown) => readonly string[];

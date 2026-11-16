@@ -90,8 +90,8 @@ export const buildCdratorCapability = (
     //
     // UPPERCASED: CDRator matches this header value CASE-SENSITIVELY. A lowercase
     // `oister` 404s ("Requested resource does not exist") even with a valid token;
-    // the UPPERCASE OISTER resolves (verified live 2026-06-26: header `oister` →
-    // 404, OISTER → 200 for the same account). The token's `brand_key` FORM field
+    // the UPPERCASE `OISTER` resolves (verified live 2026-06-26: header `oister` →
+    // 404, `OISTER` → 200 for the same account). The token's `brand_key` FORM field
     // is case-insensitive and stays as configured (lowercase, matching Java
     // Brand.Oister.name() = "oister") — only THIS header must be uppercase, exactly
     // as boost-mcp's RatorAccountClient sends `brand().toUpperCase()`.

@@ -34,7 +34,7 @@ const localName = (qname: string): string => {
   return colon < 0 ? qname : qname.slice(colon + 1);
 };
 
-/** Attribute by local name (`r:id` answers `"id"`); the last match wins, as in SheetJS parsexmltag. */
+/** Attribute by local name (`r:id` answers `"id"`); the last match wins, as in SheetJS `parsexmltag`. */
 export const attrLocal = (attrs: XmlAttrs, name: string): string | undefined => {
   let found: string | undefined;
   for (const key of Object.keys(attrs)) if (localName(key) === name) found = attrs[key];

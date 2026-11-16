@@ -107,13 +107,13 @@ absorbing.
   the snapshots to the machine as event data.
 - It never uses `Promise.all`, and it never returns while a slot is pending.
 
-D3 (adaptive concurrency) extends the event union with throttle and adds a
+D3 (adaptive concurrency) extends the event union with `throttle` and adds a
 target to the state. Nothing in D1 needs reshaping for that.
 
 **Rejected alternatives:**
 - A fully command-driven scheduler. It spreads a 15-line body over about six
   round trips and turns the interpreter into an effect runtime.
-- A generic BoundedPool with policy plug-ins. It is abstraction ahead of need:
+- A generic `BoundedPool` with policy plug-ins. It is abstraction ahead of need:
   there is one consumer, and static siblings deliberately get no projection.
 
 ### 3. Budget authority stays at the root (AD-7)
@@ -498,7 +498,7 @@ infrastructure.
     Co_eff × Ci_eff.
   - Until D2, nested maps remain refused (ADR-0086), so a fan's peak is C.
 - **D3: adaptive and static siblings.** An AIMD target within `[1, C]` driven by
-  provider throttling, and an authored siblingConcurrency on static fan-out
+  provider throttling, and an authored `siblingConcurrency` on static fan-out
   waves under the same host cap.
 
 ## Related

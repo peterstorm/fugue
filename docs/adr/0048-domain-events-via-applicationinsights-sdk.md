@@ -16,7 +16,7 @@ identity. These are exactly the signals raw spans do not directly express, and t
 requirements FR-018, FR-019, and FR-020.
 
 Two forces shape the decision. First, the destination is fixed: Foundry's monitoring view
-queries Application Insights customEvents and customMetrics, against the same backend and
+queries Application Insights `customEvents` and `customMetrics`, against the same backend and
 connection string the trace exporter already uses — the connection-string config surface is
 established in ADR-0050 and the exporter composition in ADR-0044, while ADR-0047 establishes the
 Azure / Foundry SDKs as hard dependencies. Second, the framework's
@@ -31,8 +31,8 @@ metrics API, additional OTel spans, or the Application Insights Node SDK directl
 
 ## Options Considered
 
-1. **OpenTelemetry metrics API** (MeterProvider + PeriodicExportingMetricReader +
-   AzureMonitorMetricExporter)
+1. **OpenTelemetry metrics API** (`MeterProvider` + `PeriodicExportingMetricReader` +
+   `AzureMonitorMetricExporter`)
    - Pros: Vendor-neutral instrument types; consistent with the OTel tracing channel
    - Cons: Stands up a second pipeline (meter provider, periodic reader, a separate exporter)
      for the *same* Application Insights destination already reached by the trace exporter —
@@ -50,7 +50,7 @@ metrics API, additional OTel spans, or the Application Insights Node SDK directl
      and metrics
 
 3. **Application Insights Node SDK directly** (`TelemetryClient.trackEvent` / `trackMetric`)
-   - Pros: customEvents + customMetrics are precisely what the Foundry monitoring view
+   - Pros: `customEvents` + `customMetrics` are precisely what the Foundry monitoring view
      queries; `trackEvent` carries arbitrary typed properties (run id, dag id, node id, reason,
      chosen/pruned targets) and `trackMetric` supports pre-aggregated values with dimensions — a
      direct fit for FR-018/019/020 with one SDK and one connection string already used by the
@@ -107,8 +107,8 @@ framework would carry it on the event channel too — the framework imposes no c
 ## Consequences
 
 **Positive:**
-- Direct fit for the Foundry monitoring view: events become customEvents, metrics become
-  customMetrics, queryable with no translation layer.
+- Direct fit for the Foundry monitoring view: events become `customEvents`, metrics become
+  `customMetrics`, queryable with no translation layer.
 - One SDK and one connection string for both trace export (ADR-0047) and the domain-event/metric
   channel — no second pipeline, fewer moving parts (SIMPLICITY).
 - "No orphaned domain events" is structurally guaranteed, not merely tested: the shared

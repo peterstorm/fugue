@@ -4,7 +4,7 @@
  *   - The REAL `createBunInitProcessAdapter` behavior (spawn → exit code,
  *     beginTermination forwards a signal, onSigchld install/uninstall) — always.
  *   - End-to-end PID-1 reaping under a real PID namespace via `init-reap-harness.ts`
- *     — gated on unshare (skipped where PID namespaces are unavailable, e.g. some
+ *     — gated on `unshare` (skipped where PID namespaces are unavailable, e.g. some
  *     CI sandboxes); the harness asserts zero zombies + a non-hanging restart loop.
  */
 

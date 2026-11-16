@@ -58,10 +58,10 @@ The forces on that choice:
    - Cons: Bun's compatibility layer for `node:zlib` streams is a moving target.
      The streaming API is asynchronous per chunk, which turns the deterministic
      fold into event-driven code and makes back-pressure and the size cap harder
-     to reason about. inflateRawSync per slice does not keep inflater state
+     to reason about. `inflateRawSync` per slice does not keep inflater state
      across slices.
 
-3. **sax (the original sax-js package)**
+3. **`sax` (the original sax-js package)**
    - Pros: widely used and familiar. A similar SAX event model.
    - Cons: less strict than saxes (non-strict mode tolerates malformed input by
      default) and less actively maintained. saxes is its maintained, stricter
@@ -97,7 +97,7 @@ Where each dependency is used:
 
 - **fflate** is used in production code only in `packages/xlsx/src/zip.ts`. Tests
   (`stream-api.test.ts`, `zip.test.ts`, `cell-value.property.test.ts`) also import
-  strToU8 and zipSync from it to build small test archives. `zip.ts` reads the ZIP central
+  `strToU8` and `zipSync` from it to build small test archives. `zip.ts` reads the ZIP central
   directory over the in-memory bytes. `inflateSync` handles small parts (workbook,
   rels, styles, shared strings), and `Inflate` streams the selected worksheet in
   compressed slices. Both enforce `DEFAULT_MAX_ENTRY_BYTES` (512 MiB per entry),

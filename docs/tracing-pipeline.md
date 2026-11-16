@@ -71,7 +71,7 @@ Inputs/outputs are stored via `SpanAttributeRegistry` as `mlflow.spanInputs` / `
 
 OTel's JS SDK only accepts primitive attribute values (`string | number | boolean | Array<...>`). Calling `span.setAttribute("mlflow.llm.cost", {input_cost: 0.001})` is silently dropped.
 
-MLflow's server expects `mlflow.llm.cost` as a **structured object** (decoded from protobuf kvlist_value).
+MLflow's server expects `mlflow.llm.cost` as a **structured object** (decoded from protobuf `kvlist_value`).
 
 ### Solution: SpanAttributeRegistry
 
@@ -88,7 +88,7 @@ SpanAttributeRegistry.set(spanId, {
 });
 ```
 
-At export time the exporter wraps each `ReadableSpan` in a `Proxy` whose `attributes` getter merges the registry entry on top of the underlying primitive attributes — the original span object is never mutated. The otlp-transformer handles objects natively (emits kvlist_value), bypassing the SDK's validation.
+At export time the exporter wraps each `ReadableSpan` in a `Proxy` whose `attributes` getter merges the registry entry on top of the underlying primitive attributes — the original span object is never mutated. The `otlp-transformer` handles objects natively (emits `kvlist_value`), bypassing the SDK's validation.
 
 ### Declarative translator tables
 
@@ -143,16 +143,16 @@ const handle = await initTracing({
 
 ## Why Not Use MlflowSpanExporter?
 
-The `@mlflow/core` JS SDK's MlflowSpanExporter uses a different path:
+The `@mlflow/core` JS SDK's `MlflowSpanExporter` uses a different path:
 - `POST /api/3.0/mlflow/traces` (StartTraceV3) — creates trace metadata in SQL
 - `PUT .../traces.json` — uploads spans as JSON artifacts
 
-This path **does not populate span_metrics** because:
+This path **does not populate `span_metrics`** because:
 1. Spans are stored as artifacts, not parsed by log_spans()
 2. The server never extracts `mlflow.llm.cost` from artifact data
-3. The Cost Breakdown card queries span_metrics which remains empty
+3. The Cost Breakdown card queries `span_metrics` which remains empty
 
-The OTLP path (`POST /v1/traces`) goes through log_spans() which extracts cost from span attributes and writes to span_metrics.
+The OTLP path (`POST /v1/traces`) goes through log_spans() which extracts cost from span attributes and writes to `span_metrics`.
 
 ## Multi-Backend Trace Export (MLflow + Azure AI Foundry)
 

@@ -326,7 +326,7 @@ in the run. Two persistence rules apply on top of the enumeration:
 **`context`** — the `DagMachineContext`. The *accumulated work*:
 - `outputs: Map<nodeId, unknown>` — the bag of intermediate node results.
   This is the "data the graph has gathered so far": the CRM payload from
-  `fetch-customer`, the deal list from fetch-deals, the cleaned record
+  `fetch-customer`, the deal list from `fetch-deals`, the cleaned record
   from `transform`, etc. Keyed by node id.
 - `retries: Map<nodeId, number>` — per-node attempt counter at the
   machine level. Distinct from BullMQ's `attemptsMade` — that's the
@@ -391,7 +391,7 @@ picks it up. That worker:
 1. Reads `data` from the BullMQ job hash → gets the envelope above.
 2. `runStateMachine` re-enters the loop with
    `state = running { wave: 2 }`, `context.outputs` pre-populated with
-   `fetch-customer` and fetch-deals results.
+   `fetch-customer` and `fetch-deals` results.
 3. The executor's `running` branch starts wave 2 (`["transform"]`), runs
    `transform` with its input materialized from
    `context.outputs.get("fetch-customer")`.
@@ -589,7 +589,7 @@ the right state:
      machine, initial, untilMs)` answers "what was the state just before
      `untilMs`?". Server-side variant: `reader.readEventsBetween(
      queueName, jobId, fromMs, toMs)` pushes the filter into Redis
-     (XRANGE with ms-prefixed bounds) so large logs don't transit the
+     (`XRANGE` with ms-prefixed bounds) so large logs don't transit the
      wire just to be discarded.
 
    ##### How to address a stream
@@ -750,7 +750,7 @@ opens **two** logical Redis usages:
    client used inside workers).
 2. **BullMQ's internal connection pool** — created when you instantiate
    `new Queue` and `new Worker`. BullMQ manages this internally; it uses
-   blocking commands (BRPOPLPUSH, BZPOPMIN) which is why it needs its
+   blocking commands (`BRPOPLPUSH`, `BZPOPMIN`) which is why it needs its
    own pool.
 
 #### Producer side
@@ -781,7 +781,7 @@ backend.createWorker("summarize", async (jobLike) => {
 |---|---|
 | `data` (getter) | `deserializeValue(job.data)` — no Redis hit; the worker already fetched the job's hash into memory when it picked the job up. Returns the `{state, context}` envelope (see §4 "checkpoint envelope") |
 | `updateData(d)` | `job.updateData(serializeValue(d))` → `HSET bull:{queueName}:{jobId} data <json>` — overwrites the `data` field on the per-job hash with the new envelope |
-| `updateProgress(pct)` | `job.updateProgress(pct)` → `HSET bull:{queueName}:{jobId} progress <pct>` — surfaces in BullMQ Board and QueueEvents listeners |
+| `updateProgress(pct)` | `job.updateProgress(pct)` → `HSET bull:{queueName}:{jobId} progress <pct>` — surfaces in BullMQ Board and `QueueEvents` listeners |
 | `appendEvent(e)` | direct `redis.xadd` against the shared connection: `XADD events:{queueName}:{jobId} MAXLEN ~ N * type <t> payload <json>` (see §5.2) |
 
 A real BullMQ job hash mid-run might look like:
@@ -873,7 +873,7 @@ XADD events:{queueName}:{jobId} MAXLEN ~ 10000 ${recordedAtMs}-* type <type> pay
   exact `MAXLEN 10000` (slower; rarely needed).
 - **`${recordedAtMs}-*`** — entry ID. The millisecond portion is **pinned
   to the envelope's `recordedAtMs`**; Redis auto-assigns the seq portion
-  (`-0`, `-1`, …) on collision. This ensures XRANGE bounds (used by
+  (`-0`, `-1`, …) on collision. This ensures `XRANGE` bounds (used by
   `readEventsBetween`, see below) align exactly with `recordedAtMs` —
   filtering by entry ID *is* filtering by `recordedAtMs`.
 - **Two fields**: `type` (string, derived from `event.type` for cheap

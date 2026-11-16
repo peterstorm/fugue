@@ -19,7 +19,7 @@ The hard part is not storage. It is that spend accrues **per call**, concurrentl
 ## Options Considered
 
 1. **A ledger port storing spend across a hash plus set**
-   - Pros: `Spend`'s monoid is (sum, sum, sum, set-union), mapped directly to HINCRBY and `SADD`.
+   - Pros: `Spend`'s monoid is (sum, sum, sum, set-union), mapped directly to `HINCRBY` and `SADD`.
    - Cons: the two keys cannot be read as one snapshot. Independent expiry can erase unpriced evidence while numeric spend survives, and `HGETALL` followed by `SMEMBERS` has an expiry-between-reads race even if writes use one transaction. Rejected.
 
 2. **Store spend in the checkpoint (`RunMeta`)**

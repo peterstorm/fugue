@@ -249,7 +249,7 @@ export interface HumanInterventionEvent {
  * equivalence and trace consumers are not taught about them.
  *
  * The union stays CLOSED but EXTENSIBLE (AD-2): D3 (adaptive concurrency)
- * later adds a throttle event and an adaptiveTarget field WITHOUT
+ * later adds a `throttle` event and an `adaptiveTarget` field WITHOUT
  * reshaping any variant. Keep field shapes stable and additive — never
  * repurpose or retype an existing field.
  *

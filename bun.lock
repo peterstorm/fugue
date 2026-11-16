@@ -7,7 +7,7 @@
       "devDependencies": {
         "@opentelemetry/api": "^1.9.1",
         "@opentelemetry/sdk-node": "^0.215.0",
-        "@peterstorm/loom": "github:peterstorm/loom#bedb4620216825a0c0906f1d7c0d8ee72e8f0b8c",
+        "@peterstorm/loom": "github:peterstorm/loom#cf163352bb7c07a3e9c2458932ed9c85436c9477",
         "@types/bun": "1.4.1",
         "ts-pattern": "^5.9.0",
         "typescript": "^6.0.3",
@@ -469,7 +469,7 @@
 
     "@opentelemetry/winston-transport": ["@opentelemetry/winston-transport@0.27.0", "", { "dependencies": { "@opentelemetry/api-logs": "^0.217.0", "winston-transport": "4.*" } }, "sha512-Imeoqm9CqxSJRo6INwtOn1Kx2XXYZzkyrH6q2teIDJ7ZypKx7DRf23l5ylQZ3vYibkcCLIANbzpeMqCNPp4CEw=="],
 
-    "@peterstorm/loom": ["@peterstorm/loom@github:peterstorm/loom#bedb462", { "dependencies": { "ts-pattern": "^5.9.0", "zod": "4.3.6" }, "peerDependencies": { "@earendil-works/pi-ai": "*", "@earendil-works/pi-coding-agent": "*", "@earendil-works/pi-tui": "*", "typebox": "*" } }, "peterstorm-loom-bedb462", "sha512-2xAbGz1AJgNdnxIwW96CDg7AW04+EVsMMGByXEB+QUtDpgIfeaGRQc88Gjsei5yOOxCWebv0TCYG2HbJwgg+SQ=="],
+    "@peterstorm/loom": ["@peterstorm/loom@github:peterstorm/loom#cf16335", { "dependencies": { "ts-pattern": "^5.9.0", "zod": "4.3.6" }, "peerDependencies": { "@earendil-works/pi-ai": "*", "@earendil-works/pi-coding-agent": "*", "@earendil-works/pi-tui": "*", "typebox": "*" } }, "peterstorm-loom-cf16335", "sha512-JT03295p92bFI3U2fUaS6tJylUKpmPI0MRcZ+hSrFAlMlNFPQO1h6HDfshpkV6qZ/UpQeP7yVkYDRWm+lqWmeg=="],
 
     "@protobufjs/aspromise": ["@protobufjs/aspromise@1.1.2", "", {}, "sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ=="],
 

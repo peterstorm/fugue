@@ -4,7 +4,7 @@
  * workbook rels map each sheet's `r:id` to its part path.
  *
  * Pure: XML strings in, values out. Path resolution follows SheetJS 0.18.5
- * parse_zip exactly, including its fallbacks, so the same sheet part is read.
+ * `parse_zip` exactly, including its fallbacks, so the same sheet part is read.
  */
 
 import type { Result } from "@fuguejs/framework";
@@ -113,7 +113,7 @@ export const parseRelationships = (xml: string): Result<ReadonlyMap<string, Rela
   return parsed.ok ? ok(rels) : err(parsed.error);
 };
 
-/** SheetJS parse_zip: xl/workbook.xml → xl/_rels/workbook.xml.rels. */
+/** SheetJS `parse_zip`: xl/workbook.xml → xl/_rels/workbook.xml.rels. */
 export const workbookRelsPath = (workbookPath: string): string => {
   const slash = workbookPath.lastIndexOf("/");
   return stripFrontSlash(`${workbookPath.slice(0, slash + 1)}_rels/${workbookPath.slice(slash + 1)}.rels`);

@@ -273,7 +273,7 @@ acknowledgement of an earlier logical write. `FreshnessIndex` therefore exposes
 `hasRecordedWrite(identity)` separately from `findConflict(conditionedOn,
 sinceMs)`. Emission asks the acknowledgement question first and suppresses both
 observer and index duplication when it is true. Redis answers with exact-member
-ZSCORE; the in-memory adapter keeps an identity-key ledger; the file singleton
+`ZSCORE`; the in-memory adapter keeps an identity-key ledger; the file singleton
 atomically carries a TTL-bounded `acknowledgedWriteKeys` set alongside its one
 latest conflict candidate. The file set is not conflict history and is never
 used by `findConflict`.

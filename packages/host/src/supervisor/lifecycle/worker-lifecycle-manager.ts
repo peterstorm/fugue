@@ -130,7 +130,7 @@ interface WorkerLifecycleDeps {
   /**
    * The pure worker-lifecycle ADT, injectable so tests can force an ADT
    * invariant violation (e.g. a `beginDrain` rejection on a confirmed-live
-   * worker) WITHOUT a process-global mock.module — bun 1.3.x module mocks
+   * worker) WITHOUT a process-global `mock.module` — bun 1.3.x module mocks
    * are not reliably restorable and leak into other test files sharing the
    * worker process (worker-lifecycle.test.ts failed intermittently with the
    * manager test's fixture error). Production callers omit it: the real ADT

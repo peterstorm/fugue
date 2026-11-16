@@ -123,7 +123,7 @@ describe("validateRealmJwtClaims", () => {
     it("canonicalizes mixed-case / whitespace team claims (issuer 'Team-A' must authorize a registered 'team-a')", () => {
       // The ingestion boundary lowercases + trims so a verified claim `===`-matches
       // the registered, always-canonical team in canAccessDag — otherwise a member
-      // of `team-a` whose issuer emits Team-A is wrongly 403'd (fail-closed bug).
+      // of `team-a` whose issuer emits `Team-A` is wrongly 403'd (fail-closed bug).
       const res = validate(baseClaims({ teams: ["Team-A", "  BETA  "] }));
       expect(res.ok).toBe(true);
       if (res.ok) expect(res.value.teams).toEqual([markTeam("team-a"), markTeam("beta")]);

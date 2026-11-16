@@ -53,8 +53,8 @@ const docs = createMsGraphAdapter({
 const sharedInfra = { ...infra, capabilities: [docs] };
 ```
 
-**Least privilege:** for SharePoint, grant the Entra app Sites.Selected
-(scoped to the specific site) rather than tenant-wide Sites.Read.All.
+**Least privilege:** for SharePoint, grant the Entra app `Sites.Selected`
+(scoped to the specific site) rather than tenant-wide `Sites.Read.All`.
 
 ## Using it in a node
 

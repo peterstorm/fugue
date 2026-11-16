@@ -1,7 +1,7 @@
 # Customer Summary Eval
 
 Evaluates the customer-summary service using MLflow GenAI scorers, with an
-optional Foundry-native scoring backend (azure-ai-evaluation).
+optional Foundry-native scoring backend (`azure-ai-evaluation`).
 
 ## What it does
 
@@ -14,8 +14,8 @@ optional Foundry-native scoring backend (azure-ai-evaluation).
    - **grounding** — deterministic checks against fixture data (no LLM needed)
 4. Fails if aggregate mean < 4.0
 
-(Scorer names are defined in `scorers.py`: SCORER_NAMES /
-DETERMINISTIC_SCORER_NAMES.)
+(Scorer names are defined in `scorers.py`: `SCORER_NAMES` /
+`DETERMINISTIC_SCORER_NAMES`.)
 
 ## Modes
 
@@ -34,7 +34,7 @@ the SAME Azure OpenAI judge credentials (`AZURE_OPENAI_*`).
 | Backend | Selector | Scoring engine | Results land in |
 |---|---|---|---|
 | `mlflow` (default) | `--backend=mlflow` / `EVAL_BACKEND=mlflow` | mlflow.evaluate() | MLflow experiment / Evaluations tab |
-| `foundry` | `--backend=foundry` / `EVAL_BACKEND=foundry` | azure-ai-evaluation | Foundry Evaluations view |
+| `foundry` | `--backend=foundry` / `EVAL_BACKEND=foundry` | `azure-ai-evaluation` | Foundry Evaluations view |
 
 **Precedence:** the `--backend` CLI flag wins over the `EVAL_BACKEND` env var,
 which defaults to `mlflow`. (Mirrors the `--mode` / `EVAL_MODE` pattern.)
@@ -44,10 +44,10 @@ be compared 1:1:
 
 | Scorer | MLflow path | Foundry path |
 |---|---|---|
-| answer_correctness | answer_correctness genai metric | SimilarityEvaluator |
-| faithfulness | faithfulness genai metric | GroundednessEvaluator |
-| `relevance` | `relevance` genai metric | RelevanceEvaluator |
-| `grounding` | deterministic score_grounding | deterministic score_grounding (reused) |
+| `answer_correctness` | `answer_correctness` genai metric | `SimilarityEvaluator` |
+| `faithfulness` | `faithfulness` genai metric | `GroundednessEvaluator` |
+| `relevance` | `relevance` genai metric | `RelevanceEvaluator` |
+| `grounding` | deterministic `score_grounding` | deterministic `score_grounding` (reused) |
 
 ## Parity (±0.5)
 
@@ -98,9 +98,9 @@ needs no Azure access.
 |---|---|---|
 | `APP_BASE_URL` | `http://host.containers.internal:3000` | Summary service URL |
 | `MLFLOW_TRACKING_URI` | — | MLflow tracking server (mlflow backend) |
-| MLFLOW_EXPERIMENT_NAME | `Default` | MLflow experiment for eval results |
+| `MLFLOW_EXPERIMENT_NAME` | `Default` | MLflow experiment for eval results |
 | `EVAL_CASES_PATH` | `fixtures/eval/cases.json` | Path to eval cases |
-| EVAL_WORKERS | `4` | Parallel workers for summarize calls |
+| `EVAL_WORKERS` | `4` | Parallel workers for summarize calls |
 | `EVAL_MODE` | `full` | Default mode if --mode not passed |
 | `EVAL_BACKEND` | `mlflow` | Default backend if --backend not passed (`mlflow`\|`foundry`\|`both`); --backend wins |
 | `AZURE_OPENAI_ENDPOINT` | — | Azure OpenAI endpoint (judge creds, reused by both backends) |

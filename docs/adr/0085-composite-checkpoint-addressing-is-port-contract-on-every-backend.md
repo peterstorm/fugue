@@ -79,7 +79,7 @@ FR-023's *outcome* for stored data is preserved; only its restriction on new add
 - ADR-0075's recorded negative is closed rather than left stale.
 
 **Negative:**
-- The Redis nodes hash may now contain both n1 and `dag@n1@0@0` for one node. They are distinct
+- The Redis nodes hash may now contain both `n1` and `dag@n1@0@0` for one node. They are distinct
   normalized addresses by ADR-0075's injectivity argument, and `parseCompositeNodeKey` classifies
   either — but readers walking `RunState.nodes` must use it rather than assume bare node ids. This
   was already true for the file backend.

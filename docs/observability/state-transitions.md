@@ -208,7 +208,7 @@ const dag = defineDag({
 
 ### Event sequence with freshness violation
 
-Another process writes `version=43` to the same order between `fetch-order` completing (version=42) and execute-refund starting.
+Another process writes `version=43` to the same order between `fetch-order` completing (version=42) and `execute-refund` starting.
 
 ```json
 [
@@ -270,7 +270,7 @@ Another process writes `version=43` to the same order between `fetch-order` comp
 ]
 ```
 
-**What an operator sees:** The `freshness-violation` event immediately shows that execute-refund acted on stale data (version 42, superseded by version 43 from run-xyz). The `human-intervention` event shows Alice approved despite the violation, seeing the stale witness in her `priorWitnesses` context.
+**What an operator sees:** The `freshness-violation` event immediately shows that `execute-refund` acted on stale data (version 42, superseded by version 43 from `run-xyz`). The `human-intervention` event shows Alice approved despite the violation, seeing the stale witness in her `priorWitnesses` context.
 
 ---
 

@@ -16,7 +16,7 @@
  * Inherited comments are verbatim too. In particular, the "`dense: false` keeps
  * address-keyed access" note inside `oracleParse` does not refer to an option
  * this call passes: it describes SheetJS's DEFAULT (sparse, address-keyed) sheet
- * mode, which the XLSX.read call gets by omitting `dense`.
+ * mode, which the `XLSX.read` call gets by omitting `dense`.
  *
  * This file is the ONLY non-`*.test.ts` file allowed to import `xlsx` (INV-1).
  *
@@ -130,7 +130,7 @@ export const oracleParse = async <T>(
 
   let wb: XLSX.WorkBook;
   try {
-    // cellDates surfaces date cells as `Date` (preserving the contract); SheetJS
+    // `cellDates` surfaces date cells as `Date` (preserving the contract); SheetJS
     // reads into a compact cell map. `dense: false` keeps address-keyed access.
     wb = XLSX.read(Buffer.from(bytes), { type: "buffer", cellDates: true });
   } catch (e) {
@@ -377,7 +377,7 @@ export type SuiteRun =
 const PACKAGE_ROOT = resolve(dirname(import.meta.path), "../../..");
 
 /**
- * The child's environment: TZ pinned, and `FUGUE_REAL_DATA_DIR` made absolute.
+ * The child's environment: `TZ` pinned, and `FUGUE_REAL_DATA_DIR` made absolute.
  * The child runs from the package root, so a relative directory must be
  * resolved against the parent's `cwd` before it is handed over.
  */

@@ -462,7 +462,7 @@ tuple.
 
 You could fix this by making node helpers themselves aware of an id
 union, e.g. `createTransformNode<I, O, const Id, AllIds>(...)`. But
-then every helper invocation must explicitly thread the AllIds union
+then every helper invocation must explicitly thread the `AllIds` union
 in — back to the same ergonomic problem as Option A, plus repetition.
 
 #### Option C — Closure-scoped DSL
@@ -688,7 +688,7 @@ What this **costs**:
 
 - **Coverage gap.** Some real-world routing logic doesn't fit a fixed
   vocabulary: "if any element of `output.items` has `score > 0.8`."
-  You'd need to extend the DSL with field-some / field-every
+  You'd need to extend the DSL with `field-some` / `field-every`
   primitives. Eventually you're building a query language. There's a
   long tail of "weird routing logic that doesn't fit" — at some point
   authors will want to escape the DSL.
@@ -719,7 +719,7 @@ Not a real fix. Skip.
 
 #### Option C — AST inspection at construction time
 
-When `defineDag` sees a function guard, parse it (e.g. via acorn),
+When `defineDag` sees a function guard, parse it (e.g. via `acorn`),
 walk the AST, reject if it references anything outside its parameter:
 no globals, no closure variables, no `await`, no `Date.now`.
 
@@ -740,7 +740,7 @@ What this costs:
 - Function source isn't always available (minifiers, transpilers,
   inlined functions, anonymous arrow functions defined inline). The
   detection is unreliable.
-- False negatives are easy: `(o) => o[evilKey]` where evilKey is a
+- False negatives are easy: `(o) => o[evilKey]` where `evilKey` is a
   closed-over computed property name. AST inspection passes but the
   guard is impure.
 - "Pure" in JS isn't a clean category — `o.toString()` could be

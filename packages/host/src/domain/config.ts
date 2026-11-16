@@ -298,7 +298,7 @@ export const HostConfigSchema = z.object({
    *
    * KEYS ARE REAL KEYCLOAK CLIENT IDS (FR-040 (keycloak-entra-wiring)): a DAG id is first resolved to its
    * agent-type client id through `AGENT_CLIENT_MAP` (`agentClientIdForDag`), and
-   * the resulting REAL client id (fugue-agent-mail, …) is what the broker's
+   * the resulting REAL client id (`fugue-agent-mail`, …) is what the broker's
    * fail-closed gate looks up here. They are NOT DAG ids — the dagId→client
    * placeholder identity is gone.
    */

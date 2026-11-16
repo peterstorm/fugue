@@ -34,7 +34,7 @@ createFetchNode({
 
 Every `localPath` resolves *relative to* `rootDir` and is rejected
 (non-retriable) if it escapes (`../` traversal, absolute paths) — the local
-equivalent of SharePoint's Sites.Selected. Confinement is **lexical**; for
+equivalent of SharePoint's `Sites.Selected`. Confinement is **lexical**; for
 untrusted input over symlinked roots, mount the volume read-only and/or disallow
 symlink-following at the mount.
 

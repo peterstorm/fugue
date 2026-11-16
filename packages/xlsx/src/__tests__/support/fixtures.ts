@@ -5,8 +5,8 @@
  * Two writers produce the bytes, on purpose:
  * - A raw OOXML writer (`renderWorkbook` → `zipParts`) that controls every byte
  *   SheetJS semantics depend on: shared vs inline vs formula strings, rich runs
- *   and phonetic `rPh` runs, _xHHHH_ escapes, built-in and custom number
- *   formats, date1904, error cells, cached and uncached formulas, missing `r`
+ *   and phonetic `rPh` runs, `_xHHHH_` escapes, built-in and custom number
+ *   formats, `date1904`, error cells, cached and uncached formulas, missing `r`
  *   attributes, row/column gaps and wrong `<dimension>` refs.
  * - ExcelJS, for the shapes real exports have and for every fixture the existing
  *   xlsx tests build, so writer-specific output is covered too.
@@ -476,7 +476,7 @@ const branchelisteCvr = (rng: Rng): RawCell => {
   return s(rng.chance(0.5) ? ` ${cvrNumber(rng)}` : `DK${cvrNumber(rng)}`);
 };
 
-/** Company name: mostly plain, with rich text, _xHHHH_ escapes and XML specials mixed in. */
+/** Company name: mostly plain, with rich text, `_xHHHH_` escapes and XML specials mixed in. */
 const branchelisteName = (rng: Rng): RawCell => {
   const roll = rng.float();
   if (roll < 0.03) return { kind: "shared-rich", runs: [rng.pick(WORDS), ` ${rng.pick(WORDS)} `, rng.pick(SUFFIXES)] };
@@ -526,7 +526,7 @@ const branchelisteRow = (rng: Rng, rowNum: number): readonly (RawCell | null)[] 
 /**
  * A Brancheliste-shaped workbook: one sheet, `rowCount` data rows under a header
  * row, with shared strings, styles, built-in and custom date formats, formulas,
- * errors, rich text and _xHHHH_ escapes. ~25.6k rows mirrors the real file.
+ * errors, rich text and `_xHHHH_` escapes. ~25.6k rows mirrors the real file.
  */
 export const syntheticBrancheliste = (rowCount: number, seed: number): Promise<Uint8Array> => {
   const rng = seededRng(seed);
@@ -948,7 +948,7 @@ const edgeSheets = (): readonly RawSheet[] => [
 
 /**
  * The edge-case matrix workbook: formulas, rich text, hyperlinks, dates (built-in
- * and custom formats, serial ≤ 60), errors, _xHHHH_, inline and formula strings,
+ * and custom formats, serial ≤ 60), errors, `_xHHHH_`, inline and formula strings,
  * sparse `r` attributes, wrong `<dimension>`, blank and duplicate headers, many
  * sheets. `date1904: true` gives the 1904-date-system variant of the same cells.
  */

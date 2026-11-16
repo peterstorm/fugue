@@ -344,7 +344,7 @@ export class RedisCheckpointer implements Checkpointer {
         // port structurally with no cast. Narrowing it here with a runtime
         // check rather than an `as string` assertion keeps that property AND
         // fails closed — an assertion would let a driver returning a Buffer
-        // (e.g. under returnBuffers) thread a non-string into `evalsha` as
+        // (e.g. under `returnBuffers`) thread a non-string into `evalsha` as
         // if it were a validated SHA, and the failure would surface later, on
         // a different call, as an opaque driver error.
         const sha = await this.redis.script("LOAD", SAVE_NODE_SCRIPT);

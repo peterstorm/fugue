@@ -74,7 +74,7 @@ secret**; these become `BOT_APP_ID` and `BOT_APP_PASSWORD`. The exact creation U
 varies; the load-bearing outputs are what the host needs.
 
 1. **Azure portal → Create a resource → Azure Bot.**
-   - Bot handle: e.g. fugue-hitl-bot.
+   - Bot handle: e.g. `fugue-hitl-bot`.
    - **Type of App / Microsoft App ID:** create a **new** Entra app registration
      (single-tenant is the common case; if you choose single-tenant you MUST set
      `BOT_TOKEN_URL` in step 4). Record the **Microsoft App ID** → this is
