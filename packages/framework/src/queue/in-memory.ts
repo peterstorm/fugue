@@ -147,7 +147,7 @@ const createQueueTable = () => {
 };
 
 /** The current worker registration (and so its handlers), by queue name. */
-const createWorkerTable = () => {
+const createRegistrationTable = () => {
   const workers = new Map<string, WorkerRegistration>();
   return {
     register(name: string, registration: WorkerRegistration): void {
@@ -193,19 +193,19 @@ const createJobTable = () => {
 };
 
 type QueueTable = ReturnType<typeof createQueueTable>;
-type WorkerTable = ReturnType<typeof createWorkerTable>;
+type RegistrationTable = ReturnType<typeof createRegistrationTable>;
 type JobTable = ReturnType<typeof createJobTable>;
 
 interface BackendStore {
   readonly queues: QueueTable;
-  readonly workers: WorkerTable;
+  readonly registrations: RegistrationTable;
   readonly jobs: JobTable;
 }
 
 /** Drop every queue, default, worker registration (handlers included) and job. */
 const clearBackendStore = (store: BackendStore): void => {
   store.queues.clear();
-  store.workers.clear();
+  store.registrations.clear();
   store.jobs.clear();
 };
 
@@ -296,9 +296,9 @@ const runEntry = async (
   }
 };
 
-const drainQueue = async ({ queues, workers, jobs }: BackendStore, name: string): Promise<void> => {
+const drainQueue = async ({ queues, registrations, jobs }: BackendStore, name: string): Promise<void> => {
   queues.ensureQueue(name);
-  const worker = workers.of(name);
+  const worker = registrations.of(name);
   if (!worker) {
     fwLogger().warn(`[InMemoryQueue] drain() called on queue "${name}" with no registered worker — jobs will not be processed`);
     return;
@@ -353,7 +353,7 @@ const createQueueOn = <S, C>(store: BackendStore, name: string, opts?: QueueOpts
 };
 
 const createWorkerOn = <S, C>(
-  workers: WorkerTable,
+  registrations: RegistrationTable,
   name: string,
   process: (job: JobLike<S, unknown, C>) => Promise<void>,
   opts?: WorkerOpts,
@@ -372,7 +372,7 @@ const createWorkerOn = <S, C>(
     exhaustedHandlers,
     errorHandlers,
   };
-  workers.register(name, registration);
+  registrations.register(name, registration);
 
   return {
     onFailed(handler: FailedHandler): void {
@@ -385,7 +385,7 @@ const createWorkerOn = <S, C>(
       errorHandlers.push(handler);
     },
     async close(): Promise<void> {
-      workers.unregister(name, registration);
+      registrations.unregister(name, registration);
     },
   };
 };
@@ -397,7 +397,7 @@ const createWorkerOn = <S, C>(
 export function createInMemoryBackend(): InMemoryBackend {
   const store: BackendStore = {
     queues: createQueueTable(),
-    workers: createWorkerTable(),
+    registrations: createRegistrationTable(),
     jobs: createJobTable(),
   };
 
@@ -407,7 +407,7 @@ export function createInMemoryBackend(): InMemoryBackend {
       name: string,
       process: (job: JobLike<S, unknown, C>) => Promise<void>,
       opts?: WorkerOpts,
-    ) => createWorkerOn<S, C>(store.workers, name, process, opts),
+    ) => createWorkerOn<S, C>(store.registrations, name, process, opts),
     // No connections to release — kept for shape parity with BullMQ. Drops
     // every queue, job and worker registration (and with it, its handlers).
     async close(): Promise<void> {
