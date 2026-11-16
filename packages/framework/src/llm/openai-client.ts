@@ -53,16 +53,12 @@ const buildJsonSchema = (schema: z.ZodType<any>): Record<string, unknown> => {
 /**
  * Why a POST did not yield a Responses document. Every arm keeps the HTTP
  * status and the raw body text, so each failure is debuggable from the error
- * alone; `body` says what was wrong with a 200 whose body did not parse.
+ * alone; a 200 whose body did not parse says why (`ResponsesBodyError`).
  */
-type ResponsesFailure =
-  | { readonly kind: "http-status"; readonly status: number; readonly bodyText: string }
-  | {
-      readonly kind: "body";
-      readonly status: number;
-      readonly bodyText: string;
-      readonly reason: ResponsesBodyError;
-    };
+type ResponsesFailure = (
+  | { readonly kind: "http-status" }
+  | ResponsesBodyError
+) & { readonly status: number; readonly bodyText: string };
 
 /**
  * The typed error for a failed POST — pure. A non-OK status and a non-JSON
@@ -74,12 +70,12 @@ const responsesFailureToError = (
   failure: ResponsesFailure,
   nodeId: NodeId,
 ): Result<never, FrameworkError> =>
-  failure.kind === "body" && failure.reason.kind === "wrong-shape"
+  failure.kind === "wrong-shape"
     ? httpFailureToError(
         failure.status,
         failure.bodyText,
         nodeId,
-        `body is JSON but not a Responses API document — ${truncateErrorBody(failure.reason.issues.join("; "))}`,
+        `body is JSON but not a Responses API document — ${truncateErrorBody(failure.issues.join("; "))}`,
       )
     : httpFailureToError(failure.status, failure.bodyText, nodeId);
 
@@ -289,12 +285,12 @@ export class OpenAILlmClient implements LlmClient {
     }
     // A 200 body is untrusted until parsed. Neither failure may escape as a
     // raw SyntaxError or a property read on the wrong shape: both carry the
-    // status and the body text, and `reason` keeps "not JSON" (a proxy
+    // status and the body text, and the kind keeps "not JSON" (a proxy
     // interstitial, an HTML error page) apart from "JSON of the wrong shape".
     const parsed = parseResponsesBody(text);
     return parsed.ok
       ? parsed
-      : err({ kind: "body", status: httpRes.status, bodyText: text, reason: parsed.error });
+      : err({ ...parsed.error, status: httpRes.status, bodyText: text });
   }
 
   async sendStructured<O>(req: LlmRequest<O>): Promise<Result<LlmResponse<O>, FrameworkError>> {
