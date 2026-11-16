@@ -3,7 +3,7 @@
 
 import type { JobLike, RecordedEvent } from "../state-machine/types.js";
 import { createInMemoryJob, type InMemoryJob, type InMemoryJobOptions } from "./in-memory-job.js";
-import { fwLogger } from "../logger.js";
+import { fwLogger, logFrameworkWithoutThrowing } from "../logger.js";
 import type {
   QueueBackend,
   QueueHandle,
@@ -136,8 +136,12 @@ const createQueueTable = () => {
     takeNext(name: string): QueueEntry<unknown, unknown> | undefined {
       return queueOf(name).shift();
     },
+    /**
+     * A snapshot of every queue's entries at call time: a fresh Map of fresh
+     * arrays, so no caller holds (or can mutate through a cast) the live table.
+     */
     entries(): ReadonlyMap<string, readonly QueueEntry<unknown, unknown>[]> {
-      return queues;
+      return new Map(Array.from(queues, ([name, entries]) => [name, [...entries]]));
     },
     clear(): void {
       queues.clear();
@@ -331,7 +335,9 @@ const createQueueOn = <S, C>(store: BackendStore, name: string, opts?: QueueOpts
 
   return {
     async enqueue(id: string, data: { state: S; context: C }, opts?: EnqueueOpts): Promise<void> {
-      // dedup: if jobId specified and already present, silently ignore
+      // An explicit jobId is a dedup key: a second enqueue under the same
+      // jobId while the first is still queued is silently ignored.
+      const dedupOnJobId = opts?.jobId !== undefined;
       store.queues.enqueue(
         name,
         {
@@ -340,7 +346,7 @@ const createQueueOn = <S, C>(store: BackendStore, name: string, opts?: QueueOpts
           opts: opts ?? {},
           enqueuedAt: Date.now(),
         },
-        opts?.jobId !== undefined,
+        dedupOnJobId,
       );
     },
 
@@ -374,15 +380,30 @@ const createWorkerOn = <S, C>(
   };
   registrations.register(name, registration);
 
+  // A handler registered on a handle whose registration is no longer current
+  // (superseded by a later createWorker on the same name, or released by
+  // close()) could never fire. It stays inert — not stored, not thrown — but
+  // is reported, so a wiring mistake is not silent.
+  const addHandler = <H>(handlers: H[], kind: "onFailed" | "onExhausted" | "onError", handler: H): void => {
+    if (registrations.of(name) !== registration) {
+      logFrameworkWithoutThrowing(
+        "warn",
+        `[InMemoryQueue] ${kind} handler registered on a worker handle for queue "${name}" that is no longer the current registration (superseded or closed) — it will never fire`,
+      );
+      return;
+    }
+    handlers.push(handler);
+  };
+
   return {
     onFailed(handler: FailedHandler): void {
-      failedHandlers.push(handler);
+      addHandler(failedHandlers, "onFailed", handler);
     },
     onExhausted(handler: ExhaustedHandler): void {
-      exhaustedHandlers.push(handler);
+      addHandler(exhaustedHandlers, "onExhausted", handler);
     },
     onError(handler: ErrorHandler): void {
-      errorHandlers.push(handler);
+      addHandler(errorHandlers, "onError", handler);
     },
     async close(): Promise<void> {
       registrations.unregister(name, registration);

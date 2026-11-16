@@ -395,17 +395,15 @@ export interface NodeState {
 
 /**
  * A persisted node record whose grammar `parseNodeStateRecord` has proven:
- * `nodeId` is in `ID_PATTERN` and `completedAt` was canonical ISO. `output` is
- * the record's STORED form, which that grammar does not constrain — the Redis
- * backends store the output itself, so for them this record is the
+ * `nodeId` is in `ID_PATTERN` and `completedAt` was canonical ISO. Same shape
+ * as `NodeState` — declared once, as an alias — but a different ROLE: `output`
+ * is the record's STORED form, which that grammar does not constrain. The
+ * Redis backends store the output itself, so for them this record is the
  * `NodeState`; the file codec stores serializer-tagged output and must decode
- * it before it can become one.
+ * it before it can become one. The name marks which side of that decode a
+ * value is on; the type system does not (both are `output: unknown`).
  */
-export interface NodeStateRecord {
-  readonly nodeId: NodeId;
-  readonly output: unknown;
-  readonly completedAt: Date;
-}
+export type NodeStateRecord = NodeState;
 
 export type CorruptCheckpointAddress =
   | { readonly kind: "node-key"; readonly nodeKey: string }

@@ -15,7 +15,9 @@ import fc from "fast-check";
 import { z } from "zod";
 import { OpenAILlmClient } from "../llm/openai-client.js";
 import { parseResponsesBody } from "../llm/openai-types.js";
-import type { NodeId } from "../types/ids.js";
+import type { DagId, NodeId, RunId } from "../types/ids.js";
+import { makeNodeContext } from "../shared/index.js";
+import { stubLlmClient } from "./_llm-mocks.js";
 
 const originalFetch = globalThis.fetch;
 
@@ -28,20 +30,43 @@ afterEach(() => {
 
 const Schema = z.object({ greeting: z.string() });
 
-const send = async (body: string) => {
+// Every request is answered with `body` as a 200.
+const clientAnswering = (body: string): OpenAILlmClient => {
   globalThis.fetch = (async () =>
     new Response(body, {
       status: 200,
       headers: { "Content-Type": "application/json" },
     })) as unknown as typeof fetch;
-  return new OpenAILlmClient({ apiKey: "k", baseUrl: "https://api.example.com/v1" }).sendStructured({
+  return new OpenAILlmClient({ apiKey: "k", baseUrl: "https://api.example.com/v1" });
+};
+
+const send = async (body: string) =>
+  clientAnswering(body).sendStructured({
     system: "s",
     user: "u",
     model: "gpt-test",
     schema: Schema,
     nodeId: "shape-test" as NodeId,
   });
-};
+
+const RUNTIME = makeNodeContext({
+  runId: "shape-test-run" as RunId,
+  dagId: "shape-test-dag" as DagId,
+  llm: stubLlmClient,
+});
+
+const sendWithTools = async (body: string) =>
+  clientAnswering(body).sendWithTools(
+    {
+      system: "s",
+      user: "u",
+      model: "gpt-test",
+      tools: [],
+      schema: Schema,
+      nodeId: "shape-test" as NodeId,
+    },
+    RUNTIME,
+  );
 
 const WRONG_SHAPE = "body is JSON but not a Responses API document";
 
@@ -189,6 +214,42 @@ describe("OpenAILlmClient — the two 200-body failures are reported apart", () 
     expect(result.ok).toBe(false);
     if (!result.ok && result.error.kind === "node-crash") {
       expect(result.error.message).toContain('"vendor_extension":"kept"');
+    } else {
+      throw new Error(`expected node-crash, got ${JSON.stringify(result)}`);
+    }
+  });
+});
+
+describe("OpenAILlmClient.sendWithTools — the 200-body parse and raw-body diagnostics", () => {
+  it("reports a wrong-shape 200 body as a wrong-shape document in the HTTP 200 failure arm", async () => {
+    const body = '{"output":"x"}';
+    const result = await sendWithTools(body);
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.message).toStartWith(`HTTP 200 (${WRONG_SHAPE} — `);
+      expect(result.error.message).toContain("output:");
+      expect(result.error.message).toContain(body);
+      expect(result.error.retriability).toBe("retriable");
+      expect(result.error.httpStatus).toBe(200);
+    } else {
+      throw new Error(`expected node-crash, got ${JSON.stringify(result)}`);
+    }
+  });
+
+  it("an incomplete turn's diagnostics render the body as the API sent it, fields the parse does not read included", async () => {
+    const result = await sendWithTools(
+      JSON.stringify({
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        vendor_extension: "kept",
+        output: [],
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === "node-crash") {
+      expect(result.error.message).toContain("incomplete (truncated) response");
+      expect(result.error.message).toContain('"vendor_extension":"kept"');
+      expect(result.error.retriability).toBe("non-retriable");
     } else {
       throw new Error(`expected node-crash, got ${JSON.stringify(result)}`);
     }
