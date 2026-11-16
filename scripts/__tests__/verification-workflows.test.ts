@@ -130,13 +130,15 @@ describe("root verification authority", () => {
     const scripts = record(manifest.scripts, "package.json scripts");
     const devDependencies = record(manifest.devDependencies, "package.json devDependencies");
     expect(scripts.verify).toBe("bash scripts/verify.sh");
+    // --parallel: workspace packages resolve each other's types and code from
+    // source, so no package's typecheck or test waits on another's.
     expect(scripts.typecheck).toBe(
-      "bun run --filter '*' typecheck && bun run typecheck:scripts",
+      "bun run --parallel --filter '*' typecheck && bun run typecheck:scripts",
     );
     expect(scripts["typecheck:scripts"]).toBe(
       "bun ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.scripts.json",
     );
-    expect(scripts.test).toBe("bun run --filter '*' test");
+    expect(scripts.test).toBe("bun run --parallel --filter '*' test");
     expect(scripts["test:redis"]).toBe("bash scripts/test-redis.sh");
     expect(devDependencies["@types/bun"]).toBe("1.4.1");
   });
@@ -190,22 +192,49 @@ describe("buildable leaf test scope", () => {
 });
 
 describe("reusable verification workflow", () => {
-  it("is workflow_call-only and owns exactly the workspace and Oracle gates", () => {
+  it("is workflow_call-only and owns exactly the static, workspace and Oracle gates", () => {
     const verify = workflow("verify.yml");
     expect(Object.keys(record(verify.on, "verify.on"))).toEqual(["workflow_call"]);
     expect(Object.keys(jobsOf(verify)).sort()).toEqual([
       "original-image-oracle-smoke",
+      "static-checks",
       "workspace-gate",
     ]);
   });
 
-  it("runs the authoritative gate against an authenticated disposable Redis", () => {
+  it("runs exactly verify.sh's phases, split across the static and workspace jobs", () => {
+    const verify = workflow("verify.yml");
+    const phaseRuns = (job: string): readonly string[] =>
+      stepsOf(jobOf(verify, job))
+        .map((step) => step.run)
+        .filter((run): run is string => typeof run === "string" && run.startsWith("bun run "));
+    const shellPhases = readFileSync(resolve(repoRoot, "scripts/verify.sh"), "utf8")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("bun run "));
+
+    // Static phases need no Redis; the workspace gate owns the Redis-backed ones.
+    expect(phaseRuns("static-checks")).toEqual([
+      "bun run lint",
+      "bun run typecheck",
+      "bun run check:docs",
+      "bun run test:scripts",
+    ]);
+    expect(phaseRuns("workspace-gate")).toEqual([
+      "bun run check:verification-prerequisites",
+      "bun run test",
+    ]);
+    expect([...phaseRuns("static-checks"), ...phaseRuns("workspace-gate")].sort())
+      .toEqual([...shellPhases].sort());
+    expect(setupBunVersion(jobOf(verify, "static-checks"))).toBe(expectedProductionBunVersion());
+  });
+
+  it("runs the Redis-backed phases against an authenticated disposable Redis", () => {
     const gate = jobOf(workflow("verify.yml"), "workspace-gate");
-    const redisStartup = text(
-      namedStep(gate, "Start disposable Redis").run,
-      "Start disposable Redis.run",
-    );
-    const verifyStep = namedStep(gate, "Verify repository");
+    const steps = stepsOf(gate);
+    const redisStep = namedStep(gate, "Start disposable Redis");
+    const redisStartup = text(redisStep.run, "Start disposable Redis.run");
+    const testStep = namedStep(gate, "Package tests");
 
     expect(setupBunVersion(gate)).toBe(expectedProductionBunVersion());
     expect(redisStartup).toContain("--bind 127.0.0.1");
@@ -217,7 +246,8 @@ describe("reusable verification workflow", () => {
     expect(redisStartup).toContain(exportedUrl);
     expect(redisStartup.indexOf(readiness)).toBeLessThan(redisStartup.indexOf(exportedUrl));
     expect(redisStartup).not.toContain("${{");
-    expect(verifyStep.run).toBe("bun run verify");
+    expect(steps.indexOf(redisStep)).toBeLessThan(steps.indexOf(namedStep(gate, "Verification prerequisites")));
+    expect(steps.indexOf(redisStep)).toBeLessThan(steps.indexOf(testStep));
     const workflowText = readWorkflowText("verify.yml");
     expect(workflowText).not.toContain("for pkg in");
     expect(workflowText).not.toContain("continue-on-error");
@@ -248,6 +278,12 @@ describe("verification workflow callers", () => {
     expect(Object.keys(jobsOf(ci))).toEqual(["verification"]);
     expect(jobOf(ci, "verification").uses).toBe("./.github/workflows/verify.yml");
     expect(readWorkflowText("ci.yml")).not.toContain("bun run");
+  });
+
+  it("cancels a superseded branch run but never a main run", () => {
+    const concurrency = record(workflow("ci.yml").concurrency, "ci.concurrency");
+    expect(concurrency.group).toBe("ci-${{ github.ref }}");
+    expect(concurrency["cancel-in-progress"]).toBe("${{ github.ref != 'refs/heads/main' }}");
   });
 
   it("makes release depend on the same shared verification", () => {

@@ -6,6 +6,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A new push to a branch or PR cancels its older, now-stale run; main keeps
+# every run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   verification:
     uses: ./.github/workflows/verify.yml

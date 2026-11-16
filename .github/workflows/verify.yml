@@ -3,7 +3,28 @@ name: verify
 on:
   workflow_call:
 
+# `scripts/verify.sh` is the authoritative phase list. CI splits it across two
+# parallel jobs: the phases that need no Redis (static-checks) and the
+# Redis-backed ones (workspace-gate). Together they run exactly verify.sh's
+# phases (pinned by scripts/__tests__/verification-workflows.test.ts).
 jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - name: Lint
+        run: bun run lint
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Doc links
+        run: bun run check:docs
+      - name: Script tests
+        run: bun run test:scripts
+
   workspace-gate:
     runs-on: ubuntu-latest
     steps:
@@ -15,7 +36,7 @@ jobs:
       - name: Start disposable Redis
         run: |
           sudo apt-get update
-          sudo apt-get install --yes redis-server
+          sudo apt-get install --yes --no-install-recommends redis-server
           sudo systemctl stop redis-server 2>/dev/null || true
           redis-server \
             --daemonize yes \
@@ -27,8 +48,10 @@ jobs:
             --requirepass 'fugue-ci-test-password'
           bash scripts/wait-for-redis.sh 'redis://default:fugue-ci-test-password@127.0.0.1:6389'
           printf '%s\n' 'REDIS_URL=redis://default:fugue-ci-test-password@127.0.0.1:6389' >> "$GITHUB_ENV"
-      - name: Verify repository
-        run: bun run verify
+      - name: Verification prerequisites
+        run: bun run check:verification-prerequisites
+      - name: Package tests
+        run: bun run test
 
   original-image-oracle-smoke:
     runs-on: ubuntu-latest
