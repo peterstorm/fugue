@@ -876,8 +876,8 @@ describe("withFileLock — stale steal and ownership", () => {
   test("release never deletes an owner that took the lock path after the ownership check", async () => {
     // The root cause of an observed double hold: release verified ownership
     // by path, then deleted by path. A recursive delete empties the directory
-    // before removing it, `rename(2)` replaces an empty directory, so a
-    // contender born in that window was deleted along with the old lock and a
+    // before removing it. `rename(2)` replaces an empty directory, so a
+    // contender born in that window was deleted along with the old lock, and a
     // third process entered while it still believed it held the lock. Here the
     // path changes owner between the check and the release, deterministically.
     const dir = tempDir();
@@ -902,6 +902,82 @@ describe("withFileLock — stale steal and ownership", () => {
     expect(existsSync(lockPath)).toBe(true);
     expect(readFileSync(join(lockPath, "owner"), "utf-8")).toBe("next-owner-token");
     expect(readdirSync(dir).filter((name) => name.includes(".released-"))).toEqual([]);
+  });
+
+  /** Release with a hook whose callback answers the token read of the moved copy. */
+  const releaseObservingMove = (
+    lockPath: string,
+    ownershipToken: LockOwnershipToken,
+    onMovedRead: (movedPath: string) => string,
+  ): unknown => {
+    try {
+      releaseFileLock(lockPath, ownershipToken, {
+        readOwnershipToken: (ownerPath) => ownerPath === lockPath
+          ? readFileSync(join(ownerPath, "owner"), "utf-8")
+          : onMovedRead(ownerPath),
+      });
+      return null;
+    } catch (error) {
+      return error;
+    }
+  };
+
+  test("an unreadable token on the moved lock restores it and throws typed, never reporting a release", async () => {
+    const warnings: string[] = [];
+    recordingLogger(warnings);
+    const lockPath = join(tempDir(), "append.lock");
+    const ownershipToken = await acquireFileLock(lockPath);
+
+    const failure = releaseObservingMove(lockPath, ownershipToken, () => {
+      throw errnoFailure("EIO", "moved token unreadable");
+    });
+
+    expect(failure).toMatchObject({ kind: "cache-error", operation: "releaseFileLock", message: expect.stringContaining("EIO") });
+    expect(readFileSync(join(lockPath, "owner"), "utf-8")).toBe(ownershipToken); // restored, still held
+    expect(warnings).toHaveLength(1);
+    releaseFileLock(lockPath, ownershipToken);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  test("a foreign moved owner that cannot be restored throws typed, naming both paths", async () => {
+    // The residual window ADR-0092 names: it needs the lock path to change
+    // owner after the check, and then a third owner born before the restore.
+    const warnings: string[] = [];
+    recordingLogger(warnings);
+    const dir = tempDir();
+    const lockPath = join(dir, "append.lock");
+    const ownershipToken = await acquireFileLock(lockPath);
+
+    const failure = releaseObservingMove(lockPath, ownershipToken, () => {
+      mkdirSync(lockPath);
+      writeFileSync(join(lockPath, "owner"), "third-owner-token");
+      return "foreign-token";
+    });
+
+    expect(failure).toMatchObject({ kind: "cache-error", operation: "releaseFileLock" });
+    const message = (failure as Error).message;
+    expect(message).toContain("moved a lock this acquisition does not own");
+    expect(message).toContain(lockPath);
+    expect(message).toContain(".released-");
+    expect(readFileSync(join(lockPath, "owner"), "utf-8")).toBe("third-owner-token");
+  });
+
+  test("a lock that vanishes between the ownership check and the move is a silent no-op", async () => {
+    const warnings: string[] = [];
+    recordingLogger(warnings);
+    const lockPath = join(tempDir(), "append.lock");
+    const ownershipToken = await acquireFileLock(lockPath);
+
+    releaseFileLock(lockPath, ownershipToken, {
+      readOwnershipToken: (ownerPath) => {
+        const token = readFileSync(join(ownerPath, "owner"), "utf-8");
+        rmSync(lockPath, { recursive: true, force: true });
+        return token;
+      },
+    });
+
+    expect(existsSync(lockPath)).toBe(false);
+    expect(warnings).toEqual([]);
   });
 
   test("releaseFileLock stays a SILENT no-op for a foreign pid even when cleanup would fail", () => {

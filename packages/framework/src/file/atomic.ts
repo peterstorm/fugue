@@ -552,44 +552,64 @@ const readReleaseMetadata = (
 const readOwnershipTokenAt = (ownerPath: string, hooks: FileLockTestHooks): string =>
   (hooks.readOwnershipToken?.(ownerPath) ?? readFileSync(join(ownerPath, OWNER_FILE), "utf-8")).trim();
 
+/** What moving the lock off its canonical path found. */
+type Vacated =
+  /** The lock was already gone: nothing to release. */
+  | Readonly<{ kind: "absent" }>
+  /** The moved directory was another owner's; it is back at the lock path untouched. */
+  | Readonly<{ kind: "foreign-restored" }>
+  /** This acquisition's lock left the canonical path: the lock is released. */
+  | Readonly<{ kind: "vacated"; movedPath: string }>;
+
+/** Put a moved directory this release must not delete back at the lock path, or throw typed. */
+const restoreMoved = (lockPath: string, movedPath: string, why: string): void => {
+  try {
+    renameSync(movedPath, lockPath);
+  } catch (error) {
+    throw releaseFailure(lockPath, `${why}, and it could not be restored from ${movedPath}: ${safeErrorMessage(error)}`);
+  }
+};
+
 /**
- * Move `lockPath` off the canonical path and prove the moved directory is the
- * one this acquisition owns; restore it when it is not. Returns the moved
- * path, or null when the lock was already gone.
+ * Move `lockPath` off the canonical path, then prove the moved directory is
+ * the one this acquisition owns.
  *
  * A rename is the only atomic way to leave the canonical path. Deleting in
  * place (`rmSync` recursive) empties the directory before removing it, and
  * `rename(2)` replaces an EMPTY directory: a contender's birth landing in that
  * window was then deleted by the releaser's retrying recursive removal, so two
- * processes held the lock at once.
+ * processes held the lock at once (ADR-0092).
+ *
+ * The caller has just read this acquisition's token at the lock path, and
+ * only a live owner or the reaper of a DEAD owner ever moves it, so the moved
+ * directory is ours. The second read is defense in depth for a broken
+ * invariant: a readable foreign token is restored untouched; an unreadable
+ * token is inconclusive, as it is on the first read, so the directory is
+ * restored and the release throws typed instead of reporting success.
  */
 const vacateOwnedLock = (
   lockPath: string,
   ownershipToken: LockOwnershipToken,
   hooks: FileLockTestHooks,
   subject: string,
-): string | null => {
-  const released = `${lockPath}.released-${uniqueToken()}`;
+): Vacated => {
+  const movedPath = `${lockPath}.released-${uniqueToken()}`;
   try {
-    renameSync(lockPath, released);
+    renameSync(lockPath, movedPath);
   } catch (error) {
-    if (isMissingPathError(error)) return null;
+    if (isMissingPathError(error)) return { kind: "absent" };
     throw releaseFailure(lockPath, `failed to move ${subject} off the lock path; lock left in place: ${safeErrorMessage(error)}`);
   }
-  let moved: string;
+  let movedToken: string;
   try {
-    moved = readOwnershipTokenAt(released, hooks);
+    movedToken = readOwnershipTokenAt(movedPath, hooks);
   } catch (error) {
-    moved = `<unreadable: ${safeErrorMessage(error)}>`;
+    restoreMoved(lockPath, movedPath, `could not verify the moved ${subject}'s ownership token`);
+    throw releaseFailure(lockPath, `could not verify the moved ${subject}'s ownership token; lock restored and left in place: ${safeErrorMessage(error)}`);
   }
-  if (moved === ownershipToken) return released;
-  // Another owner took the path after our check: put it back untouched.
-  try {
-    renameSync(released, lockPath);
-  } catch (error) {
-    throw releaseFailure(lockPath, `moved a lock this acquisition does not own and could not restore it from ${released}: ${safeErrorMessage(error)}`);
-  }
-  return null;
+  if (movedToken === ownershipToken) return { kind: "vacated", movedPath };
+  restoreMoved(lockPath, movedPath, "moved a lock this acquisition does not own");
+  return { kind: "foreign-restored" };
 };
 
 /**
@@ -613,22 +633,23 @@ const releaseOwnedLock = (
   ownershipToken: LockOwnershipToken,
   hooks: FileLockTestHooks,
   subject: string,
-  warnBeforeRemoval?: string,
+  warnBeforeRelease?: string,
 ): void => {
   const token = readReleaseMetadata(lockPath, "ownership token", () => readOwnershipTokenAt(lockPath, hooks));
   if (token.kind === "absent" || token.value !== ownershipToken) return;
-  if (warnBeforeRemoval !== undefined) warnWithoutThrowing(warnBeforeRemoval);
-  const released = vacateOwnedLock(lockPath, ownershipToken, hooks, subject);
-  if (released !== null) removeUniqueProtocolEntry(released, "released lock directory");
+  if (warnBeforeRelease !== undefined) warnWithoutThrowing(warnBeforeRelease);
+  const vacated = vacateOwnedLock(lockPath, ownershipToken, hooks, subject);
+  if (vacated.kind === "vacated") removeUniqueProtocolEntry(vacated.movedPath, "released lock directory");
 };
 
 /**
- * Remove the canonical owner only when both pid and token still match.
+ * Release the canonical owner only when both pid and token still match.
  *
  * Absence and proven ownership mismatch are safe no-ops. An inconclusive
- * ownership read or failure to remove a lock proven to be ours throws the
- * existing typed `cache-error` with operation `releaseFileLock`; callers can
- * therefore never report successful cleanup while an owned lock remains.
+ * ownership read, or a failure to move a lock proven to be ours off the lock
+ * path, throws the existing typed `cache-error` with operation
+ * `releaseFileLock`; callers can therefore never report a successful release
+ * while an owned lock remains. Deleting the moved copy afterwards only warns.
  */
 export const releaseFileLock = (
   lockPath: string,

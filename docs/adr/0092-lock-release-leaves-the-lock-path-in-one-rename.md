@@ -47,9 +47,20 @@ deletes the moved copy.**
 
 ## Consequences
 
-- A contender only ever sees a full owner directory or none, so a birth can no
-  longer be deleted by a release. The stress run above shows 0 overlaps in
-  15,000 sections after the change.
+- While the releaser still owns the lock, a contender only ever sees a full
+  owner directory or none, so a birth can no longer be deleted by a release.
+  The stress run above shows 0 overlaps in 15,000 sections after the change.
+- The guarantee rests on ADR-0078's invariant: only a live owner, or the
+  reaper of a DEAD owner, ever moves the lock path, so a live owner's token
+  cannot change between its ownership check and its move. If that invariant is
+  broken and the lock path already holds another owner, the move briefly
+  displaces that owner before release restores it. A third owner born in that
+  window makes the restore fail; release then throws a typed failure naming
+  both paths, and a test pins that outcome. Fencing every release like a reap
+  intent would close the window outright, at the cost of a birth-barrier wait
+  on every append; it was considered and not taken.
+- An unreadable token on the moved copy is inconclusive, as it is on the first
+  read: release restores the lock and throws typed, never reporting a release.
 - The release failure contract narrows: ADR-0078's "a failure to remove a lock
   proven to be owned throws" now applies to the move. A delete failure after
   the move is a warning plus a `append.lock.released-*` sibling to clean up.
