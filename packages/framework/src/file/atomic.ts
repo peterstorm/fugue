@@ -11,9 +11,12 @@
  * intent and stand down. Consequently the owner pathname is stable between
  * the fenced stale probe and rename: a reaper can never move, delete, or fail
  * to restore a newly born live owner. Unexpected owner-metadata/process-probe
- * failures remain live (fail closed) and are warned. Release is silent only
- * for an absent lock or a proven ownership mismatch; an ownership-read or
- * owned-directory removal failure throws a typed `FrameworkError`. If the
+ * failures remain live (fail closed) and are warned. Release moves a verified
+ * owner off the canonical path in one rename before deleting anything, so a
+ * contender only ever sees a full lock or none (ADR-0092). Release is silent
+ * only for an absent lock or a proven ownership mismatch; an ownership-read
+ * failure or a failed move off the lock path throws a typed `FrameworkError`,
+ * and a failed delete of the moved copy is warned (the lock is free). If the
  * critical section already failed, that primary failure remains authoritative
  * while the release failure is reported through a total, logger-safe warning.
  *
@@ -546,17 +549,64 @@ const readReleaseMetadata = (
   }
 };
 
+const readOwnershipTokenAt = (ownerPath: string, hooks: FileLockTestHooks): string =>
+  (hooks.readOwnershipToken?.(ownerPath) ?? readFileSync(join(ownerPath, OWNER_FILE), "utf-8")).trim();
+
 /**
- * Prove ownership from the authoritative acquisition token, then remove the
+ * Move `lockPath` off the canonical path and prove the moved directory is the
+ * one this acquisition owns; restore it when it is not. Returns the moved
+ * path, or null when the lock was already gone.
+ *
+ * A rename is the only atomic way to leave the canonical path. Deleting in
+ * place (`rmSync` recursive) empties the directory before removing it, and
+ * `rename(2)` replaces an EMPTY directory: a contender's birth landing in that
+ * window was then deleted by the releaser's retrying recursive removal, so two
+ * processes held the lock at once.
+ */
+const vacateOwnedLock = (
+  lockPath: string,
+  ownershipToken: LockOwnershipToken,
+  hooks: FileLockTestHooks,
+  subject: string,
+): string | null => {
+  const released = `${lockPath}.released-${uniqueToken()}`;
+  try {
+    renameSync(lockPath, released);
+  } catch (error) {
+    if (isMissingPathError(error)) return null;
+    throw releaseFailure(lockPath, `failed to move ${subject} off the lock path; lock left in place: ${safeErrorMessage(error)}`);
+  }
+  let moved: string;
+  try {
+    moved = readOwnershipTokenAt(released, hooks);
+  } catch (error) {
+    moved = `<unreadable: ${safeErrorMessage(error)}>`;
+  }
+  if (moved === ownershipToken) return released;
+  // Another owner took the path after our check: put it back untouched.
+  try {
+    renameSync(released, lockPath);
+  } catch (error) {
+    throw releaseFailure(lockPath, `moved a lock this acquisition does not own and could not restore it from ${released}: ${safeErrorMessage(error)}`);
+  }
+  return null;
+};
+
+/**
+ * Prove ownership from the authoritative acquisition token, then release the
  * lock. ONE encoding (round-38 cs-11) of the token-read / ownership-gate /
- * `rmSync` / typed-throw sequence the corrupt-pid and normal-pid branches of
+ * release / typed-throw sequence the corrupt-pid and normal-pid branches of
  * `releaseFileLock` both need; they differ only in the noun the failure names
- * and whether a warning precedes the removal.
+ * and whether a warning precedes the release.
  *
  * Absence or a different token proves this acquisition no longer owns the
  * canonical lock, and releasing is a safe no-op. An UNREADABLE token is not
  * proof of foreign ownership — `readReleaseMetadata` surfaces that inconclusive
  * case as a typed failure rather than silently returning.
+ *
+ * The lock is released the moment `vacateOwnedLock` moves it off the
+ * canonical path. Deleting the moved copy is cleanup: a failure there is
+ * warned, never thrown, because no lock remains for a caller to retry.
  */
 const releaseOwnedLock = (
   lockPath: string,
@@ -565,22 +615,11 @@ const releaseOwnedLock = (
   subject: string,
   warnBeforeRemoval?: string,
 ): void => {
-  const token = readReleaseMetadata(
-    lockPath,
-    "ownership token",
-    () => hooks.readOwnershipToken?.(lockPath)
-      ?? readFileSync(join(lockPath, OWNER_FILE), "utf-8"),
-  );
+  const token = readReleaseMetadata(lockPath, "ownership token", () => readOwnershipTokenAt(lockPath, hooks));
   if (token.kind === "absent" || token.value !== ownershipToken) return;
   if (warnBeforeRemoval !== undefined) warnWithoutThrowing(warnBeforeRemoval);
-  try {
-    rmSync(lockPath, { recursive: true, force: true });
-  } catch (error) {
-    throw releaseFailure(
-      lockPath,
-      `failed to remove ${subject}; lock left in place: ${safeErrorMessage(error)}`,
-    );
-  }
+  const released = vacateOwnedLock(lockPath, ownershipToken, hooks, subject);
+  if (released !== null) removeUniqueProtocolEntry(released, "released lock directory");
 };
 
 /**

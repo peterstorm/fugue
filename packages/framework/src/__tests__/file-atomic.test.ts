@@ -8,9 +8,12 @@
  *   readers never see; each call owns its temp path, and a failed rename OR
  *   failed write unlinks only that caller's tmp (best-effort)
  *   and rethrows the original error.
- * - lock release: an owned-lock cleanup failure is an observable typed
- *   `FrameworkError`; successful critical sections reject, while a primary
- *   critical-section failure remains authoritative if cleanup also fails.
+ * - lock release: a verified owner leaves the lock path in one rename, so a
+ *   contender born after the ownership check is never deleted (ADR-0092). A
+ *   failed move is an observable typed `FrameworkError`; successful critical
+ *   sections reject, while a primary critical-section failure remains
+ *   authoritative if cleanup also fails. A failed delete of the moved copy
+ *   only warns: the lock is already free.
  * - `withFileLock`: rename-born directory lock — mutual exclusion under
  *   concurrent `Promise.all` callers, stale-lock steal (dead pid) with
  *   per-attempt staleness re-probing (a holder dying mid-wait is reaped
@@ -807,18 +810,17 @@ describe("withFileLock — stale steal and ownership", () => {
     expect(existsSync(lockPath)).toBe(false);
   }, 15_000); // bun's default 5s timeout ≈ the acquisition ceiling itself
 
-  test("releaseFileLock throws typed and logs a real owned cleanup failure", async () => {
+  test("releaseFileLock throws typed and logs when the owned lock cannot leave the lock path", async () => {
     const warnings: string[] = [];
     recordingLogger(warnings);
+    const dir = tempDir();
     try {
-      const dir = tempDir();
       const lockPath = join(dir, "append.lock");
       const ownershipToken = await acquireFileLock(lockPath);
-      // Lock the lock directory against mutation: rmSync can read the pid
-      // (ownership check passes — it IS ours) but cannot unlink the dir
-      // entry (EACCES) — a real cleanup failure that must be loud, not
-      // swallowed (ENOENT stays silent via `force`, but EACCES does not).
-      chmodSync(lockPath, 0o500);
+      // A read-only parent: the ownership check passes (it IS ours) but the
+      // move off the canonical path fails (EACCES). The lock genuinely stays
+      // held, so the failure must be loud and typed.
+      chmodSync(dir, 0o500);
 
       let failure: unknown;
       try {
@@ -832,19 +834,74 @@ describe("withFileLock — stale steal and ownership", () => {
         message: expect.stringContaining(lockPath),
       });
 
-      expect(existsSync(lockPath)).toBe(true); // removal genuinely failed
+      expect(existsSync(lockPath)).toBe(true); // still held
       expect(warnings.length).toBe(1);
-      expect(warnings[0]).toContain(lockPath);
+      expect(warnings[0]).toContain("lock left in place");
 
-      // Restore permissions so the afterEach temp-dir sweep can remove it.
-      chmodSync(lockPath, 0o700);
-      // Our own lock, now removable: a second release cleans up silently.
+      chmodSync(dir, 0o700);
+      // Our own lock, now movable: a second release succeeds silently.
       releaseFileLock(lockPath, ownershipToken);
       expect(existsSync(lockPath)).toBe(false);
-      expect(warnings.length).toBe(1); // no second warning — this one succeeded
+      expect(warnings.length).toBe(1);
+    } finally {
+      chmodSync(dir, 0o700); // the afterEach sweep must be able to remove it
+      __resetFrameworkLogger();
+    }
+  });
+
+  test("releaseFileLock releases the lock and only warns when the moved copy cannot be deleted", async () => {
+    const warnings: string[] = [];
+    recordingLogger(warnings);
+    try {
+      const dir = tempDir();
+      const lockPath = join(dir, "append.lock");
+      const ownershipToken = await acquireFileLock(lockPath);
+      // The lock directory itself is read-only: moving it off the lock path
+      // works, deleting its files does not. The lock is free the moment it
+      // leaves the canonical path, so this is cleanup litter, not a failure.
+      chmodSync(lockPath, 0o500);
+
+      releaseFileLock(lockPath, ownershipToken);
+
+      expect(existsSync(lockPath)).toBe(false);
+      const litter = readdirSync(dir).filter((name) => name.startsWith("append.lock.released-"));
+      expect(litter).toHaveLength(1);
+      expect(warnings.some((warning) => warning.includes("released lock directory"))).toBe(true);
+      chmodSync(join(dir, litter[0]!), 0o700);
     } finally {
       __resetFrameworkLogger();
     }
+  });
+
+  test("release never deletes an owner that took the lock path after the ownership check", async () => {
+    // The root cause of an observed double hold: release verified ownership
+    // by path, then deleted by path. A recursive delete empties the directory
+    // before removing it, `rename(2)` replaces an empty directory, so a
+    // contender born in that window was deleted along with the old lock and a
+    // third process entered while it still believed it held the lock. Here the
+    // path changes owner between the check and the release, deterministically.
+    const dir = tempDir();
+    const lockPath = join(dir, "append.lock");
+    const ownershipToken = await acquireFileLock(lockPath);
+    let swapped = false;
+
+    releaseFileLock(lockPath, ownershipToken, {
+      readOwnershipToken: (ownerPath) => {
+        const token = readFileSync(join(ownerPath, "owner"), "utf-8");
+        if (!swapped && ownerPath === lockPath) {
+          swapped = true;
+          rmSync(lockPath, { recursive: true, force: true });
+          mkdirSync(lockPath);
+          writeFileSync(join(lockPath, "pid"), String(process.pid));
+          writeFileSync(join(lockPath, "owner"), "next-owner-token");
+        }
+        return token;
+      },
+    });
+
+    expect(existsSync(lockPath)).toBe(true);
+    expect(readFileSync(join(lockPath, "owner"), "utf-8")).toBe("next-owner-token");
+    expect(readdirSync(dir).filter((name) => name.includes(".released-"))).toEqual([]);
   });
 
   test("releaseFileLock stays a SILENT no-op for a foreign pid even when cleanup would fail", () => {
