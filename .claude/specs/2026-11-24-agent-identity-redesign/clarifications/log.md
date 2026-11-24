@@ -273,3 +273,39 @@ The plan-alignment gap report raised three gaps. Because each pass had surfaced 
   - A Phase boundary rule moves every deletion of the legacy broker path into the Phase 5 host switch, so that every Wave type-checks.
 
 **Decided by:** the architecture agent, under the user's explicit delegation.
+
+### 2026-11-24: Loop-back 5 (plan design review)
+
+The plan design review (code-reviewer, type-design-analyzer, architecture-tech-lead) returned 12 advisories. The orchestrator accepted all of them under the user's delegation ("most correct, best, most functional"), and the architecture agent resolved each in the plan as directed. The approach (A), the interview answers, the spec text, the contracts' Requirement anchors and runtime seams, LC-1's states and events, and the five invariants are unchanged. The design-review self-audit is in the plan's Testing Strategy, "Plan self-audit (design-review loop-back 5)". **User: please review.**
+
+1. **Phase 4 broke typecheck.** Phase 4 changed `startRun`, `HitlRunServiceDeps` and `RunExecutorDeps`, but their production callers (`run-dag.ts`, host.ts) changed only in Phase 5. **Resolution:** the two phases are refolded. Phase 4 is now one run-start cut-over: a single Task changes every coupled signature (`startRun`, the HITL and executor deps, `RunDagDeps`, `NodeContextForDag`, `RunRecord.authority`) together with its callers, and deletes the legacy broker path. Phase 5 is approvals and the manifest, each one Task with its own callers. The Phase boundary rule now also covers signature changes: functions, deps records, ports, unions matched with `.exhaustive()`, and persisted schemas travel with every caller in one Task. Applying the rule also moved the host's `authority-unavailable` HTTP mapping into the Phase 1 Task that widens the framework error union. The INV-4 hedge ("if decompose schedules…") is removed: both sibling rows land in the cut-over Task.
+2. **`custody-expired` was unreachable**, because stores return `absent` once PX has passed. **Resolution, chosen as the most accurate error that keeps the cap:** the store keeps PX at the binding expiry, so no ciphertext outlives the cap, and returns `absent` for a missing key. The custody cell checks the expiry that the run's `RunAuthority` carries before it reads the store. A resume past expiry is `custody-expired`, with zero store reads and zero Entra calls. A record that is gone before its expiry (released, evicted or purged) is `custody-absent`. Keeping ciphertext past the cap, so that the store could answer `expired` itself, was rejected because it would hold the credential longer than FR-017 allows. Collapsing the two reasons into one was rejected because it would give the initiator a less accurate error. AD-8, LC-1's `reauthorizationReasonOf`, CT-3 (both cases) and the AS-026 and AS-034 acceptance agree.
+3. **Concurrent delegated redeem and the CAS loser.** **Resolution:** each run gets one single-flight custody cell inside the `forRun` closure. It is the only reader and writer of the run's custody, and it serializes get, open, redeem and rotate; the per-capability access cells read from it.
+   - A compare-and-swap on a missing record fails and never creates one, so a late rotate after release yields `custody-absent`.
+   - A generation mismatch re-reads and swaps once more against the current generation. It never errors spuriously and never discards a rotated credential before a write attempt.
+   - The full host-error ↔ custody-transition table is in Component Design (Capability Authority).
+   - CT-2 acceptance adds concurrent delegated capabilities in one run, CAS on a missing record, and a contending second writer.
+4. **CAS fencing in types.** **Resolution:** the two persisted states, `held` and `revoked`, each carry a `CustodyGeneration`. `get` returns `CustodyRead` (`absent | held | revoked`), never `expired` or `deleted`. `swap` takes `CustodySwap{expected, next}` and returns `swapped | stale{current} | missing`. The rules "`next.generation = expected + 1`" and "never creates" are declared on these CT-3 types.
+5. **Shallow run-authority bracket.** **Resolution:** a new INV-4 owner, `createRunAuthorityLifecycle` (`adapters/run-authority-lifecycle.ts`, replacing `custody-release.ts`), owns the bracket and derives the release cause from its outcome. It offers three operations:
+   - `withEstablishedAuthority(plan, runId, deadline, body)` for sync runs
+   - `establishForRecord(plan, runId, deadline, persist)` for the HITL start
+   - `endRun(runId, ending)` for HITL endings, called once after `processRun`'s outcome fold
+
+   The route makes one call and the HITL service makes two. `delegation-establishment.ts` is no longer a sibling. INV-4 and its matrix (renamed `run-authority-lifecycle.matrix.test.ts`) shrink accordingly, keeping the single release owner.
+6. **Five parallel fault vocabularies.** **Resolution:** one `AcquisitionFault` ADT in the CT-2 types replaces `AssertionFault`, `EntraAcquisitionFault`, `DelegationEstablishmentFault` and the separate reason list of `delegation-not-established`. Two exhaustive projections translate it, `frameworkErrorOf` (to the framework error) and `runAuthorityRefusalOf` (to the refusal). Each is applied in exactly one module, so no new invariant is needed. Token-endpoint error classification is one pure function, `classifyTokenEndpointError`, property-tested once.
+7. **Delegated token verified before higher-precedence refusals, and 8. JWKS egress.** **Resolution:** admission is two passes.
+   - Pure pass 1 (`planRunAuthority`) decides every static refusal in precedence order.
+   - The shell verifies the token against the JWKS only for a `verify-delegated` step. That step carries a `DelegatedTokenExpectation`, which can exist only when the directory, the mapped agent and the expected audience exist.
+   - Pure pass 2 (`admitDelegatedPresentation`) validates the claims and binds the principal.
+
+   A property test asserts that the precedence order is preserved and that the JWKS is called zero times on a statically refusable request. CT-1 asserts the same through the production path. Because pass 1 now builds the expected audience, INV-5's admission sibling becomes `domain/run-authority.ts`.
+9. **`RunMinting` origin and authority could disagree.** **Resolution:** `RunMinting` is removed. `forRun(authority)` returns `{broker, origin}`, with the origin from one `originOf(authority)`. `createNodeContextForDag` hands on only the `RunAuthority`. The broker takes identity only from its closure, so the per-invocation `agentClientIdFromFrameworkOrigin` re-check, now redundant, is removed.
+10. **Duplicated custody expiry and initiator.** **Resolution:** the `RunAuthority` is the one canonical value. Custody records store no binding, and `custodyBindingOf(runId, authority)` derives the AAD at seal and at open, so the sealed AAD and the record cannot diverge.
+11. **Bare numbers for custody seconds and epoch milliseconds.** **Resolution:** `CustodySeconds` (only `parseCustodySeconds` builds it, checked against `HITL_RUN_TTL_SEC`), `EpochMs`, `DurationMs` and `CustodyGeneration` are brands, and `custodyExpiryFor(EpochMs, CustodySeconds, EpochMs): EpochMs`.
+
+The self-audit also caught and fixed three things beyond the advisories:
+- AS-022's 401 now carries its audience on the typed refusal.
+- `recordDecision` and the manifest deps are each named as one Task with their callers.
+- The INV-3 and INV-4 statements are kept to one paragraph, so the plan parser reads them whole.
+
+**Decided by:** the architecture agent, under the user's explicit delegation (orchestrator acceptance of every advisory).
