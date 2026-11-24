@@ -250,3 +250,26 @@ The plan-alignment gap report raised one gap (SEAM-1: CT-3 runs could be started
 The plan's Testing Strategy holds the full seam-sweep table (contract, Requirement, production path, seams declared, and why each undeclared symbol on the path cannot be bypassed).
 
 **Decided by:** the architecture agent, under the user's explicit delegation.
+
+### 2026-11-24: Loop-back 4 (plan alignment)
+
+The plan-alignment gap report raised three gaps. Because each pass had surfaced a few new gaps, the architecture agent then self-audited the whole plan against every alignment category and fixed what it found (the table is in the plan's Testing Strategy, "Plan self-audit (loop-back 4)"). The approach (A) is unchanged. **User: please review**, especially the two refinements of earlier answers marked below.
+
+- **FR-017 / AS-026, custody default.** `DELEGATED_CUSTODY_MAX_SEC` is optional and must be a positive integer number of seconds, otherwise `loadConfig` refuses boot naming the key. When unset, custody is capped at min(604800, `HITL_RUN_TTL_SEC`). `HITL_RUN_TTL_SEC` defaults to 604800, so the out-of-the-box cap is exactly 7 days. A set value above `HITL_RUN_TTL_SEC` is the boot refusal `custody-max-exceeds-run-ttl`. **Refinement of answer 8 above** ("default 604800, at most `HITL_RUN_TTL_SEC`"): taken literally, a deployment that lowered `HITL_RUN_TTL_SEC` without touching custody would be refused boot by a default it never set. The min() keeps answer 8 unchanged under default keys.
+- **AS-009 / FR-005 / SC-013, data-sourced catalog.** Boot has one catalog entry point. `createHost` calls `loadCapabilityCatalog(HostDeps.capabilityCatalog ?? CAPABILITY_CATALOG)`, so the code catalog is only the default raw source and passes through the same branded parser at every boot. A data catalog entry without a mode makes `createHost` return the new `capability-catalog-invalid` HostError naming the capability, before anything connects or binds. The test is `boot-capability-catalog.test.ts`, in Phase 1. The one parsed catalog feeds the gate, `composeRunAuthorityWiring` and the manifest. Nothing parses a catalog at module load.
+- **JUDGE-1, FR-022 / SC-007 decided where the surfaces are built.** Loom anchors each Requirement in one contract only, so FR-022 is anchored in CT-2 (mint path, Phase 3). The spec gains **AS-037** (run start, CT-1), **AS-038** (continuation and custody at rest, CT-3) and **AS-039** (`app` execution path, CT-4), which restate FR-022 per surface, as AS-035 and AS-036 did for the latency budgets. Each contract's acceptance scans nine enumerated surfaces of the production composition through a shared `credential-sentinel.ts`: logs, audit, spans, HTTP responses, error values, handles, origins and run authorities, run records and checkpoints, and custody at rest, which must be ciphertext only. The trailing Phase 6 scan is removed.
+- **Self-audit fixes:**
+  - **Refinement of answer 4 above.** The plan treated any `ENTRA_*` key as "configured" and refused partial config. That contradicted the clarify answer for AS-013 ("partial config stays fail-closed with an actionable warning"). Each leg is now gated on its presence keys:
+    - The Entra leg is configured only when `ENTRA_TENANT_ID` and `ENTRA_AGENT_IDENTITIES` are both set; otherwise it is dark, with a warning naming the missing keys.
+    - The delegation leg is configured when `DELEGATED_CUSTODY_KEYS` is set, and stays dark, with a warning, over a dark Entra leg.
+    - Only a configured leg can be refused, for a missing model, an unmapped agent and similar faults.
+    - The removed `ENTRA_CLIENT_ID` is still refused by name, so that a leftover shared-app key does not go silently dark.
+  - Boot refusals have a named HostError, `identity-config-invalid`, and a host-level test, `boot-identity-refusal.test.ts`.
+  - AS-034's "surfaced to the initiator" is now concrete: a sync 401 response, or the HITL run status through `GET /runs/:runId`, which adds `createGetRunHandler` as a CT-3 seam.
+  - CT-2 now states single-flight, no internal retry, the request-body shape (FR-002, FR-003, FR-012) and the dark-leg refusal.
+  - New owned invariant **INV-5**: the delegated audience has one source (`delegatedAudienceFor`), shared by admission, establishment and the manifest.
+  - The `RedactedSecret` runtime moved out of the declarations-only contract types file, into `domain/redacted-secret.ts`.
+  - The mint port takes a `CapabilityScope` from the parsed catalog, so that data and test capabilities reach it.
+  - A Phase boundary rule moves every deletion of the legacy broker path into the Phase 5 host switch, so that every Wave type-checks.
+
+**Decided by:** the architecture agent, under the user's explicit delegation.
