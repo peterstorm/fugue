@@ -29,7 +29,7 @@ Only an agent's own identity federates into Entra. The host requests every realm
 | 11 | Caching and concurrency | App tokens use boot-scoped single-flight cells keyed by (Entra identity, `app`, capability). Delegated tokens use run-scoped cells keyed by (Entra identity, `delegated`, user oid, capability), which live inside the `forRun` closure and die with the run. Capability stays in the key so the realm, as the policy decision point, is consulted per capability (AD-5). |
 | 12 | HITL approver vs initiator | Approval lends no authority. `recordDecision` takes a typed `ApproverRef`; the run record appends an `ApprovalRecord`, and a `hitl-decision` audit record names approver and initiator separately. After resume, the run rebuilds its `RunAuthority` only from the persisted record. |
 | 13 | Testing and verification | Fakes for every port; fast-check property tests for the planner, the binding, catalog parsing, custody transitions and cache isolation; a sentinel-token scan (SC-007); and latency budget tests with injected transports (SC-011), which since alignment loop-back 1 are acceptance tests of CT-2 (acquisition, Phase 3) and CT-1 (admission, Phase 5). Live-tenant evidence belongs to the operator (OOS-001). |
-| 14 | Executable models | One lifecycle (custody, LC-1). Invariants: the RFC 8693 prohibition (checkable), single-source authority mode (owned), no credential material in observable surfaces (advisory), and, since alignment loop-back 1, custody release at every terminal state (owned, INV-4). Three contracts. No Pipeline: this is not a fugue DAG feature. |
+| 14 | Executable models | One lifecycle (custody, LC-1). Invariants: the RFC 8693 prohibition (checkable), single-source authority mode (owned), no credential material in observable surfaces (advisory), and, since alignment loop-back 1, custody release at every terminal state (owned, INV-4). Four contracts (CT-4 since alignment loop-back 2). No Pipeline: this is not a fugue DAG feature. |
 
 ---
 
@@ -273,7 +273,8 @@ packages/host/src/__tests__/acceptance/run-authority-admission-budget.acceptance
 packages/host/src/__tests__/acceptance/capability-authority.acceptance.test.ts     — CT-2 acceptance
 packages/host/src/__tests__/acceptance/capability-authority-budget.acceptance.test.ts — CT-2 acceptance: host-added acquisition and cache-hit p95 budgets (AS-035; NFR-002, SC-011)
 packages/host/src/__tests__/acceptance/delegated-continuation.acceptance.test.ts   — CT-3 acceptance (approvals driven through the approve route and the Teams bot handler)
-packages/host/src/__tests__/acceptance/support/identity-fakes.ts — shared fakes: realm mint, Entra authority (both models), JWKS signer, custody store, clock, zero-latency HTTP transports, in-process UDS transport into the worker router
+packages/host/src/__tests__/acceptance/user-run-attribution.acceptance.test.ts     — CT-4 acceptance: a user-origin sync run end to end through createRunDagHandler → host.ts createRunContextFactory/createDagExecutor → createNodeContextForDag → createCapabilityAuthority, fake transports only (AS-006, FR-004, FR-020)
+packages/host/src/__tests__/acceptance/support/identity-fakes.ts — shared fakes: realm mint, Entra authority (both models), JWKS signer, custody store, clock, zero-latency HTTP transports, in-process UDS transport into the worker router, in-memory SharedInfra (Redis, tracer, logger) for createNodeContextForDag, capturing audit sink
 packages/host/src/__tests__/acceptance/support/latency-budget.ts — shared budget harness: warm-up, sample loop, nearest-rank p95 (test support, not production)
 ```
 
@@ -419,8 +420,8 @@ packages/host/src/supervisor/uds-proxy.ts                       — unchanged: p
 packages/host/src/http/handlers/manifest.ts                     — per-DAG authority block: modes per capability, delegated header requirement, expected audience, tenant
 packages/host/src/domain/host-error.ts                          — run-authority-refused{refusal: RunAuthorityRefusal} + snapshot table entry
 packages/host/src/domain/framework-error-http.ts                — authority-unavailable mapping (grant-missing 403, unconfigured 503, federation-rejected 502, reauthorization-required 401)
-packages/host/src/host.ts                                       — selectCapabilityAuthority (legs → ports → authority), executeDag(dag, input, ctx, runAuthority, meter); subject-token wiring removed (Phase 1)
-packages/host/src/adapters/node-context-factory.ts              — origin from RunAuthority; resolveOriginAndBindSubjectToken removed; unmapped-DAG throw replaced by planner refusal
+packages/host/src/host.ts                                       — selectCapabilityAuthority (legs → ports → authority); EXPORTS createRunContextFactory(config, sharedInfra, routedTenant) and createDagExecutor(config, capabilityAuthority) (CT-4 runtime seams, consumed by buildRouterDeps); executeDag(dag, input, ctx, minting: RunMinting, meter) mints through capabilityAuthority.forRun(minting.authority) with minting.origin; subject-token wiring removed (Phase 1)
+packages/host/src/adapters/node-context-factory.ts              — createNodeContextForDag(shared, registered, runId, signal, authority: RunAuthority, options) returns NodeContextForDag{ctx, minting: RunMinting{authority, origin}, meterMintedLlm}, origin derived from the same RunAuthority (CT-4 runtime seam); resolveOriginAndBindSubjectToken removed; unmapped-DAG throw replaced by planner refusal
 packages/host/src/__tests__/broker-selection.test.ts            — rewritten for selectCapabilityAuthority over EntraDirectory variants
 packages/host/src/__tests__/node-context-factory.test.ts        — rewritten
 packages/host/src/__tests__/handlers/run-dag-authority.test.ts  — refusal ordering: zero acquire, zero startRun, zero egress on refusal
@@ -672,14 +673,18 @@ RunDagDeps += {
   admitRunAuthority: (identity, registered, header: DelegatedHeader) => Promise<Result<RunAuthorityPlan, RunAuthorityRefusal>>
   establishRunAuthority: (plan, runId, deadlineMs) => Promise<Result<RunAuthority, RunAuthorityRefusal>>
   releaseCustody: ReleaseCustody                                  // INV-4 owner, injected; run-dag never sees the custody store
-  executeDag: (dag, input, ctx, authority: RunAuthority, meter) => ...
+  createContext: (registered, runId, signal, authority: RunAuthority) => Promise<NodeContextForDag>   // host.ts createRunContextFactory → createNodeContextForDag
+  executeDag: (dag, input, ctx, minting: RunMinting, meter) => ...                                 // host.ts createDagExecutor → forRun(minting.authority)
 }
+RunMinting = { authority: RunAuthority; origin: InvocationOrigin }   // built only by createNodeContextForDag, from one RunAuthority, so origin and authority cannot disagree
 HitlRunService.startRun(dagId, team, input, identity, plan: RunAuthorityPlan)
 ```
 
 Sync order: lookup, then access, then body, then schema, then **admit**. If HITL, `startRun` (which establishes) and return. Otherwise acquire, circuit, **establish** (on failure `releaseCustody(runId, sync-establishment-failed)`, then release the slot), execute, and in `finally` `releaseCustody(runId, sync-settled{outcome})`.
 
 In a multi-tenant deployment the request reaches this handler through the supervisor: `proxyToWorker` (`supervisor/uds-proxy.ts`) clones every inbound header, deletes the client's `X-Fugue-Tenant`, stamps the signed one and forwards the rest, so `X-Fugue-Delegated-Authorization` arrives byte-identical and is never logged (the proxy logs only the tenant and the transport reason). CT-1 declares `proxyToWorker` as a runtime seam and its acceptance drives a submission through it, so a future header allowlist in the proxy that drops the delegated header fails CT-1.
+
+After admission the initiator's attribution reaches the mint through two composition hops that `RunDagDeps` makes injectable: `createContext` (host.ts `createRunContextFactory`, which calls `createNodeContextForDag` to derive the `RunMinting` from the `RunAuthority`) and `executeDag` (host.ts `createDagExecutor`, which builds the framework `MintingAuthority` as `{ broker: capabilityAuthority.forRun(minting.authority), origin: minting.origin }`). Both host.ts factories are exported so `buildRouterDeps` and CT-4 acceptance use the same functions; CT-4 declares them and `createNodeContextForDag` as runtime seams, so an acceptance test that stubs either dep cannot decide AS-006, FR-004 or FR-020.
 **Depends on:** Planner, Custody, Capability Authority, HITL service.
 
 ### HITL Authority Continuity
@@ -725,6 +730,11 @@ framework dispatch → invocationFor(MintingAuthority) → forRun(runAuthority).
       miss → RealmAssertionMint(scope="entra-exchange cap") → inspectFederatedAssertion
            → EntraAgentAuthority.acquireApp (agent-id: blueprint fmi_path → T1 → agent identity; app-reg: one step)
   → buildGraphHandle → audit{run,node,agent,entraId,cap,mode=app,initiator?}
+
+User-app sync run start (CT-4):
+POST /dags/:id/run (realm JWT[sub, entra_oid, entra_tid]) → admit → user-app{initiator{realmSub, oid, tid}} (no token retained)
+  → acquire → createRunContextFactory → createNodeContextForDag(authority) → RunMinting{authority, origin}
+  → createDagExecutor → runDag(MintingAuthority{forRun(authority), origin}) → per node as above → audit{…, initiator{realmSub, oid, tid}}
 
 Delegated run start:
 POST /dags/:id/run (Authorization: realm JWT[entra_oid,entra_tid]; X-Fugue-Delegated-Authorization: Entra JWT[aud=blueprint|agent app])
@@ -829,7 +839,7 @@ The machine imports `CustodyState` and `CustodyEvent` from the CT-3 types file, 
 
 **Types file:** `packages/host/src/domain/run-authority-contract.ts`
 **Acceptance tests:**
-- `packages/host/src/__tests__/acceptance/run-authority-admission.acceptance.test.ts` — AS-006, AS-010, AS-021, AS-022, AS-023, FR-004, FR-006, FR-007, FR-008, FR-009, FR-018, FR-020, FR-036
+- `packages/host/src/__tests__/acceptance/run-authority-admission.acceptance.test.ts` — AS-010, AS-021, AS-022, AS-023, FR-006, FR-007, FR-008, FR-009, FR-018, FR-036
 - `packages/host/src/__tests__/acceptance/run-authority-admission-budget.acceptance.test.ts` — AS-036
 **Supported domain:** `packages/host/src/__tests__/acceptance/run-authority-admission.acceptance.test.ts`
 **Entry point:** `packages/host/src/http/handlers/run-dag.ts`
@@ -838,7 +848,7 @@ The machine imports `CustodyState` and `CustodyEvent` from the CT-3 types file, 
 - `createAuthMiddleware` (`packages/host/src/http/middleware/auth.ts`: every request's identity, including the Entra principal, is built here)
 - `createRunDagHandler` (`packages/host/src/http/handlers/run-dag.ts`: the production route handler)
 - `errorResponse` (`packages/host/src/http/response.ts`: refusal serialization)
-**Statement:** A run is admitted under exactly one `RunAuthority`, decided before any HITL fork, concurrency acquisition or token egress. A user run with only `app` capabilities is admitted as `user-app` with initiator attribution (realm sub, oid, tid) and retains no user token, and admin and team paths behave as before. Refused, each with its typed refusal and HTTP status: an agent-origin (team or admin) run whose DAG requires a delegated capability (naming node and capability); a user run requiring delegation with no Entra token; an invalid Entra token (bad signature, issuer, tenant, audience, expiry, a non-delegated token, or a wrong version); a mismatched `oid` or `tid`; an Entra token sent to a run that needs none; and delegation requested on a deployment whose delegation leg is dark. Submitted through the supervisor (`proxyToWorker` with an in-process transport into the worker's auth middleware and route), a delegated submission arrives with `X-Fugue-Delegated-Authorization` byte-identical and is admitted, a client-forged `X-Fugue-Tenant` never reaches the worker (only the supervisor-signed value does), a refusal returns to the client with the worker's status and body unchanged, and no proxy log line carries the delegated token. Run-start validation (realm JWT authentication, authority planning, delegated-token signature and claim verification through the real verifier over an in-process JWKS, and binding) adds at most 50 ms p95 to a submission, measured through the proxy and route after a warm-up that absorbs the first signing-key fetch.
+**Statement:** A run is admitted under exactly one `RunAuthority`, decided before any HITL fork, concurrency acquisition or token egress. A user run with only `app` capabilities is admitted as `user-app` carrying its initiator (realm sub, oid, tid), and admin and team paths behave as before; CT-4 decides that this attribution reaches every mint audit record and that no user token is retained. Refused, each with its typed refusal and HTTP status: an agent-origin (team or admin) run whose DAG requires a delegated capability (naming node and capability); a user run requiring delegation with no Entra token; an invalid Entra token (bad signature, issuer, tenant, audience, expiry, a non-delegated token, or a wrong version); a mismatched `oid` or `tid`; an Entra token sent to a run that needs none; and delegation requested on a deployment whose delegation leg is dark. Submitted through the supervisor (`proxyToWorker` with an in-process transport into the worker's auth middleware and route), a delegated submission arrives with `X-Fugue-Delegated-Authorization` byte-identical and is admitted, a client-forged `X-Fugue-Tenant` never reaches the worker (only the supervisor-signed value does), a refusal returns to the client with the worker's status and body unchanged, and no proxy log line carries the delegated token. Run-start validation (realm JWT authentication, authority planning, delegated-token signature and claim verification through the real verifier over an in-process JWKS, and binding) adds at most 50 ms p95 to a submission, measured through the proxy and route after a warm-up that absorbs the first signing-key fetch.
 
 ### CT-2: Capability authority mint path
 
@@ -870,11 +880,26 @@ The machine imports `CustodyState` and `CustodyEvent` from the CT-3 types file, 
 - `createCustodyRelease` (`packages/host/src/adapters/custody-release.ts`: every terminal settlement releases custody here, INV-4)
 **Statement:** A user run's authority survives HITL suspension and token expiry. An `app` run resumes and completes under the agent identity, with attribution taken from the record and no user token. A delegated run establishes its delegation once at start, holds only an AES-GCM-sealed refresh credential bound to (run, agent, oid, tid) with expiry capped at the suspension window, redeems it through the agent identity after resume, and acts for the original initiator whoever approves. Approvals enter only through the production approval paths: `POST /runs/:runId/approve` (auth middleware, then the approve handler) and the Teams bot handler. A different realm user approving over HTTP, or a mapped Teams user approving from a card, is recorded as that approver (`realm-user{realmSub, entra}` or `teams-user{aadObjectId}`) in the run's approvals and the `hitl-decision` audit record, while every delegated acquisition after resume still carries the initiator's `oid`. An approval of a run that is not suspended is refused 409 through `errorResponse`, and an approval by an identity the existing approver authorization refuses records nothing. A refused refresh, expired custody or absent custody is refused with `reauthorization-required` and no `app` fallback, and after every terminal state (completed, failed including a rejected gate, evicted record) no delegated credential for the run can be retrieved.
 
+### CT-4: User-origin run attribution through execution
+
+**Types file:** none
+**No types reason:** The slice consumes CT-1's `RunAuthority` and CT-2's `CreateCapabilityAuthorityFn`; the host composition it pins (`RunMinting`, the two host.ts factories) is host-internal wiring, not a consumer-facing surface.
+**Acceptance tests:**
+- `packages/host/src/__tests__/acceptance/user-run-attribution.acceptance.test.ts` — AS-006, FR-004, FR-020
+**Entry point:** `packages/host/src/host.ts`
+**Runtime seams:**
+- `createRunDagHandler` (`packages/host/src/http/handlers/run-dag.ts`: the production route handler, sync path from admission through execution)
+- `createRunContextFactory` (`packages/host/src/host.ts`: the production `createContext` dep; `buildRouterDeps` uses the same export)
+- `createNodeContextForDag` (`packages/host/src/adapters/node-context-factory.ts`: derives the run's `RunMinting{authority, origin}` from its `RunAuthority`)
+- `createDagExecutor` (`packages/host/src/host.ts`: the production `executeDag` dep; builds the framework `MintingAuthority` through `capabilityAuthority.forRun` over `minting.authority`)
+- `createCapabilityAuthority` (`packages/host/src/adapters/capability-authority.ts`: the real mint path, gate, Entra acquisition and audit)
+**Statement:** A user-origin sync run whose nodes require only `app` capabilities, submitted with a realm user JWT carrying `sub`, `entra_oid` and `entra_tid`, runs end to end through the production composition: `createRunDagHandler` with `createContext` from host.ts `createRunContextFactory` and `executeDag` from host.ts `createDagExecutor`, over a real `createCapabilityAuthority` whose realm and Entra adapters talk to in-process fake HTTP transports, for both identity models. Neither dep is stubbed; only transports, Redis and the clock are fakes. Every node's mint produces exactly one audit record, and each carries `authority: app`, the node's agent client and Entra identity, and `initiator{realmSub, oid, tid}` equal to the submitting user's (AS-006, FR-020); the Entra transport sees only the agent's own grants (zero on-behalf-of and zero RFC 8693 bodies). A team-origin run of the same DAG writes audit records with no initiator, the control that an attribution hard-coded in the executor fails. A sentinel inbound bearer token appears in none of: the `RunAuthority` handed to `createContext`, the `RunMinting` that `createNodeContextForDag` returns (also called directly on a `user-app` authority), any realm or Entra request body, any audit record, any log line; and the custody store holds no record for the run (FR-004). A `createContext` that drops or swaps the initiator, or an `executeDag` that builds `forRun` from anything but `minting.authority`, fails the suite.
+
 ---
 
 ## Implementation Phases
 
-Ordered by dependency. Decompose places the contract tasks (CT-1, CT-2, CT-3) and the LC-1 machine task in the earliest Waves their imports allow. The LC-1 machine imports CT-3 types, so it follows the CT-3 contract task.
+Ordered by dependency. Decompose places the contract tasks (CT-1, CT-2, CT-3, CT-4) and the LC-1 machine task in the earliest Waves their imports allow. The LC-1 machine imports CT-3 types, so it follows the CT-3 contract task.
 
 ### Phase 1: Foundations and demolition (no dependencies)
 
@@ -923,7 +948,7 @@ Ordered by dependency. Decompose places the contract tasks (CT-1, CT-2, CT-3) an
 - Wire `entra-user-token-verifier.ts` into admission. This phase answers for the NFR-003 budget: the CT-1 budget acceptance file (`run-authority-admission-budget.acceptance.test.ts`, through `proxyToWorker` and the route) must be green at this phase's Wave Gate, as must the CT-1 proxy forwarding cases.
 - Add the `run-authority-refused` HostError and the `authority-unavailable` HTTP mapping.
 - Add the manifest authority block and extend the INV-2 matrix test with `manifest.ts`.
-- Compose `selectCapabilityAuthority` in `host.ts`. Change the `executeDag` signature. Derive the origin in `node-context-factory.ts` from `RunAuthority`. Rewrite the broker-selection and node-context tests.
+- Compose `selectCapabilityAuthority` in `host.ts`. Export `createRunContextFactory` and `createDagExecutor` from `host.ts` and use them in `buildRouterDeps`. Change the `createContext` and `executeDag` signatures to take a `RunAuthority` and a `RunMinting`. Derive the `RunMinting{authority, origin}` in `createNodeContextForDag` from the `RunAuthority`. Rewrite the broker-selection and node-context tests. CT-4 acceptance (`user-run-attribution.acceptance.test.ts`) must be green at this phase's Wave Gate.
 - **Files:** `http/delegated-token-header.ts`, `http/handlers/run-dag.ts`, `http/handlers/manifest.ts`, `domain/host-error.ts`, `domain/framework-error-http.ts`, `host.ts`, `adapters/node-context-factory.ts`, `__tests__/broker-selection.test.ts`, `__tests__/node-context-factory.test.ts`, `__tests__/handlers/run-dag-authority.test.ts`, `__tests__/handlers/manifest-authority.test.ts`, `adapters/__tests__/unwired-defaults.test.ts`, `__tests__/authority-mode.matrix.test.ts`, `__tests__/custody-release.matrix.test.ts`
 
 ### Phase 6: Cross-cutting verification and documentation (depends on Phase 5)
@@ -950,7 +975,7 @@ Ordered by dependency. Decompose places the contract tasks (CT-1, CT-2, CT-3) an
 | Capability Authority | gate zero-egress, mode dispatch, audit shape | both models through fakes; CT-2 budget file: cold host-added ≤ 10 ms p95, cache hit ≤ 5 ms p95 (NFR-002) | cache isolation and single-flight under fast-check scheduled interleavings (NFR-012) |
 | Custody release (INV-4) | owner: idempotent delete, failing delete → `release-failed` + one log, never throws | matrix test: every sibling's run-ending path leaves custody absent; Redis store PX and tenant purge cover the two code-less removals | — |
 | HITL continuity | ApproverRef mapping per identity variant | CT-3: approvals through `createAuthMiddleware` + `createApproveRunHandler` and through `handleBotActivity`; resume with expired inbound token (SC-006) via in-memory run store | — |
-| Run Admission | refusal ordering (0 acquire, 0 startRun, 0 egress) | CT-1: full route via `createRouter` with fakes, and through `proxyToWorker` with an in-process UDS transport (delegated header forwarded, tenant header stripped); CT-1 budget file: admission ≤ 50 ms p95 (NFR-003) | — |
+| Run Admission | refusal ordering (0 acquire, 0 startRun, 0 egress) | CT-1: full route via `createRouter` with fakes, and through `proxyToWorker` with an in-process UDS transport (delegated header forwarded, tenant header stripped); CT-1 budget file: admission ≤ 50 ms p95 (NFR-003); CT-4: a user-origin sync run through `createRunDagHandler` with host.ts `createRunContextFactory` and `createDagExecutor` over a real `createCapabilityAuthority` (fake transports, both models), asserting the initiator `oid` on every mint audit record and no retained user token | — |
 | Doc Lint | each banned phrase, status matrix presence, evidence gating | runs over the real doc set in `verify.sh` | — |
 | Cross-cutting | — | SC-007 sentinel scan | sentinel injection over generated run shapes |
 
@@ -990,7 +1015,7 @@ Ordered by dependency. Decompose places the contract tasks (CT-1, CT-2, CT-3) an
 
 1. `bun run --cwd packages/framework typecheck && bun run --cwd packages/host typecheck`
 2. `bun run --cwd packages/framework test` and `bun run --cwd packages/host test`: all green. The admin and team token tests are unchanged (SC-010).
-3. `bun test packages/host/src/__tests__/acceptance/`: CT-1 to CT-3 green.
+3. `bun test packages/host/src/__tests__/acceptance/`: CT-1 to CT-4 green.
 4. `bun scripts/check-doc-links.ts && bun scripts/check-identity-docs.ts`
 5. `bun "/home/peterstorm/.dotfiles/.claude/local-marketplace/plugins/loom/engine/src/cli.ts" helper validate-lint-rules`, then the full-tier lint: INV-1 has zero hits.
 6. The SC-011 budgets are part of step 3: `capability-authority-budget.acceptance.test.ts` and `run-authority-admission-budget.acceptance.test.ts` print their p95 values and fail above 10/5 ms and 50 ms.
@@ -998,7 +1023,7 @@ Ordered by dependency. Decompose places the contract tasks (CT-1, CT-2, CT-3) an
 
 **Operator prerequisites before Tasks are populated.** `.loom/verification-manifest.json` is schema 1 today. Two things need it upgraded:
 - INV-2 and INV-4 (owned, with mutation verification) need schema 2 with an `affectedRunner`.
-- The three contracts need a JUnit-reporting test check.
+- The four contracts need a JUnit-reporting test check.
 
 Before Loom populates this plan, the operator must:
 
@@ -1103,3 +1128,4 @@ This section is executed by the operator or a separate session in the worktree `
 |---|---|---|
 | 2026-11-24 | Initial plan, Approach A, decided under explicit user delegation | architecture-agent |
 | 2026-11-24 | Loop-back 1 (plan alignment). JUDGE-1: the NFR-002, NFR-003 and SC-011 budgets are now CT-2 and CT-1 acceptance files (`capability-authority-budget`, `run-authority-admission-budget`) gated in Phases 3 and 5, anchored on the new spec scenarios AS-035 and AS-036 (Loom accepts only FR and AS anchors); the Phase 6 `identity-latency.bench.test.ts` is removed. OWN-1: a new owned INV-4 (owner `adapters/custody-release.ts`; siblings `hitl/service.ts`, `http/handlers/run-dag.ts`, `adapters/delegation-establishment.ts`; matrix test `custody-release.matrix.test.ts`) replaces `hitl/__tests__/custody-teardown.test.ts`. Siblings get `ReleaseCustody` and a narrowed store, and the CT-3 types gain the release types and an export binding. SEAM-1: `proxyToWorker` is a CT-1 runtime seam, and CT-1 acceptance submits through it. SEAM-2: `createAuthMiddleware`, `createApproveRunHandler`, `handleBotActivity`, `errorResponse` and `createCustodyRelease` are CT-3 runtime seams, and CT-3 acceptance approves through the route and the bot handler | architecture-agent |
+| 2026-11-24 | Loop-back 2 (plan alignment). SEAM-1: AS-006, FR-004 and FR-020 move from CT-1 to a new contract CT-4 (`user-run-attribution.acceptance.test.ts`, entry point `host.ts`), whose runtime seams are `createRunDagHandler`, host.ts `createRunContextFactory` and `createDagExecutor` (now exported and used by `buildRouterDeps`), `createNodeContextForDag` and `createCapabilityAuthority`. CT-4 acceptance runs a user-origin sync run end to end through the real executor and context factory with fake transports only and asserts the initiator `oid` on every mint audit record. `createNodeContextForDag` returns a `RunMinting{authority, origin}` built from one `RunAuthority`, and `executeDag` takes it, so origin and authority cannot disagree. A new contract rather than extra CT-1 seams, because every CT-1 acceptance file must reference every CT-1 seam, which would fold DAG execution into the AS-036 run-start validation budget | architecture-agent |
