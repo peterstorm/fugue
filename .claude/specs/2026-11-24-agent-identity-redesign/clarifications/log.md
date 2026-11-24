@@ -44,7 +44,7 @@ Repository facts checked by the clarify agent: the Teams bot adapter lives in `p
 **Question:** Fail at boot for every mapped agent, or lazily at first use?
 **Answer:** Fail at boot for every agent client the deployment maps, once the Entra identity leg is configured. The existing config-presence gating is unchanged: each leg lights up only when its config is complete, and partial config stays fail-closed with an actionable warning.
 **Decided by:** orchestrator under explicit user delegation (quote above).
-**Updated:** AS-013, AS-013a (new, see the identity-model decision below), FR-019 (new), SC-013 (new).
+**Updated:** AS-013, AS-033 (new, see the identity-model decision below), FR-019 (new), SC-013 (new).
 **Rationale:** A mis-provisioned deployment is found at deploy, not mid-run; consistent with existing fail-closed boot modes (NFR-020).
 
 ## 2026-11-24: Delegated continuation policy (AS-026, FR-017, Open Question 3)
@@ -59,7 +59,7 @@ Repository facts checked by the clarify agent: the Teams bot adapter lives in `p
 - revocation enforced by Entra at every refresh (user disabled, password reset, Conditional Access, risk).
 When the refresh is refused or custody has expired, the delegated capability fails closed with a typed "delegated authority unavailable, re-authorization required" error surfaced to the initiator. It never falls back to `app` authority.
 **Decided by:** orchestrator under explicit user delegation (quote above).
-**Updated:** AS-026, AS-026a (new), FR-017, FR-044 (new), SC-012 (new), Risks table, Open Questions item 3.
+**Updated:** AS-026, AS-034 (new), FR-017, FR-044 (new), SC-012 (new), Risks table, Open Questions item 3.
 **Rationale:** The HITL approval channel (the Teams bot approval card) cannot carry a fresh Entra user token, so Option B would make delegated runs non-resumable in practice. The refresh credential is bound to the agent identity client, so it is useless without the agent's own credential. Entra-enforced revocation is stronger than anything the host could do itself.
 
 ## 2026-11-24: Delegated run approved by a different person (AS-028)
@@ -67,7 +67,7 @@ When the refresh is refused or custody has expired, the delegated capability fai
 **Question:** May a different approver resume a delegated run, and on whose behalf does it then act?
 **Answer:** Any approver authorized by the existing HITL approver authorization may approve. Approval never lends authority: after resume the run continues acting on behalf of the original initiator (whose delegated authority was granted at run start). The approver is recorded separately as the approver. The run never acts on behalf of the approver.
 **Decided by:** orchestrator under explicit user delegation (quote above).
-**Updated:** AS-028, FR-019a (new), SC-012 (new).
+**Updated:** AS-028, FR-025 (new), SC-012 (new).
 **Rationale:** Approval and authority are distinct facts; the initiator requested these actions conditional on approval.
 
 ## 2026-11-24: Retention of records carrying the Entra object id (FR-024)
@@ -126,7 +126,7 @@ When the refresh is refused or custody has expired, the delegated capability fai
 **Question:** Can an Entra Agent ID blueprint accept a federated credential from an external Keycloak issuer, and which model is the default?
 **Answer:** Deferred: which model a tenant uses is open until the operator's live Agent ID tenant spike (OOS-001) reports pass or fail against the runbook's criteria. It does not block the build. Added requirement: a deployment declares its identity model explicitly in configuration; there is no default model. Both models are built and tested.
 **Decided by:** orchestrator under explicit user delegation (quote above).
-**Updated:** Open Questions item 2 (`[DEFERRED: ... until ...]`), FR-019 (new), AS-013a (new), SC-013 (new).
+**Updated:** Open Questions item 2 (`[DEFERRED: ... until ...]`), FR-019 (new), AS-033 (new), SC-013 (new).
 **Unblocks when:** the operator runs the tenant spike from the rewritten runbook.
 **Rationale:** The answer needs a live tenant, which is out of scope; an explicit model declaration removes any need for a default.
 
@@ -139,7 +139,7 @@ When the refresh is refused or custody has expired, the delegated capability fai
 ## Implicit ambiguity scan (P1 scenarios)
 
 - AS-013 previously said "When the host boots or the agent first needs a credential"; resolved to boot-time only.
-- US3 did not say how a deployment chooses its model; resolved by FR-019 and AS-013a (explicit, no default).
+- US3 did not say how a deployment chooses its model; resolved by FR-019 and AS-033 (explicit, no default).
 - US5 and Dependencies named the Teams bot as a run starter; corrected to the HITL approval channel.
 - No other P1 ambiguity found: AS-001 to AS-019 name concrete triggers, outcomes, and typed failures.
 
@@ -159,3 +159,61 @@ When the refresh is refused or custody has expired, the delegated capability fai
 **Deferred to architecture:** 0
 **Deferred (external unblock):** 1 (Open Question 2, Agent ID spike)
 **Ready for architecture:** Yes
+
+---
+
+## Architecture phase decisions
+
+No interview was held. Every answer below was **decided by the architecture agent under explicit user delegation** (quote at the top of this log). The plan is `.claude/plans/2026-11-24-agent-identity-redesign.md`, and each answer maps to an AD block there. **User: please review.** Any decision can be reversed by editing the plan before decompose.
+
+### 2026-11-24: Approach gate
+
+**Options:**
+- A: run-bound authority, where a boot-scoped `CapabilityAuthority` gives each run a broker through `forRun(RunAuthority)`, with a pure run-start planner and eager delegation plus encrypted custody.
+- B: a boot-scoped broker plus a process-global run-authority registry keyed by run id, with lazy on-behalf-of.
+- C: a framework-native authority mode validated by framework preflight.
+
+**Picked:** A, which was also the recommendation.
+**Rationale:**
+- A run's authority becomes an immutable value. It is persisted with the HITL record and dies with the run.
+- B keeps shared mutable state and holds the raw user token until first use.
+- C breaks ADR-0054 (vendor neutrality) and cannot refuse before the host acquires a concurrency slot, which AS-010 requires.
+
+### 2026-11-24: Self-interview answers
+
+1. **Scope and slicing:** everything in the spec is built. Phases follow dependency order (foundations and demolition, then topology and ports, then the capability authority, then HITL, then admission and composition, then verification and docs).
+2. **Authority mode source:** one code catalog with a required `authority` field (a type error if it is missing) and a branded `CapabilityCatalog` parser for data. There is no default, and all three existing capabilities declare `app` (AD-2).
+3. **Identity model:** `ENTRA_IDENTITY_MODEL` is `agent-id` or `app-registration` with no default. It parses into the `EntraDirectory` ADT, and `ENTRA_CLIENT_ID` is removed and refused by name (AD-3).
+4. **Boot strictness:** with no `ENTRA_*` keys the leg is dark, with a warning. If any `ENTRA_*` key is set, the configuration must be complete and consistent, or boot is refused naming every offender, which matches the existing paired-field refusals.
+5. **Run-start validation:** a pure planner in `run-dag.ts`, called after input-schema parsing and before the HITL fork and concurrency acquisition (AD-5).
+6. **Delegated token transport:** the `X-Fugue-Delegated-Authorization: Bearer <entra-jwt>` header. It is refused on runs that need no delegation, and the manifest publishes the requirement and the expected audience (AD-7).
+7. **Binding:** realm user JWTs must carry `entra_oid` and `entra_tid` (required claims). The Entra token must be a v2.0 delegated token (`scp`) for the deployment tenant, audienced to the blueprint (agent-id model) or the agent's app (app-registration model), and its `oid` and `tid` must equal the realm token's (AD-7).
+8. **Delegated continuation:** one on-behalf-of exchange with `offline_access` at admission, then AES-256-GCM custody of the refresh credential. The AAD is (run, agent, oid, tid, expiry). The expiry is fixed at establishment and capped at `DELEGATED_CUSTODY_MAX_SEC` (default 604800, at most `HITL_RUN_TTL_SEC`), and custody is deleted at every terminal state (AD-6, LC-1).
+9. **Key management:** `DELEGATED_CUSTODY_KEYS` holds an active kid plus a keyring, is held by the worker only, and is rotated by adding a kid.
+10. **Error taxonomy:** a new non-retriable framework kind, `authority-unavailable`, with the causes grant-missing, unconfigured, federation-rejected and reauthorization-required. Transient failures stay `infra-unreachable`, and run-start refusals are the host `run-authority-refused` error (AD-8).
+11. **Caching:** a boot-scoped app cache keyed by (Entra identity, app, capability) and a run-scoped delegated cache keyed by (Entra identity, delegated, user oid, capability). Capability stays in the key so the realm keeps deciding policy per capability.
+12. **Approver vs initiator:** a typed `ApproverRef` is passed to `recordDecision`. Approvals are kept on the run record and in a `hitl-decision` audit record, and authority is rebuilt only from the run's own record (AD-9).
+13. **Testing:** fakes for every port, fast-check property tests, the SC-007 sentinel scan and the SC-011 benchmark with injected transports. Live evidence is gathered by the operator.
+14. **Executable models:**
+    - LC-1: custody lifecycle.
+    - INV-1: no RFC 8693 token exchange (checkable lint rule).
+    - INV-2: one source for the authority mode (owned by the catalog, with a matrix test).
+    - INV-3: no credential material in observable surfaces (advisory).
+    - CT-1 to CT-3: admission, the mint path, and continuity.
+    - No pipeline.
+15. **Port placement:** new ports go in `packages/host/src/domain/port/` as `architecture.md` requires. The local convention defines ports inside adapter files; this conflict is flagged and existing ports are not moved (AD-11).
+16. **Doc truth:** a `scripts/check-identity-docs.ts` doc-lint (status matrix, banned phrases, evidence-gated statuses) wired into `scripts/verify.sh` (AD-10).
+17. **Realm work:** this is specified in the plan's "Cross-Repo Realm Work" section and executed outside the task graph in the keycloakConfigAsCode worktree. It covers:
+    - the `entra_oid` and `entra_tid` claims, with an admin-only user-profile edit
+    - token exchange pinned off
+    - an exact scope comparison
+    - no broker token storage
+    - idempotent reconcile or explicit reject
+    - an opt-in predictable service-account subject
+
+    Deploy order: the realm before the host.
+
+### 2026-11-24: Spec id renumbering
+
+**Change:** The Loom spec parser accepts only canonical ids, so decompose could not read the spec. AS-013a was renumbered to AS-033, AS-026a to AS-034 and FR-019a to FR-025. The `(P3)` tags on AS-019 and FR-033 moved after the id colon. References in this log and in the spec were updated in place. No requirement text changed.
+**Decided by:** the architecture agent, as a mechanical fix.
