@@ -329,3 +329,9 @@ The second plan design review returned 12 advisories (11 numbered; the twelfth, 
 Consequence recorded with item 1: in the Phase 4 cut-over `RunRecord.authority` replaces `RunRecord.identity` and `RunExecutionRequest.authority` replaces its identity; `PersistedIdentity`, `toPersistedIdentity` and `toExecIdentity` are deleted.
 
 **Decided by:** the architecture agent, under user delegation (orchestrator acceptance of every advisory).
+
+### 2026-11-25: Loop-back 7 (condensation)
+
+Lossless restructure to fit the plan-design review read budget; no design change. The Self-Interview moved to `architecture-interview.md`; the Change Log, the three plan self-audits, the full Approaches B and C and the pre-condensation AD wording moved to `plan-history.md`.
+
+**Decided by:** the architecture agent, under user delegation.
