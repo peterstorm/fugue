@@ -217,3 +217,14 @@ No interview was held. Every answer below was **decided by the architecture agen
 
 **Change:** The Loom spec parser accepts only canonical ids, so decompose could not read the spec. AS-013a was renumbered to AS-033, AS-026a to AS-034 and FR-019a to FR-025. The `(P3)` tags on AS-019 and FR-033 moved after the id colon. References in this log and in the spec were updated in place. No requirement text changed.
 **Decided by:** the architecture agent, as a mechanical fix.
+
+### 2026-11-24: Loop-back 1 (plan alignment)
+
+The plan-alignment gap report raised four gaps. The approach (A) and the interview answers are unchanged. **User: please review.**
+
+- **JUDGE-1, latency budgets gate the phases that build the code.** The NFR-002 budgets (host-added acquisition overhead of at most 10 ms p95, cache hit of at most 5 ms p95) are now a CT-2 acceptance file, gated at Phase 3, which builds the mint path. The NFR-003 budget (run-start validation of at most 50 ms p95) is now a CT-1 acceptance file, gated at Phase 5, which builds admission. Both use injected zero-latency transports, 50 warm-up and 500 timed samples, and a nearest-rank p95. The Phase 6 benchmark is removed. Loom accepts only FR and AS ids as acceptance anchors, so the spec gains **AS-035** and **AS-036**. They restate the "verified in the automated suite with injected transports" clauses that NFR-002 and NFR-003 already contained. No NFR or SC text changed.
+- **OWN-1, custody deletion has one owner.** New owned invariant **INV-4**. The owner is `adapters/custody-release.ts` (`releaseCustody(runId, cause)`), the only holder of the custody store's `delete`. Its siblings are `hitl/service.ts` (terminal arms, corrupt-checkpoint settle, evicted record, start compensation), `http/handlers/run-dag.ts` (sync `finally`, establishment failure) and `adapters/delegation-establishment.ts` (put compensation). The matrix test drives every path, with mutation verification on, and replaces `custody-teardown.test.ts`. Idle Redis-TTL eviction and tenant purge have no code path, so they are not siblings. Custody PX (at most the record TTL) and `purgeTenantKeyspace` cover them, and the Redis store test asserts both.
+- **SEAM-1, the supervisor proxy is a CT-1 seam.** `proxyToWorker` is declared as a runtime seam. CT-1 acceptance submits a delegated run through it into the worker's auth middleware and route. It asserts that the delegated header is forwarded byte-identical, that a client-forged tenant header is stripped, and that nothing is logged.
+- **SEAM-2, approvals go through the production handlers.** CT-3's runtime seams add `createAuthMiddleware`, `createApproveRunHandler`, `handleBotActivity`, `errorResponse` and `createCustodyRelease`. CT-3 acceptance approves over HTTP and through the Teams bot handler, so the `ApproverRef` is derived as in production.
+
+**Decided by:** the architecture agent, under the user's explicit delegation.

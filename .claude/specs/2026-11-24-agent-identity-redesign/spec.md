@@ -33,6 +33,7 @@ Scope covers two repositories: the Fugue host, and the `fugue-platform` realm pa
 - AS-003: Given an agent client whose realm configuration does not grant the Entra-exchange scope, When a credential is requested, Then the mint fails closed with a typed, actionable error naming the missing grant, and no Entra egress occurs
 - AS-004: Given two different agent clients served by the same host deployment, When both acquire downstream credentials, Then each credential is issued to a distinct Entra identity, and neither agent's cached credential is ever returned to the other
 - AS-005: Given Entra rejects the federated assertion (issuer, subject, or audience mismatch), When the exchange fails, Then the node receives a typed failure that distinguishes a federation-configuration error from a transient error, and no credential material appears in the error or audit
+- AS-035: Given realm and Entra transports injected so that they answer without delay, When the automated suite measures downstream credential acquisition under both identity models and both authority modes, Then the host-added overhead of a cache miss is at most 10 ms p95, and a cache hit is at most 5 ms p95 and makes no transport call (the automated-suite clause of NFR-002 and NFR-001)
 
 ### US2: [P1] Capability declares its authority mode; user-origin `app` runs attribute without holding user tokens
 
@@ -94,6 +95,7 @@ Scope covers two repositories: the Fugue host, and the `fugue-platform` realm pa
 - AS-023: Given an Entra user token with the wrong audience, a wrong or foreign tenant, an expired lifetime, or an invalid signature, When the run is submitted, Then the run is refused at run-start validation and no on-behalf-of exchange is attempted
 - AS-024: Given a node that requires one `app` capability and one `delegated` capability, When both are invoked, Then the `app` handle is backed by the agent's own credential and the `delegated` handle by the on-behalf-of credential, and neither credential is reachable through the other's handle
 - AS-025: Given the user's Entra account is disabled or the user's consent is revoked mid-run, When a later `delegated` invocation needs a credential, Then Entra's refusal surfaces as a typed authorization failure and the run does not fall back to `app` authority
+- AS-036: Given signing-key and realm transports injected so that they answer without delay, and the signing-key set already fetched once, When the automated suite measures run submission, Then run-start validation of authority modes, delegated-token verification and identity binding together add at most 50 ms p95 (the automated-suite form of NFR-003)
 
 ### US6: [P2] Delegated authority survives long runs and human-approval suspension
 
@@ -297,3 +299,4 @@ Scope covers two repositories: the Fugue host, and the `fugue-platform` realm pa
 | 2026-11-24 | Initial draft from the settled design and issue #42 (specify interview not held because the tool was unavailable) | specify-agent |
 | 2026-11-24 | Clarify: resolved all 17 markers under the user's explicit delegation (see `clarifications/log.md`); added AS-033, AS-034, FR-019, FR-025, FR-044, SC-012, SC-013, OOS-009; status Draft to Clarified | clarify-agent |
 | 2026-11-24 | Architecture: renumbered non-canonical ids so the Loom spec parser (decompose input) accepts the spec: AS-013a to AS-033, AS-026a to AS-034, FR-019a to FR-025; moved the `(P3)` tags on AS-019 and FR-033 after the id colon. No requirement text changed | architecture-agent |
+| 2026-11-24 | Architecture loop-back 1 (plan alignment): added AS-035 and AS-036, which restate as acceptance scenarios the automated-suite clauses NFR-002 and NFR-003 already contained ("verified in the automated suite with injected transports"), so the latency budgets can be acceptance-contract anchors (Loom accepts only FR and AS ids there). No NFR, SC or existing requirement text changed; the live targets stay operator evidence (OOS-001) | architecture-agent |

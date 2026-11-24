@@ -28,8 +28,8 @@ Only an agent's own identity federates into Entra. The host requests every realm
 | 10 | Error taxonomy | A new framework kind `authority-unavailable{scope, agentClientId, cause}`, which is non-retriable, with the causes `federation-grant-missing`, `authority-unconfigured`, `federation-rejected` and `reauthorization-required`. Transient failures stay `infra-unreachable` and are not retried internally (NFR-021). Run-start refusals are a host `run-authority-refused` error carrying the frozen `RunAuthorityRefusal` ADT. |
 | 11 | Caching and concurrency | App tokens use boot-scoped single-flight cells keyed by (Entra identity, `app`, capability). Delegated tokens use run-scoped cells keyed by (Entra identity, `delegated`, user oid, capability), which live inside the `forRun` closure and die with the run. Capability stays in the key so the realm, as the policy decision point, is consulted per capability (AD-5). |
 | 12 | HITL approver vs initiator | Approval lends no authority. `recordDecision` takes a typed `ApproverRef`; the run record appends an `ApprovalRecord`, and a `hitl-decision` audit record names approver and initiator separately. After resume, the run rebuilds its `RunAuthority` only from the persisted record. |
-| 13 | Testing and verification | Fakes for every port; fast-check property tests for the planner, the binding, catalog parsing, custody transitions and cache isolation; a sentinel-token scan (SC-007); and a latency benchmark with injected transports (SC-011). Live-tenant evidence belongs to the operator (OOS-001). |
-| 14 | Executable models | One lifecycle (custody, LC-1). Invariants: the RFC 8693 prohibition (checkable), single-source authority mode (owned), and no credential material in observable surfaces (advisory). Three contracts. No Pipeline: this is not a fugue DAG feature. |
+| 13 | Testing and verification | Fakes for every port; fast-check property tests for the planner, the binding, catalog parsing, custody transitions and cache isolation; a sentinel-token scan (SC-007); and latency budget tests with injected transports (SC-011), which since alignment loop-back 1 are acceptance tests of CT-2 (acquisition, Phase 3) and CT-1 (admission, Phase 5). Live-tenant evidence belongs to the operator (OOS-001). |
+| 14 | Executable models | One lifecycle (custody, LC-1). Invariants: the RFC 8693 prohibition (checkable), single-source authority mode (owned), no credential material in observable surfaces (advisory), and, since alignment loop-back 1, custody release at every terminal state (owned, INV-4). Three contracts. No Pipeline: this is not a fugue DAG feature. |
 
 ---
 
@@ -160,7 +160,7 @@ Only an agent's own identity federates into Entra. The host requests every realm
 - The verified user token is wrapped in a `RedactedSecret` and dropped as soon as establishment returns.
 - Redeeming refreshes through the agent identity. A rotated refresh token is re-sealed and the expiry is never extended.
 - If Entra refuses, custody moves to `revoked`, and the capability fails `authority-unavailable{cause: reauthorization-required}` with no `app` fallback.
-- Teardown deletes custody in `settleRunOutcome`'s terminal arms, in the sync `finally`, and at tenant purge (the key is under the tenant prefix).
+- Teardown goes through one owner, `releaseCustody` in `adapters/custody-release.ts` (INV-4). Every run-ending path calls it: `settleRunOutcome`'s terminal arms, the corrupt-checkpoint settle, `processRun` on an evicted record, the `startRun` compensation, the sync `finally` and establishment-failure path in `run-dag.ts`, and the `establishDelegation` compensation. Only the owner is handed the store's `delete`; every sibling receives `ReleaseCustody` and a narrowed store (`Pick<DelegatedCustodyStore, "put">` or `"get" | "replace"`), so no sibling can delete custody another way. Two removals need no code path and so are not siblings: a run record evicted by Redis TTL while idle (custody PX is the binding expiry, fixed at establishment and at most `HITL_RUN_TTL_SEC`, so custody expires no later than the record) and tenant purge (`purgeTenantKeyspace` reclaims `fugue:<tenant>:*`, custody keys included).
 **Why:**
 - The user token is touched once and never persisted. Only an agent-bound, encrypted, revocable refresh credential is held, which meets FR-017, FR-023 and AS-026 to AS-027.
 - Entra enforces revocation at every refresh.
@@ -267,11 +267,14 @@ packages/framework/src/__tests__/authority-unavailable-error.test.ts — persist
 ```
 packages/host/src/domain/run-authority-contract.ts              — CT-1 types: EntraObjectId, EntraTenantId, EntraClientId brands, EntraPrincipal, Initiator, AuthorityMode, CapabilityRequirement, DelegatedPresentation, VerifiedDelegationGrant, RedactedSecret, RunAuthority, RunAuthorityPlan, RunAuthorityRefusal, PlanRunAuthorityFn, BindDelegatedPrincipalFn, ValidateEntraUserTokenClaimsFn
 packages/host/src/domain/capability-authority-contract.ts       — CT-2 types: EntraIdentityRef, FederatedAssertion, AssertionFault, EntraAcquisitionFault, AcquiredCredential, CapabilityAuthority (forRun), CreateCapabilityAuthorityFn, InspectFederatedAssertionFn
-packages/host/src/domain/delegated-custody-contract.ts          — CT-3 types: CustodyBinding, SealedRefreshCredential, CustodyState, CustodyEvent, CustodyTransitionFault, DelegationEstablishmentFault, ApproverRef, ApprovalRecord, EstablishDelegationFn, TransitionCustodyFn
-packages/host/src/__tests__/acceptance/run-authority-admission.acceptance.test.ts — CT-1 acceptance
+packages/host/src/domain/delegated-custody-contract.ts          — CT-3 types: CustodyBinding, SealedRefreshCredential, CustodyState, CustodyEvent, CustodyTransitionFault, DelegationEstablishmentFault, ApproverRef, ApprovalRecord, CustodyReleaseCause, CustodyReleaseOutcome, ReleaseCustody, EstablishDelegationFn, TransitionCustodyFn, CreateCustodyReleaseFn
+packages/host/src/__tests__/acceptance/run-authority-admission.acceptance.test.ts — CT-1 acceptance (incl. delegated header through the supervisor UDS proxy)
+packages/host/src/__tests__/acceptance/run-authority-admission-budget.acceptance.test.ts — CT-1 acceptance: run-start validation p95 budget (AS-036; NFR-003, SC-011)
 packages/host/src/__tests__/acceptance/capability-authority.acceptance.test.ts     — CT-2 acceptance
-packages/host/src/__tests__/acceptance/delegated-continuation.acceptance.test.ts   — CT-3 acceptance
-packages/host/src/__tests__/acceptance/support/identity-fakes.ts — shared fakes: realm mint, Entra authority (both models), JWKS signer, custody store, clock
+packages/host/src/__tests__/acceptance/capability-authority-budget.acceptance.test.ts — CT-2 acceptance: host-added acquisition and cache-hit p95 budgets (AS-035; NFR-002, SC-011)
+packages/host/src/__tests__/acceptance/delegated-continuation.acceptance.test.ts   — CT-3 acceptance (approvals driven through the approve route and the Teams bot handler)
+packages/host/src/__tests__/acceptance/support/identity-fakes.ts — shared fakes: realm mint, Entra authority (both models), JWKS signer, custody store, clock, zero-latency HTTP transports, in-process UDS transport into the worker router
+packages/host/src/__tests__/acceptance/support/latency-budget.ts — shared budget harness: warm-up, sample loop, nearest-rank p95 (test support, not production)
 ```
 
 ### Host: capability catalog (authority mode source)
@@ -361,15 +364,19 @@ packages/host/src/domain/port/delegated-custody-store.ts        — DelegatedCus
 packages/host/src/adapters/custody-cipher.ts                    — AES-256-GCM seal/open via WebCrypto; kid rotation; AAD mismatch → open fails
 packages/host/src/adapters/delegated-custody-store-redis.ts     — fugue:<tenant>:authority:custody:<runId>, PX = custody expiry, ciphertext only
 packages/host/src/adapters/delegated-custody-store-memory.ts    — process-local store for Redis-less sync deployments (ciphertext only)
-packages/host/src/adapters/delegation-establishment.ts          — establishDelegation: mint → OBO → seal → put; compensation on failure
+packages/host/src/adapters/delegation-establishment.ts          — establishDelegation: mint → OBO → seal → put; compensation through releaseCustody (INV-4 sibling); holds only Pick<DelegatedCustodyStore, "put">
+packages/host/src/adapters/custody-release.ts                   — INV-4 owner: createCustodyRelease → releaseCustody(runId, cause); the only holder of DelegatedCustodyStore.delete; idempotent; logs a failed delete with runId, cause and error kind only; never throws
 packages/host/src/adapters/__tests__/custody-cipher.test.ts     — round-trip; tampered AAD/ciphertext/kid refused; plaintext never in stored bytes
-packages/host/src/adapters/__tests__/delegated-custody-store-redis.test.ts — key under tenant prefix; TTL; delete
-packages/host/src/adapters/__tests__/delegation-establishment.test.ts — compensation; failure → typed fault; zero app fallback
+packages/host/src/adapters/__tests__/delegated-custody-store-redis.test.ts — key under tenant prefix; PX = binding expiry ≤ HITL_RUN_TTL_SEC (idle-eviction cover); purgeTenantKeyspace reclaims the custody key (tenant-purge cover); delete idempotent
+packages/host/src/adapters/__tests__/delegated-custody-store-memory.test.ts — expiry honoured on get (expired → absent); delete idempotent
+packages/host/src/adapters/__tests__/delegation-establishment.test.ts — failure → typed fault; zero app fallback
+packages/host/src/__tests__/custody-release.matrix.test.ts      — INV-4 matrix: owner + every sibling; each terminal path leaves custody absent
 ```
 
 **Export bindings:**
 - `packages/host/src/domain/delegated-custody.ts` — CT-3: transitionCustody: TransitionCustodyFn
 - `packages/host/src/adapters/delegation-establishment.ts` — CT-3: establishDelegation: EstablishDelegationFn
+- `packages/host/src/adapters/custody-release.ts` — CT-3: createCustodyRelease: CreateCustodyReleaseFn
 
 ### Host: capability authority (mint path)
 
@@ -394,13 +401,12 @@ packages/host/src/adapters/__tests__/broker-audit.test.ts       — new fields; 
 ```
 packages/host/src/hitl/types.ts                                 — PersistedIdentity.user gains entra; RunRecord gains authority: RunAuthority, approvals: readonly ApprovalRecord[]
 packages/host/src/hitl/identity.ts                              — toPersistedIdentity / toExecIdentity carry entra; approver mapping to ApproverRef
-packages/host/src/hitl/service.ts                               — startRun(dagId, team, input, identity, plan) establishes delegation before record creation (compensating delete); settleRunOutcome terminal arms delete custody; recordDecision(..., approver) appends ApprovalRecord + hitl-decision audit
+packages/host/src/hitl/service.ts                               — startRun(dagId, team, input, identity, plan) establishes delegation before record creation (compensation via releaseCustody); settleRunOutcome terminal arms, the corrupt-checkpoint settle and processRun on an evicted record call releaseCustody (INV-4 sibling); recordDecision(..., approver) appends ApprovalRecord + hitl-decision audit
 packages/host/src/hitl/adapters/run-store.ts                    — record schema: authority + approvals required (records without them are rejected as corrupt; pre-release, no shim)
 packages/host/src/hitl/adapters/run-executor.ts                 — MintingAuthority from capabilityAuthority.forRun(record.authority); no subject-token bind
-packages/host/src/http/handlers/runs.ts                         — approve handler passes ApproverRef from AuthIdentity
-packages/host/src/hitl/adapters/bot/messages-handler.ts         — passes teams-user ApproverRef
-packages/host/src/hitl/__tests__/approver-authority.test.ts     — different approver → initiator still acts; approval audit names both
-packages/host/src/hitl/__tests__/custody-teardown.test.ts       — every terminal arm deletes custody (completed, failed, cancelled, evicted, reconcile)
+packages/host/src/http/handlers/runs.ts                         — createApproveRunHandler derives ApproverRef (realm-user{realmSub, entra} | team | admin) from the AuthIdentity the auth middleware built; refusals via errorResponse (CT-3 runtime seam)
+packages/host/src/hitl/adapters/bot/messages-handler.ts         — handleBotActivity derives teams-user{aadObjectId} from the verified activity's from.aadObjectId (CT-3 runtime seam)
+packages/host/src/hitl/__tests__/approver-authority.test.ts     — unit: ApproverRef mapping per AuthIdentity variant; approval audit names both
 packages/host/src/hitl/adapters/__tests__/run-executor.test.ts  — rewritten: authority from record only
 ```
 
@@ -408,7 +414,8 @@ packages/host/src/hitl/adapters/__tests__/run-executor.test.ts  — rewritten: a
 
 ```
 packages/host/src/http/delegated-token-header.ts                — parse X-Fugue-Delegated-Authorization → absent | present(RedactedSecret) | malformed
-packages/host/src/http/handlers/run-dag.ts                      — admission (plan → verify → bind) before hitl.startRun and acquire; establishment after acquire (sync); custody teardown in finally
+packages/host/src/http/handlers/run-dag.ts                      — admission (plan → verify → bind) before hitl.startRun and acquire; establishment after acquire (sync); releaseCustody in finally and on establishment failure (INV-4 sibling)
+packages/host/src/supervisor/uds-proxy.ts                       — unchanged: proxyToWorker forwards X-Fugue-Delegated-Authorization byte-identical and strips only X-Fugue-Tenant; a CT-1 runtime seam, driven by CT-1 acceptance
 packages/host/src/http/handlers/manifest.ts                     — per-DAG authority block: modes per capability, delegated header requirement, expected audience, tenant
 packages/host/src/domain/host-error.ts                          — run-authority-refused{refusal: RunAuthorityRefusal} + snapshot table entry
 packages/host/src/domain/framework-error-http.ts                — authority-unavailable mapping (grant-missing 403, unconfigured 503, federation-rejected 502, reauthorization-required 401)
@@ -419,7 +426,6 @@ packages/host/src/__tests__/node-context-factory.test.ts        — rewritten
 packages/host/src/__tests__/handlers/run-dag-authority.test.ts  — refusal ordering: zero acquire, zero startRun, zero egress on refusal
 packages/host/src/__tests__/handlers/manifest-authority.test.ts — authority block shape per model
 packages/host/src/__tests__/credential-sentinel-scan.test.ts    — SC-007: sentinel tokens through every path; scan logs, audit, errors, handles, origin, run records, custody bytes
-packages/host/src/__tests__/identity-latency.bench.test.ts      — SC-011: host overhead ≤10 ms p95, cache hit ≤5 ms p95, admission ≤50 ms p95 with injected transports
 packages/host/src/adapters/subject-token-registry.ts            — DELETED (Phase 1)
 packages/host/src/adapters/__tests__/subject-token-registry.test.ts — DELETED (Phase 1)
 packages/host/src/__tests__/subject-token-teardown.test.ts      — DELETED (Phase 1)
@@ -582,7 +588,7 @@ Refusal precedence, a property-tested total order: `agent-client-unmapped` → `
 ### Delegated Custody
 
 **Responsibility:** Hold the run-bound refresh credential only as ciphertext, through a typed lifecycle with a fixed expiry, until the run's terminal state.
-**Files:** `domain/delegated-custody.ts` (LC-1), `domain/port/delegated-custody-store.ts`, `adapters/custody-cipher.ts`, `adapters/delegated-custody-store-redis.ts`, `adapters/delegated-custody-store-memory.ts`, `adapters/delegation-establishment.ts`
+**Files:** `domain/delegated-custody.ts` (LC-1), `domain/port/delegated-custody-store.ts`, `adapters/custody-cipher.ts`, `adapters/delegated-custody-store-redis.ts`, `adapters/delegated-custody-store-memory.ts`, `adapters/delegation-establishment.ts`, `adapters/custody-release.ts` (INV-4 owner)
 **Interface:**
 
 ```
@@ -605,11 +611,25 @@ interface DelegatedCustodyStore {
   put(runId, state: Extract<CustodyState, {kind:"held"}>): Promise<Result<void, HostError>>   // NX
   get(runId): Promise<Result<CustodyState, HostError>>                                     // missing → absent
   replace(runId, next: CustodyState, expectedGeneration: number): Promise<Result<void, HostError>>  // CAS
-  delete(runId): Promise<Result<void, HostError>>                                          // idempotent
+  delete(runId): Promise<Result<void, HostError>>                                          // idempotent; handed ONLY to createCustodyRelease
 }
-establishDelegation(deps, plan: Extract<RunAuthorityPlan,{kind:"user-delegated-pending"}>, runId, runDeadlineMs)
+type CustodyReleaseCause =
+  | { kind: "hitl-completed" } | { kind: "hitl-failed" }                // settleRunOutcome terminal arms (a rejected gate settles failed)
+  | { kind: "hitl-corrupt-checkpoint" }                                 // processRun settles failed
+  | { kind: "hitl-record-evicted" }                                     // processRun finds no record
+  | { kind: "hitl-start-compensation" }                                 // record creation failed after establishment
+  | { kind: "sync-settled"; outcome: "completed" | "failed" | "aborted" } // run-dag finally (abort covers timeout and client cancel)
+  | { kind: "sync-establishment-failed" }                               // run-dag, before the slot is released
+  | { kind: "establishment-compensation" }                              // establishDelegation: put failed or was ambiguous
+type CustodyReleaseOutcome = { kind: "released" } | { kind: "release-failed"; error: HostError }
+type ReleaseCustody = (runId: RunId, cause: CustodyReleaseCause) => Promise<CustodyReleaseOutcome>   // never rejects
+createCustodyRelease(deps: { custody: Pick<DelegatedCustodyStore, "delete">; logger: LogPort }): ReleaseCustody   // INV-4 owner
+establishDelegation(deps: { mint; entra; cipher; custody: Pick<DelegatedCustodyStore, "put">; releaseCustody: ReleaseCustody; now },
+    plan: Extract<RunAuthorityPlan,{kind:"user-delegated-pending"}>, runId, runDeadlineMs)
   : Promise<Result<Extract<RunAuthority,{kind:"user-delegated"}>, DelegationEstablishmentFault>>
 ```
+
+`releaseCustody` is unconditional and idempotent: a run that never held custody costs one `DEL` on a missing key, so no caller decides whether a run "had" custody, and a mutant owner cannot hide behind a skipped branch. On a dark delegation leg the owner is composed over the in-memory store, which stays empty because the planner refuses every delegated run there. A failed delete is logged at error as a structured record with `runId`, `cause` and the error kind only (never the sealed bytes), and the ciphertext still expires at its PX.
 
 **Depends on:** LC-1, CT-3 types, `RealmAssertionMint`, `EntraAgentAuthority`, Redis port.
 
@@ -625,7 +645,7 @@ interface CapabilityAuthority {
 }
 createCapabilityAuthority(deps: {
   catalog: CapabilityCatalog; legs: AuthorityLegs; assignedScopes: (a: AgentClientId) => ReadonlySet<string>;
-  mint: RealmAssertionMint; entra: EntraAgentAuthority; custody: DelegatedCustodyStore; cipher: CustodyCipher;
+  mint: RealmAssertionMint; entra: EntraAgentAuthority; custody: Pick<DelegatedCustodyStore, "get" | "replace">; cipher: CustodyCipher;
   graphHttp: GraphHttp; dynamicsOrgHost?: string; tracer; logger; audit; now
 }): CapabilityAuthority
 ```
@@ -651,13 +671,15 @@ Per invocation:
 RunDagDeps += {
   admitRunAuthority: (identity, registered, header: DelegatedHeader) => Promise<Result<RunAuthorityPlan, RunAuthorityRefusal>>
   establishRunAuthority: (plan, runId, deadlineMs) => Promise<Result<RunAuthority, RunAuthorityRefusal>>
-  releaseRunAuthority: (runId, authority) => Promise<void>       // custody delete; logs, never throws
+  releaseCustody: ReleaseCustody                                  // INV-4 owner, injected; run-dag never sees the custody store
   executeDag: (dag, input, ctx, authority: RunAuthority, meter) => ...
 }
 HitlRunService.startRun(dagId, team, input, identity, plan: RunAuthorityPlan)
 ```
 
-Sync order: lookup, then access, then body, then schema, then **admit**. If HITL, `startRun` (which establishes) and return. Otherwise acquire, circuit, **establish** (releasing the slot on failure), execute, and in `finally` **release**.
+Sync order: lookup, then access, then body, then schema, then **admit**. If HITL, `startRun` (which establishes) and return. Otherwise acquire, circuit, **establish** (on failure `releaseCustody(runId, sync-establishment-failed)`, then release the slot), execute, and in `finally` `releaseCustody(runId, sync-settled{outcome})`.
+
+In a multi-tenant deployment the request reaches this handler through the supervisor: `proxyToWorker` (`supervisor/uds-proxy.ts`) clones every inbound header, deletes the client's `X-Fugue-Tenant`, stamps the signed one and forwards the rest, so `X-Fugue-Delegated-Authorization` arrives byte-identical and is never logged (the proxy logs only the tenant and the transport reason). CT-1 declares `proxyToWorker` as a runtime seam and its acceptance drives a submission through it, so a future header allowlist in the proxy that drops the delegated header fails CT-1.
 **Depends on:** Planner, Custody, Capability Authority, HITL service.
 
 ### HITL Authority Continuity
@@ -670,9 +692,12 @@ Sync order: lookup, then access, then body, then schema, then **admit**. If HITL
 RunRecord += { authority: RunAuthority; approvals: readonly ApprovalRecord[] }
 ApprovalRecord = { nodeId: NodeId; decision: HumanAction["kind"]; approver: ApproverRef; atMs: number }
 recordDecision(runId, nodeId, action, approver: ApproverRef): Promise<Result<void, HostError>>
+HitlRunServiceDeps += { establishDelegation; releaseCustody: ReleaseCustody }   // no custody store
 ```
 
-**Depends on:** CT-1 and CT-3 types, Capability Authority, Custody store.
+The approver is derived where production derives it, never handed in by a caller of the service: `createApproveRunHandler` maps the `AuthIdentity` that `createAuthMiddleware` built (a realm user carries its Entra principal) to `realm-user{realmSub, entra}`, `team{team}` or `admin`, and serializes refusals through `errorResponse`; `handleBotActivity` maps the verified activity's `from.aadObjectId` to `teams-user{aadObjectId}`. CT-3 declares all four symbols as runtime seams, so its acceptance approves through the route and the bot handler, not through `recordDecision` with a hand-built approver.
+
+**Depends on:** CT-1 and CT-3 types, Capability Authority, Custody release (INV-4).
 
 ### Doc Lint
 
@@ -714,7 +739,10 @@ forRun(record.authority) → run cell[(entraId, delegated, oid, cap)] miss → c
   → open → mint → redeemDelegation → rotate? seal + replace(CAS) → handle
   refused → transition(refuse) → authority-unavailable{reauthorization-required: refused} (no app fallback)
 
-Terminal (completed | failed | cancelled | evicted | reconcile-failed | sync finally | tenant purge) → custody.delete
+Terminal (hitl completed | hitl failed incl. rejected | corrupt checkpoint | record evicted | start compensation
+          | sync finally: completed, failed, aborted | sync establishment failed | establishment compensation)
+  → releaseCustody(runId, cause) → custody.delete (INV-4 owner, idempotent, never throws)
+Idle TTL eviction → custody PX (≤ record TTL) | tenant purge → purgeTenantKeyspace(fugue:<tenant>:*)
 ```
 
 The only places a bearer token exists are the inbound request (dropped after establishment), the per-call Entra form bodies, and the in-memory token cells. Custody holds only ciphertext bound by AAD.
@@ -782,6 +810,17 @@ The machine imports `CustodyState` and `CustodyEvent` from the CT-3 types file, 
 **Unowned reason:** A prohibition. It spans every module that logs, audits, formats errors, builds handles or persists records, and no single module can own an absence (FR-022, SC-007).
 **Statement:** No bearer token, assertion, refresh token, T1 token or custody plaintext appears in logs, audit records, error messages, `formatFrameworkError` output, capability handles, `InvocationOrigin`, HITL run records or custody bytes. A regex cannot recognise a token value, so this stays advisory. `credential-sentinel-scan.test.ts` drives sentinel tokens through every path and scans every captured surface.
 
+### INV-4: Delegated custody is released through one owner at every run-ending path
+
+**Tier:** advisory
+**Owner module:** `packages/host/src/adapters/custody-release.ts`
+**Sibling entry points:**
+- `packages/host/src/hitl/service.ts` — `settleRunOutcome`'s completed and failed arms (a rejected gate settles failed), the corrupt-checkpoint settle and the evicted-record arm of `processRun`, and the `startRun` compensation when record creation fails after establishment
+- `packages/host/src/http/handlers/run-dag.ts` — the sync `finally` (completed, failed, aborted by timeout or client cancel) and the establishment-failure path before the slot is released
+- `packages/host/src/adapters/delegation-establishment.ts` — the compensation when the custody `put` fails or is ambiguous
+**Matrix test:** `packages/host/src/__tests__/custody-release.matrix.test.ts`
+**Statement:** Every code path that ends a run, or abandons a run's delegation establishment, makes that run's delegated custody unretrievable by calling `releaseCustody(runId, cause)` from the owner, which alone holds `DelegatedCustodyStore.delete` (FR-023, AS-027, SC-012). No other module deletes, expires or overwrites custody to end it; siblings receive `ReleaseCustody` and a store narrowed to `put` or `get | replace`, so a second deletion path does not type-check. The rule covers the HITL service's terminal arms, corrupt-checkpoint settle, evicted-record arm and start compensation, the sync handler's `finally` and establishment-failure path, and the establishment compensation. Two removals have no code path and are outside the sibling list by design: an idle run record evicted by Redis TTL (custody PX is the binding expiry, fixed at establishment and at most `HITL_RUN_TTL_SEC`, so custody expires no later than the record) and tenant purge (`purgeTenantKeyspace` deletes `fugue:<tenant>:*`, custody keys included); `delegated-custody-store-redis.test.ts` asserts both. The matrix test uses the real owner over the in-memory store with seeded `held` custody and drives each sibling path (HITL: completed, failed, rejected, corrupt checkpoint, evicted record, start compensation; sync: completed, failed, aborted, establishment failure; establishment: failed put, ambiguous put), asserting after each that `get(runId)` is `absent` and the logged cause is the path's own. A row with a store whose `delete` fails asserts `release-failed`, one error log naming `runId` and `cause` with no credential bytes, and that no sibling path throws. So a mutant owner that skips the delete, swallows the outcome or drops the log fails the matrix. The tier is advisory because a regex cannot tell a custody delete from any other `delete` call; the narrowed sibling types, the matrix test and owner mutation verification enforce it. The owner and the matrix test (owner and `delegation-establishment.ts` rows) land in Phase 3; Phase 4 adds the `hitl/service.ts` rows and Phase 5 the `run-dag.ts` rows. If decompose schedules an earlier Task that lists one of those siblings (for example to follow the `startRun` signature change into `run-dag.ts`), that Task's Wave adds the sibling's rows instead.
+
 ---
 
 ## Contracts
@@ -791,25 +830,28 @@ The machine imports `CustodyState` and `CustodyEvent` from the CT-3 types file, 
 **Types file:** `packages/host/src/domain/run-authority-contract.ts`
 **Acceptance tests:**
 - `packages/host/src/__tests__/acceptance/run-authority-admission.acceptance.test.ts` — AS-006, AS-010, AS-021, AS-022, AS-023, FR-004, FR-006, FR-007, FR-008, FR-009, FR-018, FR-020, FR-036
+- `packages/host/src/__tests__/acceptance/run-authority-admission-budget.acceptance.test.ts` — AS-036
 **Supported domain:** `packages/host/src/__tests__/acceptance/run-authority-admission.acceptance.test.ts`
 **Entry point:** `packages/host/src/http/handlers/run-dag.ts`
 **Runtime seams:**
+- `proxyToWorker` (`packages/host/src/supervisor/uds-proxy.ts`: the supervisor forwards every tenant request to its worker here, stripping the client's `X-Fugue-Tenant` and forwarding `X-Fugue-Delegated-Authorization`)
 - `createAuthMiddleware` (`packages/host/src/http/middleware/auth.ts`: every request's identity, including the Entra principal, is built here)
 - `createRunDagHandler` (`packages/host/src/http/handlers/run-dag.ts`: the production route handler)
 - `errorResponse` (`packages/host/src/http/response.ts`: refusal serialization)
-**Statement:** A run is admitted under exactly one `RunAuthority`, decided before any HITL fork, concurrency acquisition or token egress. A user run with only `app` capabilities is admitted as `user-app` with initiator attribution (realm sub, oid, tid) and retains no user token, and admin and team paths behave as before. Refused, each with its typed refusal and HTTP status: an agent-origin (team or admin) run whose DAG requires a delegated capability (naming node and capability); a user run requiring delegation with no Entra token; an invalid Entra token (bad signature, issuer, tenant, audience, expiry, a non-delegated token, or a wrong version); a mismatched `oid` or `tid`; an Entra token sent to a run that needs none; and delegation requested on a deployment whose delegation leg is dark.
+**Statement:** A run is admitted under exactly one `RunAuthority`, decided before any HITL fork, concurrency acquisition or token egress. A user run with only `app` capabilities is admitted as `user-app` with initiator attribution (realm sub, oid, tid) and retains no user token, and admin and team paths behave as before. Refused, each with its typed refusal and HTTP status: an agent-origin (team or admin) run whose DAG requires a delegated capability (naming node and capability); a user run requiring delegation with no Entra token; an invalid Entra token (bad signature, issuer, tenant, audience, expiry, a non-delegated token, or a wrong version); a mismatched `oid` or `tid`; an Entra token sent to a run that needs none; and delegation requested on a deployment whose delegation leg is dark. Submitted through the supervisor (`proxyToWorker` with an in-process transport into the worker's auth middleware and route), a delegated submission arrives with `X-Fugue-Delegated-Authorization` byte-identical and is admitted, a client-forged `X-Fugue-Tenant` never reaches the worker (only the supervisor-signed value does), a refusal returns to the client with the worker's status and body unchanged, and no proxy log line carries the delegated token. Run-start validation (realm JWT authentication, authority planning, delegated-token signature and claim verification through the real verifier over an in-process JWKS, and binding) adds at most 50 ms p95 to a submission, measured through the proxy and route after a warm-up that absorbs the first signing-key fetch.
 
 ### CT-2: Capability authority mint path
 
 **Types file:** `packages/host/src/domain/capability-authority-contract.ts`
 **Acceptance tests:**
 - `packages/host/src/__tests__/acceptance/capability-authority.acceptance.test.ts` — AS-001, AS-002, AS-003, AS-004, AS-005, AS-011, AS-012, AS-024, AS-025, FR-001, FR-002, FR-003, FR-010, FR-011, FR-012, FR-013, FR-014, FR-015, FR-021
+- `packages/host/src/__tests__/acceptance/capability-authority-budget.acceptance.test.ts` — AS-035
 **Supported domain:** `packages/host/src/__tests__/acceptance/capability-authority.acceptance.test.ts`
 **Entry point:** `packages/host/src/adapters/capability-authority.ts`
 **Runtime seams:**
 - `invocationFor` (`@fuguejs/framework`: dispatch derives every Invocation from the run's MintingAuthority)
 - `brokerAuditPayload` (`packages/host/src/adapters/broker-audit.ts`: every mint, reuse and refusal audit record)
-**Statement:** For a run's authority, each required capability yields a narrowed handle backed by a credential issued to that agent's own Entra identity; the realm assertion always carries both the Entra-exchange and the capability grant, and the two identity models are interchangeable with identical capability and DAG definitions. Caches never cross agent identity, authority mode or user, app and delegated handles in one node are unreachable from each other, a delegated refusal never falls back to `app`, and audit records carry the run, node, agent client, Entra identity, scope, mode and initiator `oid` with no credential material. Refused: an unassigned scope (zero egress); a missing Entra-exchange or capability grant (zero Entra egress, naming the grant); a federation rejection (distinguished from a transient failure); and a delegated capability on a non-delegated run.
+**Statement:** For a run's authority, each required capability yields a narrowed handle backed by a credential issued to that agent's own Entra identity; the realm assertion always carries both the Entra-exchange and the capability grant, and the two identity models are interchangeable with identical capability and DAG definitions. Caches never cross agent identity, authority mode or user, app and delegated handles in one node are unreachable from each other, a delegated refusal never falls back to `app`, and audit records carry the run, node, agent client, Entra identity, scope, mode and initiator `oid` with no credential material. Refused: an unassigned scope (zero egress); a missing Entra-exchange or capability grant (zero Entra egress, naming the grant); a federation rejection (distinguished from a transient failure); and a delegated capability on a non-delegated run. With zero-latency injected realm and Entra transports, so that every measured millisecond is host-added, a cold acquisition through `invocationFor` and `forRun(...).mintFor` (gate, mint, assertion inspection, Entra acquisition for both identity models, custody open and rotation re-seal on the delegated path, handle build and audit) takes at most 10 ms p95, and a cache hit at most 5 ms p95 with zero transport calls.
 
 ### CT-3: Run authority continuity across suspension
 
@@ -821,7 +863,12 @@ The machine imports `CustodyState` and `CustodyEvent` from the CT-3 types file, 
 **Runtime seams:**
 - `createHitlRunService` (`packages/host/src/hitl/service.ts`: run start, processing, decisions, terminal settlement)
 - `createRunExecutor` (`packages/host/src/hitl/adapters/run-executor.ts`: resumed slices build their minting authority here)
-**Statement:** A user run's authority survives HITL suspension and token expiry. An `app` run resumes and completes under the agent identity, with attribution taken from the record and no user token. A delegated run establishes its delegation once at start, holds only an AES-GCM-sealed refresh credential bound to (run, agent, oid, tid) with expiry capped at the suspension window, redeems it through the agent identity after resume, and acts for the original initiator whoever approves. A refused refresh, expired custody or absent custody is refused with `reauthorization-required` and no `app` fallback, and after every terminal state no delegated credential for the run can be retrieved.
+- `createAuthMiddleware` (`packages/host/src/http/middleware/auth.ts`: the HTTP approver's identity, including its Entra principal, is built here)
+- `createApproveRunHandler` (`packages/host/src/http/handlers/runs.ts`: the production approve route derives the `ApproverRef` from that identity)
+- `handleBotActivity` (`packages/host/src/hitl/adapters/bot/messages-handler.ts`: the Teams approval path derives the `teams-user` `ApproverRef` from the verified activity)
+- `errorResponse` (`packages/host/src/http/response.ts`: approve-route refusal serialization)
+- `createCustodyRelease` (`packages/host/src/adapters/custody-release.ts`: every terminal settlement releases custody here, INV-4)
+**Statement:** A user run's authority survives HITL suspension and token expiry. An `app` run resumes and completes under the agent identity, with attribution taken from the record and no user token. A delegated run establishes its delegation once at start, holds only an AES-GCM-sealed refresh credential bound to (run, agent, oid, tid) with expiry capped at the suspension window, redeems it through the agent identity after resume, and acts for the original initiator whoever approves. Approvals enter only through the production approval paths: `POST /runs/:runId/approve` (auth middleware, then the approve handler) and the Teams bot handler. A different realm user approving over HTTP, or a mapped Teams user approving from a card, is recorded as that approver (`realm-user{realmSub, entra}` or `teams-user{aadObjectId}`) in the run's approvals and the `hitl-decision` audit record, while every delegated acquisition after resume still carries the initiator's `oid`. An approval of a run that is not suspended is refused 409 through `errorResponse`, and an approval by an identity the existing approver authorization refuses records nothing. A refused refresh, expired custody or absent custody is refused with `reauthorization-required` and no `app` fallback, and after every terminal state (completed, failed including a rejected gate, evicted record) no delegated credential for the run can be retrieved.
 
 ---
 
@@ -857,32 +904,34 @@ Ordered by dependency. Decompose places the contract tasks (CT-1, CT-2, CT-3) an
 ### Phase 3: Capability authority and delegation establishment (depends on Phase 2)
 
 - Build `capability-authority.ts` (boot core plus `forRun`, app and delegated paths, cache key ADT, audit, handles) to replace `keycloak-broker.ts`. Delete `capability-scope.ts` and migrate its importers (`graph-capability.ts`, `config.ts` scope validation) to the catalog. Extend `broker-audit.ts`. Extend the INV-2 matrix test with `capability-authority.ts`.
-- Build `delegation-establishment.ts` (mint, on-behalf-of, seal, put, compensation).
-- **Files:** `adapters/capability-authority.ts`, `adapters/keycloak-broker.ts` (deleted), `adapters/broker-audit.ts`, `adapters/graph-capability.ts`, `domain/token-cache.ts`, `domain/capability-scope.ts` (deleted), `adapters/delegation-establishment.ts`, their tests, and `__tests__/authority-mode.matrix.test.ts`
+- Build the INV-4 owner `custody-release.ts` (`createCustodyRelease`), and `delegation-establishment.ts` (mint, on-behalf-of, seal, put, compensation through `releaseCustody`). Write `__tests__/custody-release.matrix.test.ts` with the owner rows (failing-delete row included) and the `delegation-establishment.ts` rows.
+- This phase answers for the NFR-002 budgets: the CT-2 budget acceptance file (`capability-authority-budget.acceptance.test.ts`) must be green at this phase's Wave Gate, so a budget miss is found while the mint path is being built.
+- **Files:** `adapters/capability-authority.ts`, `adapters/keycloak-broker.ts` (deleted), `adapters/broker-audit.ts`, `adapters/graph-capability.ts`, `domain/token-cache.ts`, `domain/capability-scope.ts` (deleted), `adapters/delegation-establishment.ts`, `adapters/custody-release.ts`, their tests, `__tests__/authority-mode.matrix.test.ts` and `__tests__/custody-release.matrix.test.ts`
 
 ### Phase 4: HITL authority continuity and approver (depends on Phase 3)
 
 - Persist `authority` and `approvals` on `RunRecord`, and `entra` on the persisted user identity.
-- `startRun` takes a plan and establishes delegation before the record exists, with a compensating delete.
-- Add a custody delete to every terminal arm of `settleRunOutcome`, to reconcile-failed, and to eviction.
-- `recordDecision` takes an `ApproverRef`, appends an `ApprovalRecord` and emits the `hitl-decision` audit record. Update the approve route and the Teams bot handler.
+- `startRun` takes a plan and establishes delegation before the record exists, compensating through `releaseCustody` if record creation fails.
+- `HitlRunServiceDeps` gains `releaseCustody` (no custody store). Call it from `settleRunOutcome`'s completed and failed arms, the corrupt-checkpoint settle and the evicted-record arm of `processRun`. Add these rows to `__tests__/custody-release.matrix.test.ts` (INV-4).
+- `recordDecision` takes an `ApproverRef`, appends an `ApprovalRecord` and emits the `hitl-decision` audit record. `createApproveRunHandler` derives the `ApproverRef` from the middleware-built `AuthIdentity`, and `handleBotActivity` derives `teams-user{aadObjectId}`; CT-3 acceptance approves through both.
 - The run executor builds its broker from `record.authority` only.
-- **Files:** `hitl/types.ts`, `hitl/identity.ts`, `hitl/service.ts`, `hitl/adapters/run-store.ts`, `hitl/adapters/run-executor.ts`, `http/handlers/runs.ts`, `hitl/adapters/bot/messages-handler.ts`, and tests (`hitl/__tests__/approver-authority.test.ts`, `hitl/__tests__/custody-teardown.test.ts`, `hitl/adapters/__tests__/run-executor.test.ts`)
+- **Files:** `hitl/types.ts`, `hitl/identity.ts`, `hitl/service.ts`, `hitl/adapters/run-store.ts`, `hitl/adapters/run-executor.ts`, `http/handlers/runs.ts`, `hitl/adapters/bot/messages-handler.ts`, and tests (`hitl/__tests__/approver-authority.test.ts`, `hitl/adapters/__tests__/run-executor.test.ts`, `__tests__/custody-release.matrix.test.ts`)
 
 ### Phase 5: Admission and composition (depends on Phase 4)
 
-- Parse the delegated header. Add admission to `run-dag.ts` (before the HITL fork and acquire) and sync establishment and release.
+- Parse the delegated header. Add admission to `run-dag.ts` (before the HITL fork and acquire) and sync establishment, with `releaseCustody` in the `finally` and on establishment failure. Add the `run-dag.ts` rows to `__tests__/custody-release.matrix.test.ts` (INV-4).
+- Wire `entra-user-token-verifier.ts` into admission. This phase answers for the NFR-003 budget: the CT-1 budget acceptance file (`run-authority-admission-budget.acceptance.test.ts`, through `proxyToWorker` and the route) must be green at this phase's Wave Gate, as must the CT-1 proxy forwarding cases.
 - Add the `run-authority-refused` HostError and the `authority-unavailable` HTTP mapping.
 - Add the manifest authority block and extend the INV-2 matrix test with `manifest.ts`.
 - Compose `selectCapabilityAuthority` in `host.ts`. Change the `executeDag` signature. Derive the origin in `node-context-factory.ts` from `RunAuthority`. Rewrite the broker-selection and node-context tests.
-- **Files:** `http/delegated-token-header.ts`, `http/handlers/run-dag.ts`, `http/handlers/manifest.ts`, `domain/host-error.ts`, `domain/framework-error-http.ts`, `host.ts`, `adapters/node-context-factory.ts`, `__tests__/broker-selection.test.ts`, `__tests__/node-context-factory.test.ts`, `__tests__/handlers/run-dag-authority.test.ts`, `__tests__/handlers/manifest-authority.test.ts`, `adapters/__tests__/unwired-defaults.test.ts`, `__tests__/authority-mode.matrix.test.ts`
+- **Files:** `http/delegated-token-header.ts`, `http/handlers/run-dag.ts`, `http/handlers/manifest.ts`, `domain/host-error.ts`, `domain/framework-error-http.ts`, `host.ts`, `adapters/node-context-factory.ts`, `__tests__/broker-selection.test.ts`, `__tests__/node-context-factory.test.ts`, `__tests__/handlers/run-dag-authority.test.ts`, `__tests__/handlers/manifest-authority.test.ts`, `adapters/__tests__/unwired-defaults.test.ts`, `__tests__/authority-mode.matrix.test.ts`, `__tests__/custody-release.matrix.test.ts`
 
 ### Phase 6: Cross-cutting verification and documentation (depends on Phase 5)
 
-- Add the SC-007 credential sentinel scan and the SC-011 latency benchmark with injected transports.
+- Add the SC-007 credential sentinel scan. (The SC-011 budgets are no longer a Phase 6 benchmark: they are CT-2 and CT-1 acceptance files gated in Phases 3 and 5.)
 - Rewrite `packages/host/docs/auth.md`, `docs/team-security-and-capabilities.md`, the provisioning runbook (both models, RBAC for Applications, Agent ID spike pass/fail, fallback selection, rollback, rotation, realm-before-host deploy order, broker-token purge) and spike #4. Add the new evidence template, `data-handling.md` and the sequence-diagram doc. Update the CONTEXT.md identity table and terms.
 - Add `scripts/check-identity-docs.ts` with tests, wired into `scripts/verify.sh`.
-- **Files:** `packages/host/src/__tests__/credential-sentinel-scan.test.ts`, `packages/host/src/__tests__/identity-latency.bench.test.ts`, `packages/host/docs/auth.md`, `packages/host/docs/data-handling.md`, `packages/host/docs/identity-chain-sequence.md`, `docs/team-security-and-capabilities.md`, `docs/runbooks/entra-fugue-agents-provisioning.md`, `docs/runbooks/identity-live-verification-evidence.md`, `docs/spikes/2026-06-10-spike-4-identity-chaining-e2e.md`, `CONTEXT.md`, `scripts/check-identity-docs.ts`, `scripts/__tests__/check-identity-docs.test.ts`, `scripts/verify.sh`
+- **Files:** `packages/host/src/__tests__/credential-sentinel-scan.test.ts`, `packages/host/docs/auth.md`, `packages/host/docs/data-handling.md`, `packages/host/docs/identity-chain-sequence.md`, `docs/team-security-and-capabilities.md`, `docs/runbooks/entra-fugue-agents-provisioning.md`, `docs/runbooks/identity-live-verification-evidence.md`, `docs/spikes/2026-06-10-spike-4-identity-chaining-e2e.md`, `CONTEXT.md`, `scripts/check-identity-docs.ts`, `scripts/__tests__/check-identity-docs.test.ts`, `scripts/verify.sh`
 
 ---
 
@@ -898,11 +947,14 @@ Ordered by dependency. Decompose places the contract tasks (CT-1, CT-2, CT-3) an
 | Entra token verification | each refusal reason; RS256 only | lazyJwks rotation with an in-process JWKS | claims validation accepts iff all constraints hold |
 | Run Authority Planner | each refusal variant | — | totality over (identity × requirements × presentation × legs); precedence order; binding iff oid ∧ tid equal |
 | Delegated Custody (LC-1) | guards | Redis store (test-redis), memory store | no undeclared transition accepted; rotation never extends expiry; deleted absorbing; cipher open fails on any AAD field change |
-| Capability Authority | gate zero-egress, mode dispatch, audit shape | both models through fakes | cache isolation and single-flight under fast-check scheduled interleavings (NFR-012) |
-| HITL continuity | approver vs initiator; terminal deletes | resume with expired inbound token (SC-006) via in-memory run store | — |
-| Run Admission | refusal ordering (0 acquire, 0 startRun, 0 egress) | full route via `createRouter` with fakes | — |
+| Capability Authority | gate zero-egress, mode dispatch, audit shape | both models through fakes; CT-2 budget file: cold host-added ≤ 10 ms p95, cache hit ≤ 5 ms p95 (NFR-002) | cache isolation and single-flight under fast-check scheduled interleavings (NFR-012) |
+| Custody release (INV-4) | owner: idempotent delete, failing delete → `release-failed` + one log, never throws | matrix test: every sibling's run-ending path leaves custody absent; Redis store PX and tenant purge cover the two code-less removals | — |
+| HITL continuity | ApproverRef mapping per identity variant | CT-3: approvals through `createAuthMiddleware` + `createApproveRunHandler` and through `handleBotActivity`; resume with expired inbound token (SC-006) via in-memory run store | — |
+| Run Admission | refusal ordering (0 acquire, 0 startRun, 0 egress) | CT-1: full route via `createRouter` with fakes, and through `proxyToWorker` with an in-process UDS transport (delegated header forwarded, tenant header stripped); CT-1 budget file: admission ≤ 50 ms p95 (NFR-003) | — |
 | Doc Lint | each banned phrase, status matrix presence, evidence gating | runs over the real doc set in `verify.sh` | — |
-| Cross-cutting | — | SC-007 sentinel scan; SC-011 benchmark | sentinel injection over generated run shapes |
+| Cross-cutting | — | SC-007 sentinel scan | sentinel injection over generated run shapes |
+
+**Latency budget tests (NFR-002, NFR-003, SC-011).** The budgets gate the phases that build the code they constrain, as CT-2 (Phase 3) and CT-1 (Phase 5) acceptance files, not a trailing benchmark. Both use `acceptance/support/latency-budget.ts`: every realm, Entra and JWKS transport is an injected fake that resolves at once, so the measured time is host-added only; 50 discarded warm-up iterations (JIT, the first `lazyJwks` fetch that NFR-003 excludes, WebCrypto key import); then 500 timed samples with `performance.now()`; nearest-rank p95 compared with the budget, and the p95 printed so the evidence template can quote it. The cold-acquisition samples each use a fresh `createCapabilityAuthority` (built outside the timed region) so no cell is warm; the cache-hit samples reuse one warmed cell and also assert zero transport calls (NFR-001). The expected host cost is well under 1 ms per acquisition and a few ms per admission, so the 10, 5 and 50 ms budgets leave an order of magnitude of headroom for a loaded CI runner while still catching an accidental network call, a synchronous key derivation per call, or an uncached JWKS fetch. Loom accepts only FR and AS ids as acceptance anchors, so the budgets are anchored on AS-035 (NFR-002) and AS-036 (NFR-003), which loop-back 1 added to the spec to restate NFR-002's and NFR-003's automated-suite clauses. Testcases are named after the scenario they decide (`AS-035: cold host-added acquisition ≤ 10 ms p95 (agent-id, app)`, `AS-035: cache hit ≤ 5 ms p95, zero transport calls`, `AS-036: run-start validation ≤ 50 ms p95 through proxyToWorker`).
 
 ---
 
@@ -922,7 +974,7 @@ Ordered by dependency. Decompose places the contract tasks (CT-1, CT-2, CT-3) an
   - Refresh credentials exist in plaintext only inside `custody-cipher.ts` calls.
   - Custody records hold ciphertext with AAD. A record replayed under another run or user fails to open.
 - **Blast radius (NFR-011):** one blueprint, or one fallback app set, per deployment. Custody keys are per deployment and per tenant worker, held by the worker only (boundary A).
-- **Supervisor UDS proxy:** forwards `X-Fugue-Delegated-Authorization` unchanged (it strips only `X-Fugue-Tenant`). A proxy test asserts that the header is forwarded and never logged.
+- **Supervisor UDS proxy:** forwards `X-Fugue-Delegated-Authorization` unchanged (it strips only `X-Fugue-Tenant`). `proxyToWorker` is a CT-1 runtime seam, and CT-1 acceptance asserts that the header is forwarded byte-identical, that a client-forged tenant header never reaches the worker, and that no proxy log line carries the token.
 - **Deploy order:** the realm (with `entra_oid` and `entra_tid` claims) must deploy before the host, because the host 401s realm user JWTs without them. The runbook states this.
 - **Performance:**
   - App cache hits make no network call (NFR-001).
@@ -941,11 +993,11 @@ Ordered by dependency. Decompose places the contract tasks (CT-1, CT-2, CT-3) an
 3. `bun test packages/host/src/__tests__/acceptance/`: CT-1 to CT-3 green.
 4. `bun scripts/check-doc-links.ts && bun scripts/check-identity-docs.ts`
 5. `bun "/home/peterstorm/.dotfiles/.claude/local-marketplace/plugins/loom/engine/src/cli.ts" helper validate-lint-rules`, then the full-tier lint: INV-1 has zero hits.
-6. `bun test packages/host/src/__tests__/identity-latency.bench.test.ts`: p95 budgets reported and met (SC-011).
+6. The SC-011 budgets are part of step 3: `capability-authority-budget.acceptance.test.ts` and `run-authority-admission-budget.acceptance.test.ts` print their p95 values and fail above 10/5 ms and 50 ms.
 7. Realm repo: the Maven tests in the Cross-Repo section pass. Live-tenant verification is the operator's job, using `docs/runbooks/identity-live-verification-evidence.md` (OOS-001).
 
 **Operator prerequisites before Tasks are populated.** `.loom/verification-manifest.json` is schema 1 today. Two things need it upgraded:
-- INV-2 (owned, with mutation verification) needs schema 2 with an `affectedRunner`.
+- INV-2 and INV-4 (owned, with mutation verification) need schema 2 with an `affectedRunner`.
 - The three contracts need a JUnit-reporting test check.
 
 Before Loom populates this plan, the operator must:
@@ -1042,3 +1094,12 @@ This section is executed by the operator or a separate session in the worktree `
   - a missing object id mapper
   - an unexpected or missing scope grant
 - The golden export is updated, and re-apply makes zero changes.
+
+---
+
+## Change Log
+
+| Date | Change | By |
+|---|---|---|
+| 2026-11-24 | Initial plan, Approach A, decided under explicit user delegation | architecture-agent |
+| 2026-11-24 | Loop-back 1 (plan alignment). JUDGE-1: the NFR-002, NFR-003 and SC-011 budgets are now CT-2 and CT-1 acceptance files (`capability-authority-budget`, `run-authority-admission-budget`) gated in Phases 3 and 5, anchored on the new spec scenarios AS-035 and AS-036 (Loom accepts only FR and AS anchors); the Phase 6 `identity-latency.bench.test.ts` is removed. OWN-1: a new owned INV-4 (owner `adapters/custody-release.ts`; siblings `hitl/service.ts`, `http/handlers/run-dag.ts`, `adapters/delegation-establishment.ts`; matrix test `custody-release.matrix.test.ts`) replaces `hitl/__tests__/custody-teardown.test.ts`. Siblings get `ReleaseCustody` and a narrowed store, and the CT-3 types gain the release types and an export binding. SEAM-1: `proxyToWorker` is a CT-1 runtime seam, and CT-1 acceptance submits through it. SEAM-2: `createAuthMiddleware`, `createApproveRunHandler`, `handleBotActivity`, `errorResponse` and `createCustodyRelease` are CT-3 runtime seams, and CT-3 acceptance approves through the route and the bot handler | architecture-agent |
