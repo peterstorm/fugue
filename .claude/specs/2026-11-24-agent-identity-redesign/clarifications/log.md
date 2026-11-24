@@ -309,3 +309,23 @@ The self-audit also caught and fixed three things beyond the advisories:
 - The INV-3 and INV-4 statements are kept to one paragraph, so the plan parser reads them whole.
 
 **Decided by:** the architecture agent, under the user's explicit delegation (orchestrator acceptance of every advisory).
+
+### 2026-11-25: Loop-back 6 (plan design review 2)
+
+The second plan design review returned 12 advisories (11 numbered; the twelfth, an AD-5 versus Component Design disagreement, is closed by item 3). All were accepted, decided under user delegation ("most correct, best, most functional").
+
+1. **Phase 2 typecheck break.** Making `entra` required broke `approverTeamIdentity` and `toExecIdentity`, built in later phases. **Resolution:** the Teams approver is its own `TeamsApprover` type and is never given a fabricated realm principal; `canAccessDag` accepts `AuthIdentity | TeamsApprover`. One Phase 2 Task makes the realm principal required everywhere, with `hitl/identity.ts`, `hitl/types.ts`, the run-store schema and every fixture. Every Phase was re-audited against the code; seven further breaks were fixed (the exhaustive `rawDetailsFor` in `error-handler.ts`, the `unwired-token-endpoint.ts` `exchangeV2` stub, the `decideGate` caller, realm-claim fixtures, `RunExecutionRequest` and ten cut-over fixtures, the Phase 5 record fixtures and `manifest.test.ts`, the token-cache key test).
+2. **Custody outcome table buried in an I/O adapter.** **Resolution:** the pure `decideRedeemStep` sits beside `transitionCustody` in `domain/delegated-custody.ts`, property-tested row by row with no fakes; `adapters/run-custody-cell.ts` only performs the effects it returns.
+3. **Two token sources in pass 2.** **Resolution:** `signature-verified` carries claims only; pass 2 builds the grant from `step.token`.
+4. **A port with one adapter.** **Resolution:** the `VerifyEntraUserToken` port is removed; `verifyEntraUserToken(step, jwks, signal)` is a plain function whose seam is the JWKS transport, and it takes only a pass-1 `verify-delegated` step.
+5. **LC-1 partly ceremonial.** **Resolution:** three states (`absent`, `held`, `revoked`) and three events (`establish`, `rotate`, `refuse`), each a persisted production transition. Expiry is a pure comparison against the binding; release is the lifecycle owner's DEL.
+6. **`forRun` lacked a run id.** **Resolution:** `delegation.runId` lives on the `user-delegated` authority; `custodyBindingOf(authority)` derives the key and the AAD from it; the run store refuses a record whose authority names another run. The lifecycle is the only `forRun` caller, once per bracket (`withRecordedAuthority` for each HITL slice), so one custody cell per run is structural.
+7. **Comment-only swap fence.** **Resolution:** `CustodySuccessor` carries no generation; the store assigns 0 on `put` and `expected + 1` on `swap`.
+8. **One wide fault union.** **Resolution:** `AcquisitionFaultOf<H, R>` with per-path subsets: app/realm mint without `reauthorization-required`, establishment without `custody-expired`/`custody-absent`, redeem with the full set. Projections are total over their subsets.
+9. **Free-text `unreachable.message`.** **Resolution:** the closed `UnreachableCause`, rendered at formatting time; INV-3's guarantee for faults is now in the type.
+10. **`authorityOf` returned `undefined`.** **Resolution:** `classifyCapabilities` parses requirements into catalog-minted `CapabilityScope`s at the boundary; an undeclared capability in a brokered namespace is the typed `capability-unknown` refusal (503), first in precedence, never defaulted to `app` and never reaching the mint gate. `authorityOf(scope)` is total. Anchored to FR-005 and NFR-010.
+11. **Expectation held both tenant and issuer.** **Resolution:** `DelegatedTokenExpectation` is `{tenant, audience}`; `issuerFor(tenant)` derives the issuer in the claim validator and the verifier.
+
+Consequence recorded with item 1: in the Phase 4 cut-over `RunRecord.authority` replaces `RunRecord.identity` and `RunExecutionRequest.authority` replaces its identity; `PersistedIdentity`, `toPersistedIdentity` and `toExecIdentity` are deleted.
+
+**Decided by:** the architecture agent, under user delegation (orchestrator acceptance of every advisory).
