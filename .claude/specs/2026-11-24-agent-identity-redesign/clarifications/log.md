@@ -516,3 +516,11 @@ The user reviewed the design and decided D1 to D8. These are the user's own deci
 The plan had 7 UTF-16 units of budget left, and every loop-back had introduced small inconsistencies of its own. So the user chose to carry these gaps as accepted implementation notes IN-12, IN-13 and IN-14 in `implementation-notes.md`, rather than run loop-back 15c. The plan bytes are unchanged. The orchestrator attaches each note to its Task's brief.
 
 The stopping rule the user adopted in loop-back 15 then applies to the next plan design review. If it finds no critical, it is accepted and its advisories become implementation notes.
+
+## Plan design review 4 accepted under the stopping rule (2026-11-25)
+
+Review run.Gqm1h5pt4H found 0 criticals and 11 advisories; the code-reviewer had no findings. Under the stopping rule the user adopted in loop-back 15, the review is accepted. Every advisory is carried as an implementation note:
+- 10 are accepted: IN-15 to IN-23, where IN-21 merges two advisories that describe the same brokering-owner issue.
+- 1 is deferred: IN-24, splitting the Phase 4 cut-over.
+
+The disposition is published as run.xMf7cLONxf (digest 18cb9af7…). Acceptance is bound to plan sha256 506b5048….
