@@ -496,3 +496,12 @@ The user reviewed the design and decided D1 to D8. These are the user's own deci
 3. **Stopping rule.** **Resolution:** if the next plan design review has no criticals, its advisories are accepted and recorded as Phase 5 implementation notes rather than looped on.
 
 **Decided by:** the user (items 1 to 3; 2026-11-25, relayed by the orchestrator from plan design review `run.fBEJU9QnO2`); the mechanisms by the architecture agent.
+
+
+### 2026-11-25: Loop-back 15b (alignment fixes)
+
+1. **G-1 stale `stage`; G-2 symbol names; G-3 homes and tests; G-6 the INV-4 row's Task.** **Resolution:** fixed as reported.
+2. **G-4 the commit's clock.** **Resolution:** the run store's `now: () => EpochMs` from `composeHitlRunService`, read once per `markReauthorized`.
+3. **G-5 a park with the window already closed.** **Resolution:** it settles `failed` at once from `running`, audited `expired`, no notice, then `endRun`.
+
+**Decided by:** the architecture agent (mechanisms), on the orchestrator's relay of the plan alignment report.
