@@ -470,3 +470,11 @@ The user reviewed the design and decided D1 to D8. These are the user's own deci
 1. **Clocks behind the window and deadline.** **Resolution:** the lifecycle takes `now: () => EpochMs` from the wiring and computes every kind's body deadline at one point (`bracketDeadlineOf`); the sync route keeps its numeric clock and converts once with `epochMsOf`.
 
 **Decided by:** no new user decision (follows from the user's decision to fix all four loop-back 13 issues); the fix is the architecture agent's (detail: `plan-history.md`, "Loop-back 13c (clock wiring)").
+
+
+### 2026-11-25: Loop-back 14 (plan design review 2)
+
+1. **A to J (park rule, dark-leg owner, eviction while awaiting, version witnesses, channel-discriminated decisions, branded `Reestablished`, structural INV-8, sealed-for-binding, flag-free views, branded `UnbrokeredAccess`).** **Resolution:** fixed; mechanisms in `plan-history.md`, "Loop-back 14 (plan design review 2 fixes)".
+2. **K (split the run-authority lifecycle into three modules).** **Resolution:** declined; the lifecycle stays one module (the reviewer's reasoning: the deletion test passes, consumers hold narrow `Pick`s, the matrices cover it).
+
+**Decided by:** the user (fix A to J, decline K; 2026-11-25, relayed by the orchestrator from plan design review `run.Cf5Zo6U8QX`); the mechanisms by the architecture agent.
