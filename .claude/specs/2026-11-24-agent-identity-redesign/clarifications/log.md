@@ -390,3 +390,14 @@ The fifth plan design review returned 7 advisories in 6 items; the code reviewer
 The self-audit fixed one phase-boundary break: `approverTeamIdentity` now takes an `EntraObjectId`, so `messages-handler.ts` changes in the Phase 2 required-principal Task, not "compiles unchanged".
 
 **Decided by:** the architecture agent, under user delegation (orchestrator decisions on all 7 advisories).
+
+### 2026-11-25: Decompose approval and verification manifest
+
+1. **Task graph approval (Phase 4c).** **Resolution:** the decompose output was approved: 62 Tasks in 16 Waves; ADR Tasks T3–T5 and T52–T62 are in Wave 16. `validate-task-graph` passes: 1 lifecycle and 5 invariants bind. The orchestrator made two corrections before approval. First, the acceptance support files (`identity-fakes.ts`, `latency-budget.ts`, `credential-sentinel.ts`) move from T37 (Wave 11) to the first contract Task, T7 (Wave 2). The contract gate needs each acceptance file to be collected and to fail behaviourally, and a file whose import does not resolve is not a valid RED. Second, implementation notes IN-1 to IN-11 are folded into the `plan_context` of the Tasks that build the code they apply to: A notes are marked REQUIRED and D notes OPTIONAL. Decided under user delegation.
+2. **Verification manifest (Phase 4d), a deviation from the plan's Verification step 5.** **Resolution:** schema 2 is installed with `--replace`. It keeps the six existing operator checks and adds an `affectedRunner` and an `acceptanceRunner` (bun JUnit, 240 s). It also adds these JUnit checks: `project:framework-test`, `project:host-test` (all of `packages/host/src` except `signals.test.ts`, the acceptance directory included), `project:host-signals-test` and `project:scripts-test`. Three more checks need no report: `project:framework-typecheck`, `project:host-typecheck` and `project:doc-links`. The plan asked for two checks that were changed:
+   - The plan kept `bun run --cwd packages/host test` as a check. It is not used. The gate excuses a red acceptance testcase only from a JUnit report whose runner is the check's last step, and that script chains two `bun test` calls and writes no report. It would have blocked every Wave from the contract Wave until the claimant Wave.
+   - The plan asked for a separate `project:identity-acceptance` check. It is folded into `project:host-test`, because bun exits 1 on an empty path set and the acceptance directory does not exist before Wave 2.
+   Decided under user delegation.
+3. **The GitHub issue body is a summary.** **Resolution:** the plan is about 225K characters, over GitHub's 65,536-character limit for an issue body. The issue therefore holds the AD list, the full Task table and the paths of the spec, plan and notes on `feat/agent-identity-redesign`. Decided under user delegation.
+
+**Decided by:** the orchestrator, under user delegation.
