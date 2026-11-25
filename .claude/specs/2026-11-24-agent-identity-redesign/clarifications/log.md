@@ -478,3 +478,12 @@ The user reviewed the design and decided D1 to D8. These are the user's own deci
 2. **K (split the run-authority lifecycle into three modules).** **Resolution:** declined; the lifecycle stays one module (the reviewer's reasoning: the deletion test passes, consumers hold narrow `Pick`s, the matrices cover it).
 
 **Decided by:** the user (fix A to J, decline K; 2026-11-25, relayed by the orchestrator from plan design review `run.Cf5Zo6U8QX`); the mechanisms by the architecture agent.
+
+
+### 2026-11-25: Loop-back 14c (alignment fixes)
+
+1. **G-1 `ClaimRefusal` and `malformed`.** **Resolution:** `ClaimRefusal` admits `malformed`; AD-7, `PresentationRefusal` and IN-1 agree.
+2. **G-2 INV-4's third cover.** **Resolution:** named in the custody store test entry and its Task.
+3. **G-3 view types' home.** **Resolution:** `hitl/types.ts`.
+
+**Decided by:** the architecture agent (mechanisms), on the orchestrator's relay of the plan alignment report.

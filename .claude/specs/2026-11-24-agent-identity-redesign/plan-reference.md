@@ -193,7 +193,7 @@ AD-7: Inbound delegated-token contract and identity binding
   - `oid` present
   - `scp` present (a delegated token, not app-only), and its space-separated scopes CONTAIN `DelegatedTokenExpectation.scope` (`DELEGATED_SCOPE`, for example `access_agent`, D4)
   - `ver = "2.0"`
-  - Refusal order (first failure wins, unchanged precedence with the two new checks placed after `audience`): malformed, version, issuer, tenant, audience, client, expired, not-yet-valid, not-delegated, scope. The new `DelegatedTokenInvalidReason` values are `client` and `scope`; a refusal names the failed check only, never a claim value (AS-040).
+  - Refusal order (first failure wins, unchanged precedence with the two new checks placed after `audience`): malformed (non-object claims, a missing or non-GUID `oid` or `tid`, a missing or non-numeric `exp`/`nbf`; the validator's `ClaimRefusal` admits it, IN-1), version, issuer, tenant, audience, client, expired, not-yet-valid, not-delegated, scope. The new `DelegatedTokenInvalidReason` values are `client` and `scope`; a refusal names the failed check only, never a claim value (AS-040).
 - `verifyEntraUserToken` in `adapters/entra-user-token-verifier.ts`, a plain adapter function with no port, checks the signature: jose, RS256 only, through `lazyJwks` over `https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys`, reached through the injected JWKS transport.
 - `bindDelegatedPrincipal` requires that `oid` and `tid` equal the realm principal's.
 - `AuthenticatedUser` gains a required `entra: EntraPrincipal`, parsed from the `entra_oid` and `entra_tid` claims by `validateRealmJwtClaims`. A realm user JWT without them is a 401 `unauthorized` that names the missing claims.
