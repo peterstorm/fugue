@@ -18,6 +18,7 @@ Companion to `.claude/plans/2026-11-24-agent-identity-redesign.md`. It holds the
 | 2026-11-25 | Loop-back 8 (plan design review 3; 10 advisories, all accepted, decided under user delegation). (1) `establishDelegation` runs `transitionCustody(absent, establish)` before `put`, with one clock read after the on-behalf-of exchange; `establishFaultOf` maps `past-expiry` to the retriable `unreachable{entra, timeout}` and `cap-exceeded`/`undeclared` to the new `custody-defect` establishment fault (`delegation-not-established{defect}`, 500, logged); `transitionCustody`'s successor type is indexed by the event. (2) `AuthorizedRun` is a union of `unbrokered` (no handle) and `brokered` (with the bracket's `RunMintingAuthority`); the one fold to the framework option is `mintingAuthorityOf`. (3) `EntraLeg.wired` nests `delegation: DelegationLeg`; `DelegatingEntraLeg` is `establishDelegation`'s `leg`; `delegationOf` is the one parse the planner and the wiring read. (4) `beginRedeem` plus `decideRedeemStep(awaiting: RedeemAwaiting)`, with `RedeemOutcomeOf` indexed by `RedeemProgress`, so only legal (progress, outcome) pairs type-check. (5) `admitRunAuthority` returns the branded `AdmittedRun{runId, dagId, ownerTeam, plan}`; `startRun(admitted, input)` and the lifecycle brackets take it; `HitlRunServiceDeps.newRunId` is removed. (6) `delegation.runId` is gone; `custodyBindingOf(runId, authority)`, `forRun(runId, run)`, `withRecordedAuthority(runId, authority, body)`; the run-store cross-check is removed. (7) Pass 1 resolves each run's `access` (`AppAccess` or `DelegatingAccess` of `AdmittedCapability`), persisted with the authority; the mint path dispatches by it alone, with no catalog, no mode read, no "defense in depth" branch; `gateAdmitted` replaces the gate's mint-time role, and the catalog `decideGate` with its `unknown` arm goes with the legacy broker. (8) `adapters/run-composition.ts` holds `createRunContextFactory`, `createDagExecutor`, `composeHitlRunService`, `HitlWiringArgs` and their helpers; CT-3 and CT-4 seams and CT-4's entry point point there. (9) The pure `releaseCauseOf(RunBracketEnding)` in `domain/custody-release.ts`, property-tested; the INV-4 matrix keeps only the store-backed assertions. See "Self-audit (design-review loop-back 8)". | architecture-agent |
 | 2026-11-25 | Loop-back 9 (plan design review 4; 12 advisories: 10 accepted and fixed, 2 decided, all under user delegation). (1) The mint path fails closed: a brokered-namespace requirement outside the run's `access` fails the new framework cause `authority-unavailable{capability-not-admitted}` (403, non-retriable) through `frameworkErrorOf`, now over `MintPathFault`; the namespace predicate is the catalog's `brokeredNamespacesOf` over the boot catalog, not a persisted copy; CT-3 gains the resume-with-changed-DAG case (anchor FR-005; NFR-010 in the statement). (2) AD-5's ordering guarantee is scoped to admission refusals; establishment holds the sync slot on purpose (bounds concurrent Entra calls; latency inside NFR-002). (3) The pure `routeRequirement(access, brokered, name)` → `pass-through \| app \| delegated \| refused-not-admitted` in `domain/run-authority.ts`, property-tested; the adapter only executes. (4) `mintingAuthorityOf` moves beside `AuthorizedRun`'s constructor in `run-authority-lifecycle.ts`. (5) Branded `BoundAuthority{runId, authority}`, built only by `bindAdmission`, `establishDelegation` and the run-record parse; `forRun`, `withRecordedAuthority`, `createRunCustodyCell`, `custodyBindingOf` and `establishForRecord`'s `persist` take it; `RunRecord.authority` and `RunExecutionRequest.authority` are one. (6) `AuthorizedRun` is branded, built only by the lifecycle's module-private constructor over `forRun(bound)`. (7) `RunAccess` is a branded, name-keyed `app \| delegating` union built only by `accessOf` and `parseRunAccess`; the app variant admits no delegated entry. (8) Each admission producer returns only its refusal subset (`PlanRefusal`, `ClaimRefusal`, `BindingRefusal`, `PresentationRefusal`, `AdmissionRefusal`, `EstablishmentRefusal`). (9) `scopeDefinition` is a real module-private `const … unique symbol`. (10) The run-composition extraction is a signature-preserving Phase 3 Task and the legacy deletion a Task after the cut-over. (11) Decided: `ApproverRef` and `ApprovalRecord` move to `hitl/types.ts`; the lifecycle and bracket types stay in CT-3. (12) Decided: the `RealmAssertionMint` port stays; AD-11 records that it exists for the unwired leg. See "Self-audit (design-review loop-back 9)". | architecture-agent |
 | 2026-11-25 | Loop-back 10 (plan design review 5; 7 advisories in 6 items: 5 accepted and fixed, 1 declined in part, decided under user delegation; the code reviewer had none). (1) One stored run id: the record stores the bare `RunAuthority` under its own `runId` (`QueuedRunRecord.authority`); every read returns `RunRecord.authority` as the `BoundAuthority` that `parseBoundAuthority(raw.authority, raw.runId)` builds; `RunExecutionRequest.authority` carries that read's `BoundAuthority`, never persisted; AD-9, `hitl/types.ts`, `hitl/ports.ts`, `run-store.ts`, HITL Authority Continuity and the cut-over bullet agree. (2) `parseBoundAuthority(raw, runId): Result<BoundAuthority, "authority-corrupt">` in `domain/run-authority.ts` (Phase 2, a new export) owns the kind-to-access rules (`agent` and `user-app` need `app` access, `user-delegated` needs `delegating`, a duplicate name is corrupt) and is the record path's `BoundAuthority` builder; the run store only decodes JSON and calls it; property test `parse(serialize(b)) = b` plus the corrupt pairs, no Redis fake. (3) `TeamsApprover.aadObjectId` and `ApproverRef.teams-user{aadObjectId}` are `EntraObjectId`; `parseEntraObjectId` (`domain/jwt-validation.ts`, a GUID) is the one parser; the bot handler parses `from.aadObjectId` at the boundary in the Phase 2 required-principal Task (malformed: unknown approver, fail closed); persisted approvals are parsed in the Phase 5 approvals Task. (4) `RunAccess.delegating` is `{delegated: NonEmptyReadonlyMap; app: ReadonlyMap}` (the `app` variant's map renamed `app`); the builders keep the key sets disjoint; `routeRequirement`'s overloads unchanged. (5) `RequirementRef = RawCapabilityRequirement`, an alias. (6) Declined in part: all 21 `...Fn` aliases are named by an Export binding, so none is dropped. See "Self-audit (design-review loop-back 10)". | architecture-agent |
+| 2026-11-25 | Loop-back 11 (user design review; D1 to D8 decided by the user, not delegated). D1 write-once custody: LC-1 absent/held/revoked with establish, refuse, reestablish (same expiry); store `put` NX, `replace`, byte-guarded `revoke`, `get`, lifecycle-only `delete`; the pure redeem outcome table; run-level single-flight removed. D2 Redis custody everywhere, memory store a test fake. D3 password reset does not revoke; cut-offs documented. D4 `azp` allowlist `DELEGATED_CLIENT_APPS` and `scp` ⊇ `DELEGATED_SCOPE`, reasons `client` and `scope`, CT-1 AS-040. D5 resume drift check (AD-12, `authority-changed`, CT-3 AS-042, FR-026). D6 re-authorization through a framework park seam (AD-13, ADR 0096) and `POST /runs/:runId/delegation` (CT-3 AS-034, AS-041, FR-027; INV-4 and INV-5 rows). D7 decision with approver in one `SET NX`, per-attempt audit, `executesAs`, `RunRecord.approvals` (AD-9, new CT-5 AS-043, FR-028). D8 spike items (a) to (d). The plan was condensed losslessly from 281,170 to 229,792 UTF-16 units (cap 230,000); the cross-repo realm work moved to `cross-repo-realm.md` | architecture-agent (decisions: the user) |
 
 ## Loop-back 7 (condensation)
 
@@ -388,3 +389,237 @@ The fifth plan design review returned 7 advisories in 6 items (two reviewers rai
 **Advisory 6 (wide `...Fn` surface), declined in part.** Loom's `**Export bindings:**` requires a named function type in the contract's types file for every bound export (`references/executable-models.md` §5), and engine skeletons are generated from those types. A scan of the plan found 21 `...Fn` aliases across CT-1 to CT-3 and 21 bound names: every alias is bound, so none can be dropped without losing its skeleton and binding check.
 
 **Decided by:** the architecture agent, under user delegation (orchestrator decisions on all 7 advisories).
+
+## Loop-back 11 (user design review)
+
+The user reviewed the design and decided D1 to D8 (2026-11-25); the decisions are the user's, not the architect's, and the spec was amended first (the amended spec copied verbatim over `spec.md`, adding FR-026 to FR-028 and AS-040 to AS-043). The interview and the approach gate were not re-run: Approach A stands. Loop-backs 1 to 10 ran under the user's delegation; the quotes recorded for it were "im gonna go to bed, you just run the whole loom workflow please, and during interview, just pick the most correct, best, most functional approach, for all questions ok", "I want the most correct solution to the agent auth problem" and "we can change config code as well of course, to make it fit". The decompose approved after loop-back 10 (62 Tasks, 16 Waves) predates these decisions and must be re-run.
+
+| Decision | What the user decided | Where the plan applies it |
+|---|---|---|
+| D1 | Write-once custody, no rotation | LC-1 rewritten (states absent, held, revoked{refused}; events establish, refuse, reestablish; reestablish keeps the binding expiry); AD-6; Component Design › Delegated Custody (store `put` SET NX, `replace` keeping the expiry, byte-guarded `revoke`, `get`, lifecycle-only `delete`; the pure redeem outcome table; the stateless custody cell); the run-level single-flight removed by the deletion test; generation, swap, pending-write, flush, rotate and contended machinery deleted; CT-2 and CT-3 statements; INV-4 |
+| D2 | Redis custody everywhere; `REDIS_URL` required; memory store a test fake only | AD-6, AD-11 (the store port's second implementation is the test fake); File Structure (`__tests__/fixtures/delegated-custody-store-fake.ts`, `config.ts`, wiring test); acceptance custody runs through the production Redis store over the in-memory `RedisPort` |
+| D3 | A password reset does not revoke; cut-offs are disabling the user, `revokeSignInSessions`, or ending the run | AD-6 revocation semantics; ADR 0095 scope; `data-handling.md`; runbook; Phase 6; AD-10 banned phrase |
+| D4 | `azp` in `DELEGATED_CLIENT_APPS` (no default); `scp` contains `DELEGATED_SCOPE`; reasons `client`, `scope`; no claim values; precedence kept; INV-5 versus own owner; runbook hardening | AD-7 (checks, refusal order, "not an invariant"); Identity Topology (delegation-leg keys); `config.ts`; manifest (scope published, allowlist not); CT-1 statement and acceptance (AS-040); Phase 2 claim-validation Task; runbook and Phase 6 |
+| D5 | Catalog drift check at every resume slice start, `authority-changed` | AD-12 (`RunAccess.passThrough`, `checkAdmittedAuthority`, `withRecordedAuthority`); AD-8 cause; INV-2 sibling note and drift row; CT-3 `authority-drift.acceptance.test.ts` (AS-042, FR-026) |
+| D6 | Re-authorization: suspend `awaiting-reauthorization`, notify, `POST /runs/:runId/delegation` with run-start checks and initiator oid/tid, fresh OBO, reestablish under the original expiry, re-enqueue, refusals audited, through the lifecycle owner, no extension, TTL eviction releases through `endRun` | AD-13 (framework park seam, ADR 0096); HITL Authority Continuity; Delegated Custody (`reestablishDelegation`); INV-4 sibling `reauthorizeRun` and matrix rows; INV-5 re-authorization row; CT-3 `run-reauthorization.acceptance.test.ts` (AS-034, AS-041, FR-027); Phase 1 park seam Task; Phase 5 re-authorization Task |
+| D7 | One `SET NX` of `{action, approver, channel, decidedAtMs, teamsActivityId?}`; `actor` display only; every attempt audited; `executesAs` on card, payload and accepted audit; `RunRecord.approvals` in the lease-fenced write; audit a projection | AD-9; HITL Authority Continuity (approvals); new CT-5 (`hitl-decision-record.acceptance.test.ts`, AS-043, FR-028); Phase 5 approvals Task |
+| D8 | Spike items (a) to (d) with pass/fail criteria, failing closed | Phase 6 spike items; AD-8 classifier rows (missing `refresh_token` → `unconfigured{offline_access}`, AADSTS 65001/82014 → `unconfigured`, Conditional Access → `reauthorization-required{refused}`); `requestedAccessTokenVersion: 2` → `delegated-token-invalid{version}`; runbook |
+
+Decisions the architect made within D1 to D8 (flagged for the user, also in `clarifications/log.md`):
+- `DELEGATED_SCOPE` has no default; scope matching is containment of one whole space-separated token.
+- The D4 facts are not an invariant (parsed config, one reading site, one shared expectation builder); INV-5 keeps only the derived audience.
+- Refusal order: `client` after `audience`, `scope` after `not-delegated`; every earlier precedence unchanged.
+- A refused refresh moves custody to `revoked` (ciphertext dropped) rather than deleting it, so the reason `refused` survives for the status read model.
+- The run-level single-flight is removed (deletion test); per-capability access cells keep NFR-012's single-flight.
+- Whole-second TTLs (`custodyTtlSecOf`); a TTL under one second is treated as past-expiry.
+- `revoke` is a compare-and-set guarded on the exact bytes read, so it never overwrites a record re-established after the read.
+- `RunAccess.passThrough` records the run's own not-brokered requirement names (a fact about the run, not a catalog copy).
+- `authority-changed` maps to HTTP 409; its `scope` is the first change's capability.
+- AADSTS 65001 and 82014 on on-behalf-of map to `unconfigured` (503), a configuration fault.
+- Sync runs cannot park: `reauthorization-required` fails them with 401.
+- `RunStatus` gains `reauthorized{nodeId}` and the unleased `markReauthorized` compare-and-set; a lost race answers 409 after custody is already replaced (idempotent).
+- `reauthorization-window-closed` is 410; a run not awaiting is 409 `run-not-awaiting-reauthorization`.
+- The notification goes once per park to the owner team's channel (no per-initiator channel exists), best effort; `GET /runs/:runId` is the authoritative status read model.
+- The dead-end park: with `DELEGATED_CUSTODY_MAX_SEC` < `HITL_RUN_TTL_SEC` a `custody-expired` park waits for its record TTL; the plan follows AS-034 and recommends a spec amendment to fail such a run at once.
+- CT-5 is a new contract; approvals are stored in the checkpoint envelope `{checkpoint, approvals}` through the guarded `setIfValues`.
+- ADR 0096 (durable park on a caller-classified node failure) is written in Phase 1 with ADRs 0093 to 0095.
+- The manifest publishes `DELEGATED_SCOPE` but not the client allowlist.
+- The memory custody store moves to `__tests__/fixtures/delegated-custody-store-fake.ts`.
+- INV-5 gains a re-authorization row (`planReauthorization` uses the same `expectationFor`).
+- Over HTTP, `duplicate` means the same approver and action; over Teams, the same activity id.
+- The cross-repo realm work moved verbatim to `cross-repo-realm.md` (read budget).
+- AD-11's convention conflict stands: rules outrank the local convention of ports in adapter files.
+
+## Loop-back 11 (condensation)
+
+The amended design took the plan to 281,170 UTF-16 units against the 230,000 cap. It was condensed losslessly to under the cap; no design fact was dropped. Moves:
+- The cross-repo realm work (R1 to R6, Types, Tests, Acceptance) moved verbatim to `cross-repo-realm.md`; the plan keeps the intro, the interface-contract table and a pointer list with each item's FR and AS ids.
+- The Approach B and C sections became one pointer to "Approaches B and C (full text at loop-back 6)" below.
+- Every AD's **Rejected:** block moved verbatim to "Rejected alternatives of AD-1 to AD-13 (at loop-back 11)" below; AD-11's became its **Conflict:** line.
+- The per-contract acceptance seam sweep moved verbatim to "Acceptance seam sweep (loop-back 11)" below; the plan keeps the fakes rule and a pointer.
+- AD-9's and AD-13's long Choice bullets moved to Component Design › HITL Authority Continuity (interface block and prose), File Structure › Framework and the Implementation Phases placements; their pre-condensation wording is archived below.
+- The Change Log bullets for loop-backs 1 to 10 moved below (the table at the top of this file already holds their detail).
+- Prose was tightened in place across Summary, the ADs, File Structure, Component Design, INV statements, CT statements, Testing Strategy, Security & NFR Notes and Verification, with each fact kept at its one canonical home (per-file obligations in File Structure test entries, behaviour in Component Design, the composed path in Data Flow) and a pointer where a duplicate was removed.
+- Doc-only Requirements are now anchored by id on their Tasks: AS-029 and FR-040 on the Phase 1 ADR Task; AS-014, AS-030 to AS-032, FR-041 and FR-043 on the Phase 6 docs bullet.
+
+## Rejected alternatives of AD-1 to AD-13 (at loop-back 11)
+
+Moved verbatim from the plan in loop-back 11 (condensation).
+
+#### AD-1: Run-bound authority replaces the process-global subject-token side channel
+
+**Rejected:**
+- A process-global `RunAuthorityRegistry` (Approach B): mutable shared state and release discipline.
+- Keeping `exchangeV2` "for later": FR-003 forbids user exchange for every origin and mode.
+
+#### AD-2: Authority mode is part of the capability definition, in one catalog with no default
+
+**Rejected:**
+- A mode map beside `KNOWN_SCOPES`: two tables can drift.
+- A mode on the DAG node's `requires`: it is a capability property, not a per-use choice, and it would leak into the framework.
+- Defaulting to `app`: a silent default is how authority widens.
+- An earlier `authorityOf(catalog, scope): AuthorityMode | undefined` over raw strings: every caller decided what `undefined` meant. Refusing unknown requirements at DAG load instead of pass 1: no place in the precedence order, and run-start refusals would leave the one total function. Persisting admission's namespace set in `access`: a second copy of a catalog fact (`access.passThrough` records the run's own pass-through requirement names instead, AD-12).
+
+#### AD-3: One capability-facing contract, two Entra identity adapters, explicit model in configuration
+
+**Rejected:**
+- Defaulting to the Agent ID model: the tenant spike is unresolved (Open Question 2).
+- Keeping the shared app as a third model: it cannot meet AS-004 or per-agent revocation.
+
+#### AD-4: Every realm mint requests `entra-exchange <capability>`, and the assertion is inspected before Entra egress
+
+**Rejected:**
+- Requesting `entra-exchange` alone and checking the capability locally: that would bypass the realm as the policy decision point.
+- Trusting the token blindly: a dropped scope would surface later as an opaque Entra AADSTS error.
+
+#### AD-5: Two-pass run-start admission: a pure static pass, verification only on demand, a pure completion pass
+
+**Rejected:**
+- Earlier designs: one planner over an already-verified presentation (egress before outranking static refusals, plus a `present-unverified` hedge); a `VerifyEntraUserToken` port with one adapter (fails the deletion test; tests fake the JWKS transport); the token inside `signature-verified` (two token sources).
+- Validating inside `createNodeContextForDag` (after concurrency acquisition) or in framework preflight (Approach C).
+
+#### AD-6: Delegated authority is established eagerly at admission and continued through write-once, Redis-held custody
+
+**Rejected:**
+- Rotating the credential on every redeem (loop-backs 5 to 10): it rested on a wrong premise and needed a generation fence, a compare-and-swap, a pending-write flush and a single-writer cell.
+- An in-memory production store when Redis is not wired: production always has Redis.
+- Earlier designs: a free-standing `releaseCustody(runId, cause)` at eight sites; custody decisions inside `capability-authority.ts`; `forRun(run)` without a run id.
+- Routing release through the custody machine: release is a `DEL` of the whole record whatever its state, so a `teardown` event would be a transition no persisted state shows (LC-1 is the persisted lifecycle only).
+- Lazy on-behalf-of at first use, the approver re-presenting a token (clarify Option B), and storing the access token only (it expires in about an hour).
+
+#### AD-7: Inbound delegated-token contract and identity binding
+
+**Rejected:**
+- An optional `entra` on `AuthenticatedUser`: an optional field gives unbound user runs a second state.
+- Ignoring an unexpected header: that tolerates over-sending bearer tokens.
+- Accepting v1 tokens: they carry a different issuer and claim shape, so v2 is pinned (the runbook sets `requestedAccessTokenVersion: 2`).
+- A default client allowlist or a default scope: a silent default is how authority widens (NFR-010).
+- Exact equality of `scp` to the configured scope: a token may legitimately carry other delegated scopes; containment is the requirement.
+
+#### AD-8: Extend the capability failure taxonomy with `authority-unavailable`
+
+**Rejected:**
+- Reusing `downstream-denied`: it is the resource's own refusal, not a failure of authority acquisition.
+- Leaving unwired legs as `infra-unreachable`: retrying amplifies a configuration error.
+
+#### AD-9: Approval is recorded with its decision in one write and lends no authority
+
+**Rejected:**
+- Overloading `HumanAction.actor` (a free-form string): it cannot carry the Entra principal and conflates display with identity.
+- Writing the approver in a second write after the decision (or appending `approvals` at click time): a crash between them leaves an accepted decision with no approver, and the click-time write would race the executor's lease-fenced record.
+- The audit log as the record of approval: it is best-effort; it projects the two authoritative records.
+- The Teams approver as a `user` `AuthIdentity` (needs a fabricated realm principal that could reach submission or the record), and keeping `RunRecord.identity` beside `RunRecord.authority` (two persisted initiators that could diverge).
+- Storing the `BoundAuthority` (a second stored run id).
+
+#### AD-10: Doc truth is checked, not promised
+
+**Rejected:** a review checklist, which drifts.
+
+#### AD-11: New ports live in `domain/port/` (flagged convention conflict)
+
+**Rejected:** Defining ports inside adapter files, the local convention (for example `keycloak-token-endpoint.ts`): rules outrank local convention. This conflict is reported in the final summary. Existing ports are not moved, which is out of scope.
+
+#### AD-12: A resume slice fails closed when the admitted authority drifted from the boot catalog (D5)
+
+**Rejected:**
+- Recording the boot catalog's brokered namespace set in `access` (rejected earlier, AD-2): a second copy of a catalog fact.
+- Checking per node inside `routeRequirement`: a drifted run would execute its first nodes before failing, and a pass-through drift is invisible there.
+- Re-admitting the run against the new catalog: a resume has no fresh presentation, so it would widen authority without consent.
+
+#### AD-13: Re-authorization parks the run at the node through a vendor-neutral framework seam (D6)
+
+**Rejected:**
+- Host-only translation of a failed checkpoint into a resumable one: it rewrites framework phases from outside and breaks the terminal-failure guarantee every reader of a `failed` checkpoint relies on.
+- Settling the run `failed` and resuming it as "failed-resumable": a terminal status that is not terminal contradicts `transitionRunStatus`, releases custody at the terminal write, and re-executes completed siblings.
+- Parking through the existing `awaiting-human` gate: it is the approver's gate, carries a prompt and resolves through the decision store, so a re-authorization would become an approval any approver could give (FR-025).
+- Extending the window on re-authorization: the cap is the custody guarantee (FR-017).
+
+## Acceptance seam sweep (loop-back 11)
+
+Moved verbatim from the plan's Testing Strategy in loop-back 11 (condensation); the plan keeps the fakes rule and a pointer here. It is current for the loop-back 11 design.
+
+Every acceptance-decided Requirement was traced along its production path (CT statements, Data Flow) under the runtime-seam rule (Component Design › Run Admission); the declared seams are the CT lists. Fakes are allowed only at the network (`IdentityTransports`, the realm signature verifier, the Bot Framework token verifier), storage (`RedisPort`, `HitlRedisPort`, `QueueBackend`), notification and clock edges, plus recording observation points for deps whose behaviour another contract decides.
+
+Symbols on every path that are not declared, and why they cannot be bypassed:
+- Built only inside `composeRunAuthorityWiring`: `requirementsOf`, both admission passes and the binding, `planReauthorization` and the composed `verifyReauthorization`, `planAuthorityLegs`, the mint and Entra adapters, the custody cipher and the Redis custody store, `establishDelegation`, `reestablishDelegation`, `createCapabilityAuthority`, `createRunAuthorityLifecycle`. `forRun` is reachable only through the lifecycle it returns; `createRunCustodyCell` is called only inside `forRun`; `beginRedeem` and `decideRedeemStep` are static imports of the cell, `releaseCauseOf` and `checkAdmittedAuthority` of the lifecycle, `establishFaultOf` of both establishments.
+- Built only inside `composeHitlRunService`: `createHitlRunService`, `createRunExecutor`, `createRedisRunStore`, `createRedisDecisionStore`, `createRunQueue`; `recordApproval`, `reauthorizeRun`, `settleRunOutcome` (HITL completed, failed, rejected and parked) and the `processRun` fold are inside the composed service; `classifyDecisionAttempt`, `authorizeApproval` and `executesAsOf` are static imports of the service and the handlers; the framework park seam is reached only through the executor's `parkOn`.
+- Static imports below a declared seam: `invocationFor` and `brokerAuditPayload` below the capability authority (CT-3, CT-4); `routeRequirement`, `gateAdmitted`, `inspectFederatedAssertion` and `token-cache.ts` inside the capability authority (CT-2, CT-3); `mintingAuthorityOf` inside `createDagExecutor` and `createRunExecutor`; `parseBoundAuthority` (with `parseRunAccess`) inside the run store, and `parseEntraObjectId` inside the bot handler and the run store (CT-3); `createNodeContextForDag` inside `createRunExecutor` and `createRunContextFactory` (CT-3).
+
+| Contract | Requirements | Contract-specific notes |
+|---|---|---|
+| CT-1 | AS-010, AS-021, AS-022, AS-023, AS-037, AS-040, FR-006 to FR-009, FR-036 | `parseDelegatedTokenHeader`, `hostErrorResponse`, `discloseHostError` and the refusal status table: static imports of the handler. `verifyEntraUserToken`: a static import of `createRunAuthorityAdmission`, which only the wiring builds; it has no port, and its JWKS transport is the faked network edge. `createRouter`: path-to-handler wiring with no identity logic; the in-process worker mounts the middleware and handler in its order |
+| CT-1 | FR-018 (admin and team tokens → `agent` or `unbrokered` plan) | team-token store lookup: unchanged behaviour, already covered by the middleware suite; the acceptance asserts the admitted authority |
+| CT-1 | AS-036 | none: the same five seams, so the budget measures the production admission |
+| CT-2 | AS-001 to AS-005, AS-011, AS-012, FR-001 to FR-003, FR-011 to FR-015, FR-021, FR-022; delegated path AS-024, AS-025, FR-010; AS-035 (same three seams, fresh wiring per cold sample) | the RunAuthority to MintingAuthority hop is CT-4's |
+| CT-3 | AS-007, AS-008, FR-016; AS-020, AS-026, FR-017; AS-028, FR-025; AS-027, AS-038, FR-023; FR-005 (resume with a changed DAG) | Bot Framework token verification: a network trust edge, faked as a `VerifyBotToken` |
+| CT-3 | AS-034, AS-041, FR-027 (re-authorization) | `createReauthorizeRunHandler` is declared, so no test reaches `reauthorizeRun` with a hand-built presentation; the notifier is a recording edge |
+| CT-3 | AS-042, FR-026 (drift) | the second wiring over a different parsed catalog is the redeployed host; `checkAdmittedAuthority` is a static import of the lifecycle |
+| CT-4 | AS-006, AS-039, FR-004, FR-020 | `createNodeContextForDag` is declared although `createRunContextFactory` imports it, because CT-4 also calls it directly on a `user-app` authority |
+| CT-5 | AS-043, FR-028 | the decision store is production code over the in-memory `HitlRedisPort`; the Teams activity id comes from the activity the fake Bot Framework edge delivers |
+
+The FR-022 scans (CT-2 FR-022, CT-1 AS-037, CT-3 AS-038, CT-4 AS-039) read only the `credential-sentinel.ts` captures of the production path (File Structure), so a scan cannot pass by observing a path production does not take.
+
+## AD-9 and AD-13 as worded before loop-back 11 condensation
+
+Archived verbatim (Rejected blocks excluded: see "Rejected alternatives of AD-1 to AD-13 (at loop-back 11)"). Their facts now live in Component Design › HITL Authority Continuity, File Structure › Framework and the Implementation Phases placements.
+
+#### AD-9: Approval is recorded with its decision in one write and lends no authority
+
+**Choice:**
+- **One atomic decision value (D7).** `HitlDecision = {action: HumanAction, approver: ApproverRef, channel: "http" | "teams", decidedAtMs: EpochMs, teamsActivityId?: string}` (`hitl/types.ts`). `DecisionStorePort.resolvePending(runId, nodeId, decision)` writes the whole value with the existing single `SET NX` (`setNxIfPresent`), so an accepted decision never exists without its approver (FR-028). `getDecision` parses it, refusing a record without an approver as corrupt. The framework `HumanAction.actor` carries only a display rendering of the approver (`approverDisplayOf`); identity is never read back from it.
+- **Every attempt is audited.** `HitlRunService.recordApproval(runId, nodeId, attempt: ApprovalAttempt)` is the one entry for both channels and the one emitter of `hitl-decision` audit records, emitted after the atomic write with outcome accepted | duplicate | not-pending | unauthorized. The pure `classifyDecisionAttempt(attempt, resolved)` decides: `accepted` when the write won; `duplicate` when the stored decision came from the same click (Teams: equal `teamsActivityId`, a redelivery; HTTP: equal approver and action); `not-pending` otherwise (a second approver after the gate resolved, no pending gate, an unknown run). Both handlers authorize first through the pure `authorizeApproval(identity, dag)` (`canAccessDag`); a refusal is passed to `recordApproval` as `unauthorized` and audited without touching the store. `already-resolved` returns the stored decision (for classification), not a silent ok.
+- **The acting principal is shown.** The pure `executesAsOf(authority)` (`run-authority.ts`) returns the agent client and the capabilities it acts as itself, and, on a delegating run, the initiator and the capabilities it acts on behalf of them. It is rendered on the Teams approval card and the HTTP approval payload (`GET /runs/:runId` review block and the approve response), and recorded on the accepted decision's audit record (AS-043).
+- **Approvals on the run record.** `RunRecord.approvals: readonly ApprovalRecord[]` (`ApprovalRecord = {nodeId, action: kind, approver, channel, decidedAtMs, teamsActivityId?}`) is appended when the executor consumes the decision, in the same lease-fenced checkpoint write that advances the run: the run store's `appendEvent` stages `human-responded{nodeId}` and the following `updateData` writes the checkpoint envelope `{checkpoint, approvals}` to the `hitl:ckpt` key through the same guarded `setIfValues`; `onCommitted` then clears the decision. The Redis decision record and `RunRecord.approvals` are authoritative; the audit log is a projection.
+- `ApproverRef` is one of `realm-user{realmSub, entra}`, `team{team}`, `admin` or `teams-user{aadObjectId: EntraObjectId}`. It, `HitlDecision`, `ApprovalAttempt` and `ApprovalRecord` are declared in `hitl/types.ts` (Phase 5), not in a contract types file, because approvals lend no authority (CT-5 states this).
+- `PersistedIdentity`'s `user` gains `entra` in Phase 2, in the same Task that makes the live identity's `entra` required. In the Phase 4 cut-over `RunRecord.authority` replaces `RunRecord.identity`, so the initiator has one persisted source; `PersistedIdentity`, `toPersistedIdentity` and `toExecIdentity` are then deleted. Phase 5 adds `approvals`.
+- One stored run id: the record stores the bare `RunAuthority` under its own `runId`. A read returns `RunRecord.authority` as the `BoundAuthority` that `parseBoundAuthority(raw.authority, raw.runId)` builds, never stored; `RunExecutionRequest.authority` replaces its `identity` and carries it.
+- The Teams approver is not an `AuthIdentity`. `approverTeamIdentity(map, aadObjectId: EntraObjectId)` returns a `TeamsApprover = {kind: "teams-approver"; aadObjectId: EntraObjectId; canRunDag}` (declared in `domain/auth.ts`), and `canAccessDag` takes `AuthIdentity | TeamsApprover`. The bot handler parses `from.aadObjectId` with `parseEntraObjectId`; missing or malformed fails closed. A card click carries no realm principal, so it is never given a fabricated `entra`, cannot start a run or be persisted as an initiator. Phase 5 maps it to `ApproverRef.teams-user{aadObjectId}`.
+- `run-executor.ts` rebuilds the run's broker only from the record, through the lifecycle's `withRecordedAuthority(req.authority, …)`, the `BoundAuthority` that `parseBoundAuthority` built over the record's own id.
+**Why:** FR-025, FR-028, AS-028 and AS-043. The type makes it impossible to derive authority from the approver, and one write makes a decision without its approver unrepresentable at rest.
+
+#### AD-13: Re-authorization parks the run at the node through a vendor-neutral framework seam (D6)
+
+**Choice:**
+- **Mechanism: a framework park seam.** `DagRunOpts` gains `parkOn?: (error: FrameworkError) => boolean`, consulted by the DAG executor when a node fails non-retriably; the transitions stay pure. When it answers true the executor appends `node-parked{nodeId, error, partialOutputs?, coFailedNodeIds?}` instead of `node-failed`, and the machine enters the new phase `parked{wave, nodeId, error}`: completed siblings' partial outputs are merged, the node's retry count is unchanged, and `isHalted` covers it with `suspended`. Resuming a `parked` checkpoint re-enters its wave exactly as `retrying` does, with no delay, so only the parked node and its unfinished siblings re-run. `StatefulOutcome` and `WorkerJobOutcome` gain `{kind: "parked"; nodeId; error}`; the sync `runDag` maps `parked` to `err(error)`, so a mapped child or a sync caller sees an ordinary failure. With no `parkOn` nothing parks, so every existing caller is unchanged.
+- The seam lands in one Phase 1 framework Task together with every exhaustive consumer of `DagPhase` and `StatefulOutcome` (the host's `run-store-job.ts` phase parser map and `run-executor.ts`'s `toSettledOutcome`, which maps `parked` to `failed` until the re-authorization Task passes `parkOn`), so typecheck stays green. ADR 0096 (durable park on a caller-classified node failure, written in Phase 1 with 0093 to 0095) records it.
+- **Host state.** The HITL executor alone passes `parkOn: isReauthorizationRequired` (true exactly for `authority-unavailable{cause: reauthorization-required}`). `RunExecOutcome` and `RunStatus` gain `awaiting-reauthorization{nodeId, reason: ReauthorizationReason}`; `RunStatus` also gains `reauthorized{nodeId}`. `transitionRunStatus` admits running → awaiting-reauthorization (lease-fenced settle), awaiting-reauthorization → reauthorized (the unleased `markReauthorized` compare-and-set on the meta key through `setIfValue`, guarded on the record read) and reauthorized → running. `processRun` leaves an `awaiting-reauthorization` record untouched on a spurious wake; reconciliation wakes `reauthorized` runs and skips awaiting ones. `ProcessRunOutcome` treats `awaiting-reauthorization` as continuing: no `endRun`, custody stays.
+- **Notification.** The notifier port generalizes to `RunNotification = review{…} | reauthorization-required{runId, dagId, ownerTeam, nodeId, reason, audience, endpoint, until}`, over the existing Teams-bot and webhook adapters, to the owner team's channel (no per-initiator channel exists in the host). It is sent once per park, when the settle changes the status into `awaiting-reauthorization`, best effort and logged on failure. The status read model `GET /runs/:runId` is authoritative: it shows the state, the reason, the delegated audience, the header name, the endpoint and `reauthorizableUntilMs` (the custody expiry). No credential material is in either.
+- **Endpoint.** `POST /runs/:runId/delegation` (`createReauthorizeRunHandler`, `http/handlers/runs.ts`, router) authenticates the realm token through the same middleware as run start and calls `HitlRunService.reauthorizeRun(runId, {identity, header})`:
+  1. the record must be `awaiting-reauthorization`, else 409 `run-not-awaiting-reauthorization`;
+  2. the pure `planReauthorization(bound, identity, header, legs, nowMs)` (`run-authority.ts`) reuses pass 1's expectation builder (`delegatedAudienceFor`, INV-5) over the RECORDED agent and access, and refuses statically before any JWKS egress: identity not a realm user, or its `entra` oid or tid not the recorded initiator's → `reauthorization-initiator-mismatch{field: "oid" | "tid" | "identity"}`; a dark delegation leg → `delegation-unconfigured`; no header → `delegated-token-required{audience}`; a malformed header; now ≥ the custody expiry → `reauthorization-window-closed`;
+  3. `verifyEntraUserToken`, then pass 2 `admitDelegatedPresentation`, both reused unchanged (binding, AS-040's client and scope checks included);
+  4. `lifecycle.reauthorize(bound, grant)`: `reestablishDelegation` (`delegation-establishment.ts`) does a fresh on-behalf-of exchange, seals under `custodyBindingOf(bound)` with the ORIGINAL binding expiry, reads the record, runs LC-1 `reestablish` and `replace`s it;
+  5. `markReauthorized`, then enqueue a wakeup;
+  6. one `delegation-reauthorization` audit record, accepted or refused with the typed reason; a refused presentation leaves custody and status unchanged.
+- Re-authorization never extends the run deadline or the custody window. A run whose record TTL evicts while awaiting re-authorization is released by the stale wake's `endRun(record-evicted)` (custody TTL ≤ record TTL covers the gap).
+- **A dead-end park (flagged).** When `DELEGATED_CUSTODY_MAX_SEC` < `HITL_RUN_TTL_SEC`, a run can park `custody-expired` while its record is live; the window cannot be extended, so the endpoint refuses `reauthorization-window-closed` and the run waits for its record TTL. The plan follows the spec (AS-034 suspends); a spec amendment to fail such a run at once is recommended.
+- **Sync runs** cannot suspend: `reauthorization-required` fails them with 401.
+**Why:** FR-017, FR-027, AS-034 and AS-041. The run's checkpoint is the only place that knows the wave, the completed siblings and the node to re-run; a node failure is terminal in the framework today, so the decision to park must be made where the failure is recorded. The seam is vendor-neutral (ADR-0054): the framework parks on a caller predicate and knows nothing of Entra.
+
+## Change Log bullets (loop-backs 1 to 10)
+
+Moved verbatim from the plan's Change Log in loop-back 11 (condensation).
+
+- 2026-11-24, initial plan and loop-back 1 (alignment): Approach A; budgets as CT-2/CT-1 acceptance (AS-035/AS-036); owned custody release (INV-4); proxy and approval seams.
+- 2026-11-24, loop-back 2 (alignment): AS-006, FR-004, FR-020 move to the new CT-4 through the exported host.ts factories.
+- 2026-11-24, loop-back 3 (alignment): seam sweep; `composeRunAuthorityWiring` and `composeHitlRunService` as the only compositions.
+- 2026-11-24, loop-back 4 (alignment): FR-017 cap defaults, boot catalog (AS-009), per-contract FR-022 scans, per-leg gating, INV-5.
+- 2026-11-24, loop-back 5 (design review 1): Phase 4 cut-over and Phase boundary rule; two-pass admission; run-authority lifecycle; one fault vocabulary.
+- 2026-11-25, loop-back 6 (design review 2): `TeamsApprover`, `decideRedeemStep`, three-state LC-1, sole `forRun` caller, fault subsets, `capability-unknown`.
+- 2026-11-25, loop-back 8 (design review 3): establish guard in production; `AuthorizedRun` and legs ADTs; progress-indexed redeem; `AdmittedRun`; no run id on the authority; planner-resolved `access`; `run-composition.ts`; `releaseCauseOf`.
+- 2026-11-25, loop-back 9 (design review 4): fail-closed `routeRequirement` (`capability-not-admitted`); admission-scoped ordering; `BoundAuthority`; branded `AuthorizedRun`; name-keyed `RunAccess`; refusal subsets; extraction and legacy deletion split from the cut-over; approver types out of CT-3.
+- 2026-11-25, loop-back 10 (design review 5): bare stored `RunAuthority`, `parseBoundAuthority`; `EntraObjectId` approver ids; non-empty delegating `RunAccess`; `RequirementRef` alias; bound `...Fn` aliases kept.
+
+## Self-audit (design-review loop-back 11)
+
+The user's design review decided D1 to D8. This audit covers the changed areas; every other row is unchanged since "Self-audit (design-review loop-back 10)". Plan length 229,792 UTF-16 units (cap 230,000), measured with `bun -e 'console.log(require("fs").readFileSync(".claude/plans/2026-11-24-agent-identity-redesign.md","utf8").length)'`.
+
+| Category | What was checked | Result and caught |
+|---|---|---|
+| Phase boundary | Each changed or new type with its constructors and matchers, against the code: `DagPhase`, `DagEvent`, `StatefulOutcome`, `WorkerJobOutcome` (park seam); `AuthorityUnavailableCause` (`authority-changed`); `HostError` (`run-not-awaiting-reauthorization`); `RunStatus`, `RunExecOutcome`, the notifier port, `HitlRunServiceDeps`; `HitlDecision`, `resolvePending`, `getDecision`, `recordApproval`; `DelegatedTokenInvalidReason` (`client`, `scope`); `RunAccess.passThrough`; `DelegatedCustodyStore`; `CustodyState` | Park seam: the code's consumers of `StatefulOutcome`/`WorkerJobOutcome` are `executor/run-dag.ts`, `dag-runtime/run-dag-stateful.ts`, the framework barrels and the host's `run-executor.ts` (`toSettledOutcome`, mapped `parked` → `failed` until the Phase 5 re-authorization Task); `DagPhase` matchers are in `dag-runtime/` (transition, machine, executor, wave-execution, human-resolution, wave-resolution, persistence) and the host's `run-store-job.ts` parser map; all in the one Phase 1 park seam Task (generic clause for the other framework matches). Caught: the framework paths were first written wrong and corrected to `dag-runtime/executor.ts`, `wave-execution.ts`, `executor/run-dag.ts`. `RunStatus`'s zod schema is in `hitl/adapters/run-store.ts`, in the Phase 5 re-authorization Task with `transitionRunStatus`, `processRun`, reconciliation and both notifiers. The decision value changes in one Phase 5 approvals Task with every producer, consumer and fixture (caught: `decision-store.test.ts` does not exist; the fixtures are in `redis-stores.test.ts`). The authority-changed cause rides the Phase 1 union-widening Task with `framework-error-http.ts`. `withRecordedAuthority`'s drift-checking signature exists from Phase 3 with no caller, its caller arrives in the Phase 4 cut-over. Claim reasons, `passThrough`, the store port and LC-1 are new exports in Phase 2 with no external caller |
+| Coverage specificity | FR-026, FR-027, FR-028, AS-034, AS-040 to AS-043; every spec FR and AS id | Every spec FR and AS id appears in the plan (scripted comparison). AS-040 → CT-1 `run-authority-admission.acceptance.test.ts`; AS-034, AS-041, FR-027 → CT-3 `run-reauthorization.acceptance.test.ts`; AS-042, FR-026 → CT-3 `authority-drift.acceptance.test.ts`; AS-043, FR-028 → CT-5 `hitl-decision-record.acceptance.test.ts`. Caught: the doc-only Requirements AS-014, AS-029 to AS-032, FR-040, FR-041 and FR-043 had no id on any Task; now AS-029 and FR-040 sit on the Phase 1 ADR Task and the rest on the Phase 6 docs bullet. Caught: the runbook's "rotation" (AS-030, FR-041) means credential/client rotation, now named beside custody-keyring rotation |
+| OWN | INV-4 with re-authorization; INV-5 with `planReauthorization`; the D4 facts; INV-2 with the drift check | INV-4: owner `run-authority-lifecycle.ts`, siblings `run-dag.ts`, `hitl/service.ts` (now with `reauthorizeRun`'s one `reauthorize`), `run-executor.ts` (one `withRecordedAuthority`, drift first); the matrix gains the re-authorization rows (accepted keeps `held` under the original expiry, each refusal leaves custody and status unchanged, no extension, a parked run keeps custody), the authority-changed HITL path and an evicted awaiting run. INV-5 gains the re-authorization row through the shared `expectationFor`. INV-2's `run-authority.ts` sibling note and matrix gain the drift row. The `azp` allowlist and the scope are not an invariant (AD-7: parsed config, one reading site, one shared builder), flagged |
+| SEAM | CT-3 and CT-5 seam lists; the sweep | CT-3 declares `createReauthorizeRunHandler` so no test reaches `reauthorizeRun` with a hand-built presentation; drift runs through a second `composeRunAuthorityWiring` and `composeHitlRunService` over a different parsed catalog. CT-5 declares `createApproveRunHandler`, `createGetRunHandler`, `handleBotActivity` and `errorResponse`. The sweep (moved verbatim to "Acceptance seam sweep (loop-back 11)") names every undeclared symbol on the new paths: `planReauthorization`, `verifyReauthorization`, `reestablishDelegation`, `checkAdmittedAuthority`, `recordApproval`, `reauthorizeRun`, `classifyDecisionAttempt`, `authorizeApproval`, `executesAsOf`, the park seam via `parkOn` |
+| MODEL | LC-1 machine; INV-1 to INV-5; CT-1 to CT-5 types files, acceptance anchors and export bindings | Loom's `parsePlanModels` over the plan: 1 lifecycle, 5 invariants (tiers ok), 5 contracts, 0 strays; `parsePlanExportBindings`: 11 binding files, 0 problems (new aliases `CheckAdmittedAuthorityFn`, `PlanReauthorizationFn`, `ExecutesAsOfFn`, `ReestablishDelegationFn`); one contract per types file (CT-4 and CT-5 `none` with reasons). LC-1: states absent, held, revoked; events establish (absent → held), refuse (held → revoked), reestablish (absent, held, revoked → held, same expiry). Caught: a multi-paragraph CT-3 Statement (joined), `ReauthorizationFailure` listed but never defined (removed), `DELEGATION_LEG.maxSec` (fixed). `parseSpec` over the amended spec: OK. No lint rule touched, so validate-lint-rules was not run |
+| FEAS | `clarifications/log.md`; `implementation-notes.md` | No contradiction with the log. IN-3 unchanged (expiry still fixed at establishment); IN-9 annotated: a park is a continuing outcome, never `endRun`. The approved decompose (62 Tasks, 16 Waves) predates loop-back 11 and must be re-run |
+| Stale terms | `generation`, `swap`, `rotate`, `stale`, `pending write`, `flush`, `contended`, `memory store` | Remaining hits are legitimate: "never rotates it" and "No rotation (D1)", custody-keyring and JWKS key rotation, credential/client rotation (AS-030), AD-6's "no fence, compare-and-swap, pending write" (what D1 removed), the "stale wake" of an evicted record, and a CT-4 mutant that "swaps the initiator" |
