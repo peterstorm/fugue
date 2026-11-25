@@ -1,7 +1,7 @@
 {
   "kind": "regex",
   "name": "inv-1-no-rfc8693-token-exchange",
-  "description": "INV-1 (FR-002, FR-003; plan 2026-11-24-agent-identity-redesign): no production source performs an RFC 8693 token exchange. Only an agent's own identity federates into Entra; a human-subject token is never exchanged at the realm or presented as a federated assertion. Flags the token-exchange grant URN and string-literal subject_token / subject_token_type form parameters. Tests are excluded so they may assert the absence.",
+  "description": "INV-1 (FR-002, FR-003; plan 2026-11-24-agent-identity-redesign): no production source performs an RFC 8693 token exchange. Only an agent's own identity federates into Entra; a human-subject token is never exchanged at the realm or presented as a federated assertion. Flags the token-exchange grant URN and string-literal subject_token / subject_token_type form parameters. Tests are excluded so they may assert the absence, and scripts/check-identity-docs.ts is excluded by exact path: its doc-lint banned-phrase table names these strings, as plain literals, to find them in docs (plan loop-back 15).",
   "extensions": [
     ".ts",
     ".tsx",
@@ -12,7 +12,8 @@
   "flags": "",
   "excludePatterns": [
     ".test.ts",
-    "__tests__/"
+    "__tests__/",
+    "scripts/check-identity-docs.ts"
   ],
   "fixHint": "Do not build an RFC 8693 token exchange. Agent credentials come from RealmAssertionMint.mintFederationAssertion (client_credentials, scope \"entra-exchange <capability>\") and EntraAgentAuthority; user-origin app runs record the initiator for attribution only, and delegated runs use Entra on-behalf-of through the agent identity (see ADR-0094 and plan 2026-11-24-agent-identity-redesign AD-1).",
   "enabled": true

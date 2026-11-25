@@ -487,3 +487,12 @@ The user reviewed the design and decided D1 to D8. These are the user's own deci
 3. **G-3 view types' home.** **Resolution:** `hitl/types.ts`.
 
 **Decided by:** the architecture agent (mechanisms), on the orchestrator's relay of the plan alignment report.
+
+
+### 2026-11-25: Loop-back 15 (plan design review 3)
+
+1. **Eight advisories (brokered namespaces, parked-run terminal path, INV-1 vs doc-lint, re-authorization refusal and narrowing, `EntraLeg` `missing`, `RunView`, `requiresDelegation`, one commit function).** **Resolution:** fixed; mechanisms in `plan-history.md`, "Loop-back 15 (plan design review 3 fixes)".
+2. **Split `domain/run-authority.ts` into `run-access.ts`.** **Resolution:** declined (a structural preference, not a defect; it would reshuffle INV-2's siblings; no budget room).
+3. **Stopping rule.** **Resolution:** if the next plan design review has no criticals, its advisories are accepted and recorded as Phase 5 implementation notes rather than looped on.
+
+**Decided by:** the user (items 1 to 3; 2026-11-25, relayed by the orchestrator from plan design review `run.fBEJU9QnO2`); the mechanisms by the architecture agent.
