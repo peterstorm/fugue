@@ -427,3 +427,18 @@ The user reviewed the design and decided D1 to D8. These are the user's own deci
 **Flagged, decided by the architecture agent within (2):** the run deadline is persisted on the delegated authority as `delegation.runDeadlineMs` (one source, never changed; `parseBoundAuthority` refuses a custody expiry beyond it); the re-established authority is written into the run record by the same `markReauthorized` compare-and-set as the status, with custody written first, so a lost race or a failed record write leaves custody the record cannot open and the next redeem parks the run again (fail closed).
 
 **Decided by:** the user (both items, 2026-11-25); the flagged details by the architecture agent.
+
+### 2026-11-25: Loop-back 12 (plan alignment)
+
+1. **S1, synchronous delegated runs (AS-034, FR-017, SC-012).** **Resolution:** a HITL run suspends awaiting re-authorization; a synchronous delegated run, which has no suspension, fails with the typed re-authorization-required error (HTTP 401); neither ever falls back to `app` authority. FR-027 and AS-041 apply to HITL runs only. Spec reworded. Decided by the user.
+2. **S2, who is notified (AS-034).** **Resolution:** the host has no per-person channel, so the run's owner-team notification channel receives the re-authorization-required notice, and `GET /runs/:runId` shows the awaiting-re-authorization state, what to present and until when; no credential material in either. Spec reworded. Decided by the user.
+3. **Plan gap fixes (FR-026 unbrokered, JUDGE-1, MODEL-1, MODEL-2, SEAM-1, OWN-1, OWN-2, OWN-3, FEAS-2, FEAS-3).** **Resolution:** made by the architecture agent at the user's go-ahead. The detail is in `plan-history.md`, "Loop-back 12 (plan alignment)". The new contract is CT-6, with drift gated in Phase 4. The new lifecycles are LC-2 (run status) and LC-3 (DAG phase). INV-4 was split into INV-4, INV-6, INV-7 and INV-8. FR-005 is anchored on the boot catalog Task. The production notifiers are seams. `executesAsOf` has one call site. INV-5 gained siblings, IN-6 is honoured, and the installed manifest is described.
+
+**Flagged, decided by the architecture agent within (3):**
+- The brokering state is `REALM_JWT_ISSUER` presence, carried as `BrokeringNow`.
+- A brokered run resumed on a now-unbrokered host fails `removed`.
+- `markReauthorized` refuses a changed run deadline.
+- `RunStatus` and `transitionRunStatus` move to `hitl/run-status.ts`, in a Phase 1 LC-2 Task.
+- Drift gets its own contract, CT-6, rather than CT-3's anchors being split across Tasks.
+
+**Decided by:** the user (S1, S2); the architecture agent at the user's go-ahead (the gap fixes and flagged items).
