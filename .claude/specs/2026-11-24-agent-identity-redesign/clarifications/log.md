@@ -446,3 +446,13 @@ The user reviewed the design and decided D1 to D8. These are the user's own deci
 ### 2026-11-25: Loop-back 12b (INV-5 sibling)
 
 1. **OWN-1, the wiring's audience call.** **Resolution:** `adapters/run-authority-wiring.ts` (`RunAuthorityWiring.delegatedAudience`) is an INV-5 sibling with its own matrix row. The architecture agent made this change at the orchestrator's plan-alignment request. The interview's answer 8 is annotated as superseded by loop-back 11b.
+
+
+### 2026-11-25: Loop-back 13 (plan design review fixes)
+
+1. **Deadline unit bug.** **Resolution:** fixed with branded `durationOfSeconds`/`addDuration`, one conversion of `HITL_RUN_TTL_SEC`.
+2. **Re-authorization race (overwrite and orphan).** **Resolution:** one fenced commit: `markReauthorized` writes record and staged custody in one `setAllIfValues` (WATCH/MULTI, no Lua) guarded on the record read, or neither; a loser gets 409.
+3. **`delegatedAudienceFor` totality.** **Resolution:** `Result<EntraClientId, AgentUnmapped>`; `reauthorization-agent-unmapped`; `DelegatedAudienceAnswer` for the wiring and views.
+4. **Persisted `delegation.audience`.** **Resolution:** dropped, with INV-5's establishment sibling.
+
+**Decided by:** the user, to fix all four (2026-11-25, relayed by the orchestrator from plan design review `run.nodhGTPRS9`); the mechanisms by the architecture agent (detail: `plan-history.md`, "Loop-back 13 (plan design review fixes)").
