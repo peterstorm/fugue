@@ -375,3 +375,18 @@ The fourth plan design review returned 12 advisories. The orchestrator accepted 
 The self-audit also fixed five phase-boundary breaks: `mapped-host-composition.test.ts` also imports `syncRunOptions`, so it joins the extraction Task; `capability-scope.test.ts` was missing from the deletion list; host.ts's local `RunAuthority` record is renamed `LegacyRunBroker` so it does not collide with the CT-1 type; `mintingAuthorityOf`'s placement avoids an import cycle; and `agentClientIdFromFrameworkOrigin` goes with the legacy deletion. One new semantic is flagged for the user's review: a requirement that passed through at admission is refused on resume if the boot catalog has since begun brokering its namespace.
 
 **Decided by:** the architecture agent, under user delegation (orchestrator decisions on all 12 advisories).
+
+### 2026-11-25: Loop-back 10 (plan design review 5)
+
+The fifth plan design review returned 7 advisories in 6 items; the code reviewer had none. The orchestrator accepted items 1 to 5 and declined item 6 in part. All were decided under user delegation.
+
+1. **The persisted authority shape was inconsistent (AD-9 against File Structure and HITL Authority Continuity).** **Resolution:** the record stores the bare `RunAuthority`, which holds no run id, under its own `runId`, the only stored run id. Every read returns `RunRecord.authority` as the `BoundAuthority` that `parseBoundAuthority(raw.authority, raw.runId)` builds. `RunExecutionRequest.authority` carries that read's `BoundAuthority` and is never persisted, so there is no second stored copy of the run id. Decided under user delegation.
+2. **The kind-to-access invariant lived in a storage adapter.** **Resolution:** a pure `parseBoundAuthority` in `domain/run-authority.ts`, beside `parseRunAccess`, owns the rules: `agent` and `user-app` need `app` access, `user-delegated` needs `delegating` access, and a duplicate name is corrupt. It is the record path's `BoundAuthority` builder. The run store only decodes JSON and calls it, and a property test covers the round trip and the corrupt pairs without a Redis fake. Decided under user delegation.
+3. **Approver Entra object ids were raw strings.** **Resolution:** `TeamsApprover.aadObjectId` and `ApproverRef.teams-user{aadObjectId}` are `EntraObjectId`. The bot handler parses `from.aadObjectId` with `parseEntraObjectId` at the boundary (Phase 2), a malformed id fails closed as an unknown approver, and persisted approvals are parsed, not cast (Phase 5). Decided under user delegation.
+4. **A delegating `RunAccess` could hold no delegated entry.** **Resolution:** the variant is `{delegated: NonEmptyReadonlyMap; app: ReadonlyMap}`, with disjoint keys kept by its two builders; `routeRequirement`'s overloads are unchanged. Decided under user delegation.
+5. **`RequirementRef` duplicated `RawCapabilityRequirement`.** **Resolution:** `RequirementRef` is now an alias of it. Decided under user delegation.
+6. **The `...Fn` alias surface was wide (decline in part).** **Resolution:** kept. All 21 aliases are named by an `**Export bindings:**` entry, which requires a named function type for skeleton generation, so none can be dropped. Decided under user delegation.
+
+The self-audit fixed one phase-boundary break: `approverTeamIdentity` now takes an `EntraObjectId`, so `messages-handler.ts` changes in the Phase 2 required-principal Task, not "compiles unchanged".
+
+**Decided by:** the architecture agent, under user delegation (orchestrator decisions on all 7 advisories).
