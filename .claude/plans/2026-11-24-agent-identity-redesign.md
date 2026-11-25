@@ -355,7 +355,7 @@ packages/host/src/adapters/run-authority-wiring.ts — composeRunAuthorityWiring
 packages/host/src/adapters/run-composition.ts — createRunContextFactory, createDagExecutor, composeHitlRunService, HitlWiringArgs and their helpers (createHitlExecutor, syncRunOptions): moved unchanged from host.ts (Phase 3 extraction), signatures changed in the Phase 4 cut-over; imports no boot code; INV-6 sibling (createDagExecutor mints only through mintingAuthorityOf over the bracket's AuthorizedRun)
 packages/host/src/adapters/__tests__/run-composition.test.ts — without createHost: createDagExecutor mints through the bracket's handle when brokered, with no broker when unbrokered; composeHitlRunService's executor makes one withRecordedAuthority per slice with boundAuthorityOf(record)
 packages/host/src/adapters/__tests__/run-authority-admission.test.ts — precedence through the composition, capability-unknown first; zero JWKS requests for every statically refusable token-carrying submission (fast-check); non-delegated plans pass through unchanged
-packages/host/src/adapters/__tests__/run-authority-lifecycle.test.ts — every behaviour in the RunAuthorityLifecycle interface comments; the body's deadlineMs equals the established runDeadlineMs (delegated) or addDuration(now after bind, window); non-delegated plan → identity establishment, release still issued; failing delete → release-failed, one log, nothing thrown; one handle per brokered bracket (forRun counted, over its BoundAuthority), none unbrokered; mintingAuthorityOf undefined exactly for an unbrokered run; establishment custody-defect → 500 refusal and one error log; authority-changed before forRun on drift; reauthorize: Ok under a fresh expiry ≤ the run deadline, every Err leaves the record as it was
+packages/host/src/adapters/__tests__/run-authority-lifecycle.test.ts — every behaviour in the RunAuthorityLifecycle interface comments; the body's deadlineMs equals the established runDeadlineMs (delegated) or, for agent, user-app and unbrokered runs, addDuration(the fake now read after bind, window); non-delegated plan → identity establishment, release still issued; failing delete → release-failed, one log, nothing thrown; one handle per brokered bracket (forRun counted, over its BoundAuthority), none unbrokered; mintingAuthorityOf undefined exactly for an unbrokered run; establishment custody-defect → 500 refusal and one error log; authority-changed before forRun on drift; reauthorize: Ok under a fresh expiry ≤ the run deadline, every Err leaves the record as it was
 packages/host/src/adapters/__tests__/run-authority-wiring.test.ts — adapters selected per EntraDirectory variant (agent-id, app-registration, unwired); partial Entra config → unwired adapters; always the Redis custody store over the injected RedisPort (D2); a non-delegating leg → unwired establishment (unconfigured{absent}, zero egress and custody writes) and every delegated run refused naming each unset delegation key; a configured leg without ENTRA_IDENTITY_MODEL (AS-033) or with an unmapped agent client (AS-013) → Err naming the offenders; faults returned, never thrown
 packages/host/src/__tests__/delegated-audience.matrix.test.ts — INV-5 matrix (owner + every sibling)
 ```
@@ -398,7 +398,7 @@ packages/host/src/hitl/__tests__/reauthorize-run.test.ts — NEW, service unit: 
 
 ```
 packages/host/src/http/delegated-token-header.ts — parseDelegatedTokenHeader: parse X-Fugue-Delegated-Authorization → absent | present(RedactedSecret) | malformed
-packages/host/src/http/handlers/run-dag.ts — INV-4 and INV-6 sibling: admission through the injected admitRunAuthority, then the sync path's one withEstablishedAuthority call (Component Design › Run Admission)
+packages/host/src/http/handlers/run-dag.ts — INV-4 and INV-6 sibling: admission through the injected admitRunAuthority, then the sync path's one withEstablishedAuthority call (Component Design › Run Admission); the body's timer = remainingUntil(deadlineMs, epochMsOf(deps.clock())), RunDagDeps.clock unchanged (() => number)
 packages/host/src/supervisor/uds-proxy.ts — unchanged: proxyToWorker forwards X-Fugue-Delegated-Authorization and Authorization byte-identical and strips only X-Fugue-Tenant; a runtime seam of CT-1, CT-3 and CT-4
 packages/host/src/http/handlers/manifest.ts — per-DAG authority block: requirements via classifyCapabilities, each brokered mode (authorityOf, INV-2 sibling), any capability-unknown requirements, the delegated header requirement, the audience (delegatedAudienceFor, INV-5 sibling), the required DELEGATED_SCOPE (the client allowlist is not published), tenant
 packages/host/src/domain/host-error.ts — capability-catalog-invalid{faults} (Phase 1), identity-config-invalid{faults} (Phase 2), run-authority-refused{refusal} (Phase 4), run-not-awaiting-reauthorization{runId} 409 (Phase 5 re-authorization Task), each with its exhaustive tables; boot refusals name every offender, never a value
@@ -832,7 +832,9 @@ mintingAuthorityOf(run: AuthorizedRun, meterLlm): MintingAuthority | undefined  
 interface RunAuthorityLifecycle {
   withEstablishedAuthority<T>(run: AdmittedRun, window: DurationMs,
       body: (run: AuthorizedRun, deadlineMs: EpochMs) => Promise<{ ending: SyncRunEnding; value: T }>): Promise<Result<T, EstablishmentRefusal>>
-      // deadlineMs = the established runDeadlineMs, else addDuration(now after bind, window); the body's timer runs to it (IN-3)
+      // deadlineMs = bracketDeadlineOf(bound, window, deps.now()) read once after bind or establish, the ONE deadline point for every
+      // RunAuthority kind (module-private, .exhaustive(): user-delegated → its runDeadlineMs; agent | user-app | unbrokered → addDuration(now, window));
+      // the body's timer runs to it (IN-3)
       // bindAdmission or establish → AuthorizedRun (forRun once iff brokered) → body → release(sync-settled{ending}) in finally;
       // body rejection → release(sync-rejected), rethrow; establish Err → release(abandoned{sync, establish}), Err(runAuthorityRefusalOf(fault))
   establishForRecord<T>(run: AdmittedRun, window: DurationMs,
@@ -854,7 +856,8 @@ createRunAuthorityLifecycle(deps: { establish: (admitted: AdmittedRun<PendingPla
       => Promise<Result<Reestablished, EstablishmentFault>>;  // reestablishDelegation, applied the same way
     brokering: BrokeringNow;  // the boot brokering state, for checkAdmittedAuthority only
     capabilityAuthority: CapabilityAuthority;  // the ONLY holder of forRun
-    custody: Pick<DelegatedCustodyStore, "delete">; logger: LogPort }): RunAuthorityLifecycle  // INV-4, INV-6, INV-7 owner
+    custody: Pick<DelegatedCustodyStore, "delete">; logger: LogPort;
+    now: () => EpochMs }): RunAuthorityLifecycle  // INV-4, INV-6, INV-7 owner; now: composeRunAuthorityWiring's own clock, passed through
 establishDelegation(deps: { mint; entra; cipher; custody: Pick<DelegatedCustodyStore, "put">; leg: DelegatingEntraLeg; now: () => EpochMs },
     admitted: AdmittedRun<PendingPlan>, window: DurationMs): Promise<Result<BoundAuthority<UserDelegatedAuthority>, EstablishmentFault>>
   // mint → on-behalf-of; ONE clock read t; runDeadlineMs = addDuration(t, window) (INV-8, IN-3); delegation = {custodyExpiresAtMs: custodyExpiryFor(t,
@@ -933,7 +936,7 @@ RunAuthorityWiring = { legs; brokering: BrokeringNow; admitRunAuthority; lifecyc
 IdentityTransports = { realmToken; entraToken; entraJwks; graph }  // production: fetch-based, built in host.ts
 ```
 
-Sync order: lookup, access, body, schema, then **admit** (two-pass). HITL: `startRun(admitted, input)` (bracketing establishment with record creation) and return. Otherwise acquire, circuit, then **one call** `withEstablishedAuthority(admitted, durationOfMs(timeoutMs), body)`, where `body(run, deadlineMs)` arms the pipeline timer (`settleBeforeDeadline`) for `remainingUntil(deadlineMs, clock())`, runs `createContext` over `run.authority`, then `executeDag` over `run`, returning `{ending, value}`; on `Err(refusal)` (establishment failed, custody already released) respond with it. The slot is released in the route's own `finally`, as today.
+Sync order: lookup, access, body, schema, then **admit** (two-pass). HITL: `startRun(admitted, input)` (bracketing establishment with record creation) and return. Otherwise acquire, circuit, then **one call** `withEstablishedAuthority(admitted, durationOfMs(timeoutMs), body)`, where `body(run, deadlineMs)` arms the pipeline timer (`settleBeforeDeadline`) for `remainingUntil(deadlineMs, epochMsOf(deps.clock()))`, runs `createContext` over `run.authority`, then `executeDag` over `run`, returning `{ending, value}`; on `Err(refusal)` (establishment failed, custody already released) respond with it. The slot is released in the route's own `finally`, as today.
 
 The delegated header's path through `proxyToWorker` and attribution's two injectable hops (`createContext`, `executeDag`), and why CT-1 and CT-4 declare them: `plan-reference.md#run-admission-seams`.
 
@@ -1353,7 +1356,7 @@ The Phase boundary rule forbids splitting `HitlRunService.startRun`, `HitlRunSer
 
 - **Additive Tasks** (no signature with an outside caller; may take an earlier Wave): `http/delegated-token-header.ts` (`parseDelegatedTokenHeader` → `DelegatedHeader`) with its test; the `run-authority-refused{refusal}` HostError with every exhaustive `HostError` matcher (status table, one status per `RunAuthorityRefusal` kind, `capability-unknown` 503 included; `discloseHostError`; snapshots; `rawDetailsFor`).
 - **The cut-over Task: one Task, one Wave**, every coupled signature with every caller and fixture:
-  - `http/handlers/run-dag.ts` (Component Design › Run Admission): `RunDagDeps` gains `admitRunAuthority` and `runAuthority`; `createContext` takes a `RunAuthority`, `executeDag` the bracket's `AuthorizedRun`.
+  - `http/handlers/run-dag.ts` (Component Design › Run Admission): `RunDagDeps` gains `admitRunAuthority` and `runAuthority`; `createContext` takes a `RunAuthority`, `executeDag` the bracket's `AuthorizedRun`; `RunDagDeps.clock` stays `() => number` (the circuit breaker and duration metric keep it) and the timer reads `remainingUntil(deadlineMs, epochMsOf(deps.clock()))`, the route's one conversion, so no `RunDagDeps` construction site changes for the clock.
   - `hitl/service.ts`: one `establishForRecord` in `startRun(admitted, input)`, the `ProcessRunOutcome` fold and one `endRun` in `processRun`; `HitlRunServiceDeps.runAuthority` narrowed and `runTtl: DurationMs` added (the `establishForRecord` window), `newRunId` removed.
   - `hitl/types.ts`, `hitl/ports.ts`, `hitl/identity.ts`, `hitl/adapters/run-store.ts`: `RunRecord.authority` (the bare `RunAuthority`, IN-6) and `RunExecutionRequest.authority` (`boundAuthorityOf(record)`) replace `identity` (AD-9); `PersistedIdentity`, `toPersistedIdentity` and `toExecIdentity` deleted; `approverTeamIdentity` stays.
   - `hitl/adapters/run-executor.ts`: `RunExecutorDeps.broker` → `runAuthority: Pick<RunAuthorityLifecycle, "withRecordedAuthority">`; one call per slice with the DAG's runtime-inventory requirements, minting through `mintingAuthorityOf`; `authority-changed` settles `failed` before any node runs (AD-12).

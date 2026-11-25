@@ -463,3 +463,10 @@ The user reviewed the design and decided D1 to D8. These are the user's own deci
 1. **GAP-1 to GAP-5 (plan alignment after loop-back 13).** **Resolution:** `domain/duration.ts` holds the instant and duration builders (types file declarations only, CT-1 binding, Phase 1 Task, property test); the run-store, service and LC-2 texts describe the fenced commit and `hitlRunDeadlineOf` is removed; the stale Phase 3 INV-5 row is gone; `run-queue.test.ts` joins the Task that adds `setAllIfValues`; the run deadline is set at establishment's post-exchange read and the sync timer runs to it (IN-3), with a test.
 
 **Decided by:** no new user decision: these follow from the user's decision to fix all four loop-back 13 issues (relayed by the orchestrator); the fixes are the architecture agent's (detail: `plan-history.md`, "Loop-back 13b (alignment fixes)").
+
+
+### 2026-11-25: Loop-back 13c (clock wiring)
+
+1. **Clocks behind the window and deadline.** **Resolution:** the lifecycle takes `now: () => EpochMs` from the wiring and computes every kind's body deadline at one point (`bracketDeadlineOf`); the sync route keeps its numeric clock and converts once with `epochMsOf`.
+
+**Decided by:** no new user decision (follows from the user's decision to fix all four loop-back 13 issues); the fix is the architecture agent's (detail: `plan-history.md`, "Loop-back 13c (clock wiring)").

@@ -13,8 +13,8 @@ Run start:  proxyToWorker → createAuthMiddleware (AuthenticatedUser{entra}) �
       ─verify-delegated→ verifyEntraUserToken (JWKS transport) → pass 2 admitDelegatedPresentation → user-delegated-pending{access, grant}
   → AdmittedRun{runId, dagId, ownerTeam, plan}
   → HITL: startRun(admitted) → establishForRecord(admitted, runTtl, persist = create record{bound.runId, bound.authority})
-    sync: acquire → withEstablishedAuthority(admitted, durationOfMs(timeout), body(run, deadlineMs): timer = remainingUntil(deadlineMs, now))
-    (window: establishment sets runDeadlineMs = addDuration(t, window) at its post-exchange read t)
+    sync: acquire → withEstablishedAuthority(admitted, durationOfMs(timeout), body(run, deadlineMs): timer = remainingUntil(deadlineMs, epochMsOf(clock())))
+    (deadline: the lifecycle's bracketDeadlineOf, runDeadlineMs = addDuration(t, window) at establishment's post-exchange read t, else addDuration(now after bind, window))
             body(run): createRunContextFactory → createNodeContextForDag(run.authority) → createDagExecutor → runDag(mintingAuthorityOf(run, meterLlm))
   → inside the lifecycle: bindAdmission ─bound→ (decided) │ ─pending→ establishDelegation → mint → OBO(offline_access) → seal(AAD = custodyBindingOf(bound))
       → transitionCustody(absent, establish) ─Err→ establishFaultOf │ ─held→ custody.put (NX, TTL to the binding expiry; written once)
