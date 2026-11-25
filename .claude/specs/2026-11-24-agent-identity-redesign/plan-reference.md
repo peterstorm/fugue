@@ -12,8 +12,9 @@ Run start:  proxyToWorker → createAuthMiddleware (AuthenticatedUser{entra}) �
       ─decided→ plan (agent | user-app{initiator{realmSub, oid, tid}} | unbrokered; no token retained)
       ─verify-delegated→ verifyEntraUserToken (JWKS transport) → pass 2 admitDelegatedPresentation → user-delegated-pending{access, grant}
   → AdmittedRun{runId, dagId, ownerTeam, plan}
-  → HITL: startRun(admitted) → establishForRecord(admitted, deadline, persist = create record{bound.runId, bound.authority})
-    sync: acquire → withEstablishedAuthority(admitted, deadline, body)
+  → HITL: startRun(admitted) → establishForRecord(admitted, runTtl, persist = create record{bound.runId, bound.authority})
+    sync: acquire → withEstablishedAuthority(admitted, durationOfMs(timeout), body(run, deadlineMs): timer = remainingUntil(deadlineMs, now))
+    (window: establishment sets runDeadlineMs = addDuration(t, window) at its post-exchange read t)
             body(run): createRunContextFactory → createNodeContextForDag(run.authority) → createDagExecutor → runDag(mintingAuthorityOf(run, meterLlm))
   → inside the lifecycle: bindAdmission ─bound→ (decided) │ ─pending→ establishDelegation → mint → OBO(offline_access) → seal(AAD = custodyBindingOf(bound))
       → transitionCustody(absent, establish) ─Err→ establishFaultOf │ ─held→ custody.put (NX, TTL to the binding expiry; written once)
@@ -142,3 +143,19 @@ File Structure › Host: contracts entries, verbatim:
 packages/host/src/__tests__/acceptance/support/identity-fakes.ts — fakes at the network, storage and clock edges only: zero-latency realm-token, Entra-token, Entra-JWKS and Graph transports (an IdentityTransports value) with request capture, a JWKS signer for realm and Entra user tokens, a fake realm signature verifier (markSignatureVerified claims), setSystemTime clock control, an in-process UDS transport into the worker app, an in-memory RedisPort and HitlRedisPort with SharedInfra (custody runs through the production Redis store over it, D2), an in-process QueueBackend delivering to the started worker, a recording Bot Framework connector (BotConnectorPort) and webhook transport (WebhookHttp) under the production notifiers, capturing each rendered activity and card body, a fake VerifyBotToken, a capturing audit sink, logger and tracer. NO fake realm mint, Entra authority, verifier, cipher, custody store or capability authority: those come from composeRunAuthorityWiring
 packages/host/src/__tests__/acceptance/support/credential-sentinel.ts — FR-022 scan support for every contract's acceptance (Phase 3, with CT-2): CredentialSentinels, one distinctive value per credential kind (inbound realm and Entra user JWTs, realm assertion, T1, Entra app access token, on-behalf-of access token, refresh token, redeem-returned refresh token, re-authorization realm and Entra user tokens), wired into the fakes; CapturedSurfaces, a closed record of ten surfaces (logs, audit, spans, httpResponses, errors, handles, origins, runRecords, custodyAtRest, notifications: what the notifier transports received) filled only from the capturing sinks and transports, proxyToWorker's responses, the path's errors, handles and authority/origin values, the in-memory HitlRedisPort and the custody keyspace; assertNoCredentialMaterial renders each value with JSON.stringify, String() and Bun.inspect and fails on any sentinel, its base64, base64url or hex encoding, or any JWT segment of 16+ characters; assertCustodyCiphertextOnly also requires every custody record to be a SealedRefreshCredential opening only under the deployment keyring with its own binding as AAD
 ```
+
+## Moved in loop-back 13b
+
+Moved verbatim from the plan in loop-back 13b (alignment fixes) to keep it within budget; the plan points at each.
+
+### HITL composition and approver seams
+
+`composeHitlRunService` builds `createRedisRunStore` and `createRedisDecisionStore` over the tenant's Redis, `createRunExecutor` over the lifecycle narrowed to `withRecordedAuthority`, `createRunQueue` over the injected backend, and `createHitlRunService` over them and the narrowed lifecycle. CT-3 drives it with an in-process `QueueBackend` and `runQueue.startWorker(service.processRun)`, so record schema, lease-fenced processing and the executor's broker are production code.
+
+The approver is derived where production derives it: `createApproveRunHandler` maps the middleware-built `AuthIdentity` to `realm-user{realmSub, entra}`, `team{team}` or `admin` and serializes refusals through `errorResponse`; `handleBotActivity` parses `from.aadObjectId` (`parseEntraObjectId`), resolves a `TeamsApprover`, authorizes it through `canAccessDag` and maps it to `teams-user{aadObjectId}`. CT-3 and CT-5 declare these as runtime seams, so acceptance never calls `recordApproval` with a hand-built approver; CT-3 re-authorizes only through `createReauthorizeRunHandler`. Both also declare the production renderers `createBotFrameworkNotifier` and `createWebhookNotifier`, faked only at their transports (`BotConnectorPort`, `WebhookHttp`), so `executesAs` and the re-authorization notice are judged as approvers see them.
+
+### Property test inventory
+
+Testing Strategy bullet, verbatim:
+
+- **Property tests** use fast-check: the `*.property.test.ts` files (the LC-1 and LC-2 machines'; LC-3's is `dag-transition-property.test.ts`), `authority-unavailable-error.test.ts`, `federated-assertion.test.ts`, `entra-user-token.test.ts`, `redacted-secret.test.ts` and the matrix tests over generated catalogs, directories and authorities. The token-endpoint classifier and the fault projections are property-tested once, in `domain/__tests__`.

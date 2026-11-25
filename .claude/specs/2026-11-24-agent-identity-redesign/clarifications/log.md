@@ -456,3 +456,10 @@ The user reviewed the design and decided D1 to D8. These are the user's own deci
 4. **Persisted `delegation.audience`.** **Resolution:** dropped, with INV-5's establishment sibling.
 
 **Decided by:** the user, to fix all four (2026-11-25, relayed by the orchestrator from plan design review `run.nodhGTPRS9`); the mechanisms by the architecture agent (detail: `plan-history.md`, "Loop-back 13 (plan design review fixes)").
+
+
+### 2026-11-25: Loop-back 13b (alignment fixes)
+
+1. **GAP-1 to GAP-5 (plan alignment after loop-back 13).** **Resolution:** `domain/duration.ts` holds the instant and duration builders (types file declarations only, CT-1 binding, Phase 1 Task, property test); the run-store, service and LC-2 texts describe the fenced commit and `hitlRunDeadlineOf` is removed; the stale Phase 3 INV-5 row is gone; `run-queue.test.ts` joins the Task that adds `setAllIfValues`; the run deadline is set at establishment's post-exchange read and the sync timer runs to it (IN-3), with a test.
+
+**Decided by:** no new user decision: these follow from the user's decision to fix all four loop-back 13 issues (relayed by the orchestrator); the fixes are the architecture agent's (detail: `plan-history.md`, "Loop-back 13b (alignment fixes)").
