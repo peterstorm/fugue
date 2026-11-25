@@ -505,3 +505,14 @@ The user reviewed the design and decided D1 to D8. These are the user's own deci
 3. **G-5 a park with the window already closed.** **Resolution:** it settles `failed` at once from `running`, audited `expired`, no notice, then `endRun`.
 
 **Decided by:** the architecture agent (mechanisms), on the orchestrator's relay of the plan alignment report.
+
+## Plan alignment after loop-back 15b: gaps carried as implementation notes (2026-11-25)
+
+**Decided by the user (2026-11-25).** The alignment pass after loop-back 15b (commit 904c4894) found three low gaps. None leaves a requirement uncovered:
+- G-1: the commit and service clock seam.
+- G-2: a commit-time custody TTL under 1 s.
+- G-3: the park-time closed-window test entry, the `ProcessRunOutcome` fold and the failed-error field names.
+
+The plan had 7 UTF-16 units of budget left, and every loop-back had introduced small inconsistencies of its own. So the user chose to carry these gaps as accepted implementation notes IN-12, IN-13 and IN-14 in `implementation-notes.md`, rather than run loop-back 15c. The plan bytes are unchanged. The orchestrator attaches each note to its Task's brief.
+
+The stopping rule the user adopted in loop-back 15 then applies to the next plan design review. If it finds no critical, it is accepted and its advisories become implementation notes.
