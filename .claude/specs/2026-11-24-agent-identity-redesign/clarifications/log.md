@@ -442,3 +442,7 @@ The user reviewed the design and decided D1 to D8. These are the user's own deci
 - Drift gets its own contract, CT-6, rather than CT-3's anchors being split across Tasks.
 
 **Decided by:** the user (S1, S2); the architecture agent at the user's go-ahead (the gap fixes and flagged items).
+
+### 2026-11-25: Loop-back 12b (INV-5 sibling)
+
+1. **OWN-1, the wiring's audience call.** **Resolution:** `adapters/run-authority-wiring.ts` (`RunAuthorityWiring.delegatedAudience`) is an INV-5 sibling with its own matrix row. The architecture agent made this change at the orchestrator's plan-alignment request. The interview's answer 8 is annotated as superseded by loop-back 11b.
