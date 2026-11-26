@@ -19,7 +19,6 @@ import { describe, it, expect } from "bun:test";
 import { createUnwiredTokenEndpoint } from "../unwired-token-endpoint.js";
 import { createUnwiredEntraWifExchange, createUnwiredGraphHttp } from "../unwired-entra-wif.js";
 import { parseScope, type DownstreamScope } from "../../domain/capability-scope.js";
-import { markSubjectToken } from "../../domain/auth.js";
 
 const mailScope = (): DownstreamScope => {
   const r = parseScope("msgraph:mail.send");
@@ -47,25 +46,11 @@ describe("unwired-token-endpoint — every method fails closed with a hop-tagged
     }
   });
 
-  it("exchangeV2 → err infra-unreachable with operation 'exchange' / hop 'token-exchange'", async () => {
+  it("exposes ONLY the client_credentials mint — no RFC 8693 user exchange method (INV-1, FR-003)", () => {
     const endpoint = createUnwiredTokenEndpoint();
 
-    const r = await endpoint.exchangeV2({
-      userSub: "user-abc",
-      agentClientId: "fugue-agent-mail",
-      scope: mailScope(),
-      audience: "https://graph.microsoft.com",
-      subjectToken: markSubjectToken("user.jwt.proof"),
-    });
-
-    expect(r.ok).toBe(false);
-    if (r.ok) throw new Error("expected err — an unwired endpoint must never exchange");
-    expect(r.error.kind).toBe("infra-unreachable");
-    if (r.error.kind === "infra-unreachable") {
-      expect(r.error.operation).toBe("exchange");
-      expect(r.error.hop).toBe("token-exchange");
-      expect(r.error.message).toContain("not wired");
-    }
+    expect(Object.keys(endpoint)).toEqual(["mintClientCredentials"]);
+    expect("exchangeV2" in endpoint).toBe(false);
   });
 });
 

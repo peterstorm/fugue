@@ -24,7 +24,7 @@ import type { HostConfig } from "./domain/config.js";
 import type { HostState } from "./domain/host-state.js";
 import { booting, bootComplete, beginDrain, drainComplete, redisDied, redisRecovered } from "./domain/host-state.js";
 import type { RegisteredDag, Registry } from "./domain/registry.js";
-import type { AuthIdentity, SubjectToken } from "./domain/auth.js";
+import type { AuthIdentity } from "./domain/auth.js";
 import { initConcurrency, reconcileDagLimits } from "./domain/concurrency.js";
 import type { CircuitState } from "./domain/circuit-breaker.js";
 import { initCircuit } from "./domain/circuit-breaker.js";
@@ -238,19 +238,6 @@ export const stopBoundServerAfterBindFailure = (
 // ── Capability Broker selection (T8 / per-node minting) ───────────────────
 
 /**
- * The fail-safe default `resolveSubjectToken`: resolves NO token for any run, so
- * a broker constructed without the live `SubjectTokenRegistry` fails the user
- * RFC 8693 exchange CLOSED (no `subject_token` proof → no exchange) rather than
- * minting a proof-less token. Named (not an inline literal) so `createHost` can
- * detect when this inert default would back a LIVE broker — a wiring slip that
- * would silently close every user hop — and warn (defense-in-depth; the
- * fail-closed behaviour itself is unchanged).
- */
-const inertResolveSubjectToken = (
-  _runId: RunId,
-): SubjectToken | undefined => undefined;
-
-/**
  * Run `execute`, then ALWAYS `release(runId)` from the registry — on the normal
  * return AND when `execute` throws. This bounds a user run's in-memory subject
  * token to its run (NFR-014): the token must not outlive the run on any exit,
@@ -292,7 +279,7 @@ export const syncRunOptions = (
 });
 
 /**
- * Operability (mirror of the empty-policy warning in `warnLiveBrokerMisconfig`):
+ * Operability (mirror of `warnEmptyScopePolicy`):
  * a scope POLICY is configured but no broker is enabled, so the policy is
  * silently inert — every `requires` resolves against the static base context,
  * unguarded by the per-node gate the operator evidently intended. Surface it once.
@@ -308,36 +295,15 @@ const warnInertScopePolicy = (config: HostConfig, logger: SyncLogger): void => {
 };
 
 /**
- * Operability warnings for a LIVE broker selection.
- *
- * An empty scope policy means every mint fails closed (safe but surprising).
- * Surface it once at boot so a misconfigured realm policy is diagnosable from
- * the logs rather than from a wall of per-mint refusals.
- *
- * Defense-in-depth: the LIVE broker is being selected but its
- * `resolveSubjectToken` is the inert fail-safe — the host-side
- * `SubjectTokenRegistry` was not wired in. Every USER hop's RFC 8693 exchange
- * will then fail CLOSED (no `subject_token` proof resolvable), which is safe
- * but, if unintended, looks like an opaque per-run refusal. Surface the
- * misconfiguration ONCE so it is diagnosable from the boot log. The fail-closed
- * behaviour is unchanged — this only names the cause. (In normal `createHost`
- * wiring the live registry's `resolve` is always passed, so this never fires;
- * it guards against a future wiring regression.)
+ * Operability warning for a LIVE broker selection: an empty scope policy means
+ * every mint fails closed (safe but surprising). Surface it once at boot so a
+ * misconfigured realm policy is diagnosable from the logs rather than from a wall
+ * of per-mint refusals.
  */
-const warnLiveBrokerMisconfig = (
-  config: HostConfig,
-  logger: SyncLogger,
-  resolveSubjectToken: (runId: RunId) => SubjectToken | undefined,
-): void => {
+const warnEmptyScopePolicy = (config: HostConfig, logger: SyncLogger): void => {
   if (Object.keys(config.AGENT_CLIENT_SCOPES ?? {}).length === 0) {
     logger.warn(
       "live capability broker selected with empty scope policy — all mints will fail closed",
-    );
-  }
-  if (resolveSubjectToken === inertResolveSubjectToken) {
-    logger.warn(
-      "live capability broker selected without a subject-token resolver — user-initiated " +
-        "runs will FAIL CLOSED on the RFC 8693 exchange (the SubjectTokenRegistry is not wired)",
     );
   }
 };
@@ -429,21 +395,12 @@ export const selectCapabilityBroker = (
   sharedInfra: Pick<SharedInfra, "tracer" | "logger">,
   logger: SyncLogger,
   now: () => number = Date.now,
-  /**
-   * Resolve a user run's verified `subject_token` for the RFC 8693 exchange,
-   * threaded from the host-side `SubjectTokenRegistry` the run-context factory
-   * binds at run start (FR-030/FR-032). Defaults to the inert fail-safe
-   * (`inertResolveSubjectToken`) so a broker constructed without the registry
-   * fails the user path CLOSED (no proof → no exchange) — never a proof-less
-   * token. `createHost` passes the live registry's `resolve`.
-   */
-  resolveSubjectToken: (runId: RunId) => SubjectToken | undefined = inertResolveSubjectToken,
 ): CapabilityBroker | undefined => {
   if (config.REALM_JWT_ISSUER === undefined) {
     warnInertScopePolicy(config, logger);
     return undefined;
   }
-  warnLiveBrokerMisconfig(config, logger, resolveSubjectToken);
+  warnEmptyScopePolicy(config, logger);
 
   // ── AD-3 config-presence gating (FR-011): the pure plan decides each leg from
   //    its own config; this shell builds the adapters and emits the ONE warning.
@@ -461,7 +418,6 @@ export const selectCapabilityBroker = (
     // read URL target `https://<host>/api/data/v9.2`. Unset → that scope fails
     // closed at the broker (zero egress); `msgraph` scopes are unaffected.
     ...(config.DYNAMICS_ORG_HOST !== undefined ? { dynamicsOrgHost: config.DYNAMICS_ORG_HOST } : {}),
-    resolveSubjectToken,
     tracer: sharedInfra.tracer,
     logger: sharedInfra.logger,
     now,
@@ -1034,10 +990,10 @@ interface RunAuthority {
  * being silently re-labelled `agent`. The origin is returned alongside the base
  * context and threaded into `executeDag` so the broker can authorize each node.
  *
- * The factory also binds the user run's verified subject token host-side
- * (FR-030/FR-032): it reads it off the identity via the pure seam and stores it
- * under the run id so the broker can resolve it for the RFC 8693 exchange.
- * Non-user runs bind nothing. `executeDag` releases it on completion.
+ * The factory also still binds the user run's verified subject token host-side
+ * under the run id, and `executeDag` releases it on completion. Nothing reads it:
+ * the broker mints the agent's own client_credentials assertion for every origin
+ * (INV-1). The binding is removed by the later subject-token demolition.
  */
 const createRunContextFactory = (
   config: HostConfig,
@@ -1635,22 +1591,16 @@ const createShutdown = (
 
 /** The host-side `SubjectTokenRegistry` and the capability broker every run executes under. */
 const selectRunAuthority = (deps: HostDeps, routedTenant: TenantId): RunAuthority => {
-  // Host-side side-channel carrying each user run's verified `subject_token` from
-  // the run-context factory (bind at run start) to the broker (resolve at per-node
-  // dispatch) — FR-030/FR-032. The raw token travels ONLY through here; it never
-  // crosses `InvocationOrigin` (string-only) nor reaches a capability handle.
+  // The run-context factory still binds a user run's verified token here and the
+  // DAG executor releases it, but nothing reads it: the broker mints the agent's
+  // own client_credentials assertion for every origin (INV-1). The registry and
+  // its bind/release wiring are removed by the later subject-token demolition.
   const subjectTokens = createSubjectTokenRegistry();
   // Capability Broker selection (T8 / per-node minting): see `selectCapabilityBroker`.
   // A live Keycloak broker is returned when `REALM_JWT_ISSUER` is set, `undefined`
   // otherwise (no minting authority wired — the zero-regression static path).
   const broker: CapabilityBroker | undefined = deps.capabilityBroker ??
-    selectCapabilityBroker(
-      deps.config,
-      deps.sharedInfra,
-      deps.logger,
-      Date.now,
-      subjectTokens.resolve,
-    );
+    selectCapabilityBroker(deps.config, deps.sharedInfra, deps.logger);
   return { broker, subjectTokens, routedTenant };
 };
 

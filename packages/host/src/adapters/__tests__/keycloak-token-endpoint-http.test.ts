@@ -1,7 +1,7 @@
 /**
  * Tests for the LIVE Keycloak token endpoint (adapters/keycloak-token-endpoint-http.ts).
  *
- * Mirrors the `entra-wif.test.ts` structure: pure body-builders + pure
+ * Mirrors the `entra-wif.test.ts` structure: pure body-builder + pure
  * response-mapper + thin shell over an injected call-recording transport. NO live
  * network, NO `fetch` mock.
  *
@@ -15,26 +15,22 @@
  *     5xx/transient → unreachable, distinct.
  *   - NFR-014 — the client secret appears ONLY in the POST body, never in an
  *     error / refusal.
+ *   - INV-1 / FR-003 — the endpoint offers no RFC 8693 user exchange: the module
+ *     exports no exchange body-builder or grant URN, and the endpoint has one
+ *     method, the agent's own `client_credentials` mint.
  */
 
 import { describe, it, expect } from "bun:test";
+import * as keycloakTokenEndpointHttp from "../keycloak-token-endpoint-http.js";
 import {
   createKeycloakTokenEndpoint,
   buildClientCredentialsBody,
-  buildExchangeV2Body,
   mapKeycloakTokenResponse,
-  TOKEN_EXCHANGE_GRANT_TYPE,
-  REQUESTED_TOKEN_TYPE_ACCESS,
-  SUBJECT_TOKEN_TYPE_ACCESS,
 } from "../keycloak-token-endpoint-http.js";
 import type { HttpPost, HttpPostResponse } from "../fetch-http-post.js";
 import type { KeycloakClientCredential, AgentClientCredentials } from "../agent-client-credentials.js";
 import type { AgentClientId } from "../../domain/auth.js";
-import { markSubjectToken, type SubjectToken } from "../../domain/auth.js";
 import { parseScope, type DownstreamScope } from "../../domain/capability-scope.js";
-
-/** A verified user JWT branded as the RFC 8693 subject_token proof (FR-030). */
-const subjectToken: SubjectToken = markSubjectToken("header.payload.signature-user-123");
 
 const mailScope = (): DownstreamScope => {
   const r = parseScope("msgraph:mail.send");
@@ -67,7 +63,24 @@ const deps = (over?: { http?: HttpPost; credentials?: AgentClientCredentials }) 
   credentials: over?.credentials ?? resolverFor("dag-mail"),
 });
 
-// ── Pure body-builders (exact form, no extra params) ─────────────────────────
+// ── No RFC 8693 surface (INV-1 / FR-002 / FR-003) ────────────────────────────
+
+describe("keycloak-token-endpoint-http — no RFC 8693 user exchange (INV-1, FR-003)", () => {
+  it("exports no token-exchange body-builder, grant URN or subject/requested token types", () => {
+    const exported = Object.keys(keycloakTokenEndpointHttp);
+    expect(exported).not.toContain("buildExchangeV2Body");
+    expect(exported).not.toContain("TOKEN_EXCHANGE_GRANT_TYPE");
+    expect(exported).not.toContain("SUBJECT_TOKEN_TYPE_ACCESS");
+    expect(exported).not.toContain("REQUESTED_TOKEN_TYPE_ACCESS");
+  });
+
+  it("the live endpoint exposes ONLY the agent's own client_credentials mint", () => {
+    const endpoint = createKeycloakTokenEndpoint(deps());
+    expect(Object.keys(endpoint)).toEqual(["mintClientCredentials"]);
+  });
+});
+
+// ── Pure body-builder (exact form, no extra params) ──────────────────────────
 
 describe("buildClientCredentialsBody — exact form body, no extra params (FR-010)", () => {
   it("emits grant_type, client_id, client_secret, scope, audience — and nothing else", () => {
@@ -82,46 +95,9 @@ describe("buildClientCredentialsBody — exact form body, no extra params (FR-01
     expect(params.get("client_secret")).toBe("kc-super-secret");
     expect(params.get("scope")).toBe("msgraph:mail.send");
     expect(params.get("audience")).toBe("https://graph.microsoft.com");
-    // No extra params: exactly these five keys.
+    // No extra params: exactly these five keys (in particular, no subject_token).
     expect([...params.keys()].sort()).toEqual(
       ["audience", "client_id", "client_secret", "grant_type", "scope"],
-    );
-  });
-});
-
-describe("buildExchangeV2Body — exact RFC 8693 form body presenting the subject_token (FR-030/FR-031)", () => {
-  it("emits the token-exchange grant, client creds, subject_token + type, requested_token_type, scope, audience — and nothing else", () => {
-    const body = buildExchangeV2Body(cred, {
-      userSub: "user-123",
-      agentClientId: "dag-mail",
-      scope: mailScope(),
-      audience: "https://graph.microsoft.com",
-      subjectToken,
-    });
-    const params = new URLSearchParams(body);
-    expect(params.get("grant_type")).toBe(TOKEN_EXCHANGE_GRANT_TYPE);
-    expect(params.get("client_id")).toBe("kc-client-id");
-    expect(params.get("client_secret")).toBe("kc-super-secret");
-    expect(params.get("requested_token_type")).toBe(REQUESTED_TOKEN_TYPE_ACCESS);
-    expect(params.get("scope")).toBe("msgraph:mail.send");
-    expect(params.get("audience")).toBe("https://graph.microsoft.com");
-    // FR-030: the user's ACTUAL verified JWT is presented as the subject_token proof,
-    // so Keycloak preserves the user as `sub` (FR-031). The client_id is the agent =
-    // the exchanged token's `azp`.
-    expect(params.get("subject_token")).toBe("header.payload.signature-user-123");
-    expect(params.get("subject_token_type")).toBe(SUBJECT_TOKEN_TYPE_ACCESS);
-    // EXACTLY these seven keys — no extra params (mirrors the client_credentials test).
-    expect([...params.keys()].sort()).toEqual(
-      [
-        "audience",
-        "client_id",
-        "client_secret",
-        "grant_type",
-        "requested_token_type",
-        "scope",
-        "subject_token",
-        "subject_token_type",
-      ],
     );
   });
 });
@@ -130,7 +106,7 @@ describe("buildExchangeV2Body — exact RFC 8693 form body presenting the subjec
 
 describe("mapKeycloakTokenResponse — status → Result", () => {
   it("200 with access_token + positive expires_in → ok(MintedToken)", () => {
-    const r = mapKeycloakTokenResponse("aud", "mint", "client-credentials", {
+    const r = mapKeycloakTokenResponse("aud", {
       status: 200,
       json: { access_token: "the-sa-token", expires_in: 900 },
     });
@@ -148,15 +124,19 @@ describe("mapKeycloakTokenResponse — status → Result", () => {
     ["zero expires_in", { access_token: "t", expires_in: 0 }],
     ["Infinity expires_in", { access_token: "t", expires_in: Number.POSITIVE_INFINITY }],
     ["string expires_in", { access_token: "t", expires_in: "900" }],
-  ])("200 with %s → infra-unreachable (no born-stale/never-expiring token)", (_label, json) => {
-    const r = mapKeycloakTokenResponse("aud", "mint", "client-credentials", { status: 200, json });
+  ])("200 with %s → infra-unreachable on the mint hop (no born-stale/never-expiring token)", (_label, json) => {
+    const r = mapKeycloakTokenResponse("aud", { status: 200, json });
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected err");
     expect(r.error.kind).toBe("infra-unreachable");
+    if (r.error.kind === "infra-unreachable") {
+      expect(r.error.operation).toBe("mint");
+      expect(r.error.hop).toBe("client-credentials");
+    }
   });
 
   it.each([400, 401, 403])("HTTP %p → downstream-denied with the audience + Keycloak reason", (status) => {
-    const r = mapKeycloakTokenResponse("https://graph.microsoft.com", "mint", "client-credentials", {
+    const r = mapKeycloakTokenResponse("https://graph.microsoft.com", {
       status,
       json: { error: "invalid_scope", error_description: "scope not assigned to client" },
     });
@@ -170,7 +150,7 @@ describe("mapKeycloakTokenResponse — status → Result", () => {
   });
 
   it("4xx falls back to the error code when no description present", () => {
-    const r = mapKeycloakTokenResponse("aud", "mint", "client-credentials", {
+    const r = mapKeycloakTokenResponse("aud", {
       status: 401,
       json: { error: "invalid_client" },
     });
@@ -178,22 +158,24 @@ describe("mapKeycloakTokenResponse — status → Result", () => {
     if (r.error.kind === "downstream-denied") expect(r.error.reason).toBe("invalid_client");
   });
 
-  it.each([429, 503])("HTTP %p → infra-unreachable naming the throttle, carrying the hop", (status) => {
-    const r = mapKeycloakTokenResponse("aud", "exchange", "token-exchange", { status, json: {} });
+  it.each([429, 503])("HTTP %p → infra-unreachable naming the throttle, on the client-credentials mint hop", (status) => {
+    const r = mapKeycloakTokenResponse("aud", { status, json: {} });
     if (r.ok) throw new Error("expected err");
     expect(r.error.kind).toBe("infra-unreachable");
     if (r.error.kind === "infra-unreachable") {
-      expect(r.error.operation).toBe("exchange");
-      expect(r.error.hop).toBe("token-exchange");
+      expect(r.error.operation).toBe("mint");
+      expect(r.error.hop).toBe("client-credentials");
       expect(r.error.message).toBe(`Keycloak token endpoint throttled (HTTP ${status})`);
     }
   });
 
   it.each([500, 502])("a generic %p → infra-unreachable, distinct message from the throttle branch", (status) => {
-    const r = mapKeycloakTokenResponse("aud", "mint", "client-credentials", { status, json: {} });
+    const r = mapKeycloakTokenResponse("aud", { status, json: {} });
     if (r.ok) throw new Error("expected err");
     expect(r.error.kind).toBe("infra-unreachable");
     if (r.error.kind === "infra-unreachable") {
+      expect(r.error.operation).toBe("mint");
+      expect(r.error.hop).toBe("client-credentials");
       expect(r.error.message).toBe(`Keycloak token endpoint unreachable or unexpected status (HTTP ${status})`);
       expect(r.error.message).not.toContain("throttled");
     }
@@ -221,12 +203,13 @@ describe("createKeycloakTokenEndpoint — fail-closed on creds-miss, zero egress
     expect(calls.length).toBe(0);
     // NFR-014: no secret leaks into the refusal reason.
     if (r.error.kind === "downstream-denied") {
+      expect(r.error.resource).toBe("https://graph.microsoft.com");
       expect(r.error.reason).not.toContain("kc-super-secret");
       expect(r.error.reason).toContain("dag-UNGRANTED");
     }
   });
 
-  it("a KNOWN agent client mints over the transport and maps the 200 to a token", async () => {
+  it("a KNOWN agent client mints over the transport with the exact client_credentials body and maps the 200 to a token", async () => {
     const { http, calls } = recordingHttp({ status: 200, json: { access_token: "sa-token", expires_in: 3600 } });
     const endpoint = createKeycloakTokenEndpoint(deps({ http, credentials: resolverFor("dag-mail") }));
 
@@ -241,8 +224,16 @@ describe("createKeycloakTokenEndpoint — fail-closed on creds-miss, zero egress
     expect(r.value.accessToken).toBe("sa-token");
     expect(calls.length).toBe(1);
     expect(calls[0]?.url).toBe(deps().config.tokenUrl);
-    // The secret is in the wire body (and only there).
+    // The secret is in the wire body (and only there), and the body is exactly
+    // the client_credentials form — never an exchange body.
     expect(calls[0]?.body).toContain("kc-super-secret");
+    expect(calls[0]?.body).toBe(
+      buildClientCredentialsBody(cred, {
+        agentClientId: "dag-mail",
+        scope: mailScope(),
+        audience: "https://graph.microsoft.com",
+      }),
+    );
   });
 
   it("a 4xx from Keycloak → downstream-denied (an assigned-but-rejected scope is settled)", async () => {
@@ -257,6 +248,10 @@ describe("createKeycloakTokenEndpoint — fail-closed on creds-miss, zero egress
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error("expected denial");
     expect(r.error.kind).toBe("downstream-denied");
+    if (r.error.kind === "downstream-denied") {
+      expect(r.error.resource).toBe("https://graph.microsoft.com");
+      expect(r.error.reason).toBe("audience not permitted");
+    }
   });
 
   it("a transport-level rejection → infra-unreachable (never throws across the boundary)", async () => {
@@ -277,97 +272,8 @@ describe("createKeycloakTokenEndpoint — fail-closed on creds-miss, zero egress
       expect(r.error.operation).toBe("mint");
       expect(r.error.hop).toBe("client-credentials");
       expect(r.error.message).toContain("socket hang up");
-    }
-  });
-
-  it("exchangeV2 presents the user's subject_token over the transport and maps the 200 to a token (FR-030/FR-031)", async () => {
-    const { http, calls } = recordingHttp({ status: 200, json: { access_token: "exchanged-tok", expires_in: 3600 } });
-    const endpoint = createKeycloakTokenEndpoint(deps({ http, credentials: resolverFor("dag-mail") }));
-
-    const r = await endpoint.exchangeV2({
-      userSub: "user-1",
-      agentClientId: "dag-mail",
-      scope: mailScope(),
-      audience: "https://graph.microsoft.com",
-      subjectToken,
-    });
-
-    expect(r.ok).toBe(true);
-    if (!r.ok) throw new Error("expected ok");
-    expect(r.value.accessToken).toBe("exchanged-tok");
-    // Exactly one egress, and the user's verified JWT was presented as the
-    // subject_token proof (FR-030) — Keycloak preserves the user as `sub`.
-    expect(calls.length).toBe(1);
-    expect(calls[0]?.url).toBe(deps().config.tokenUrl);
-    const wireParams = new URLSearchParams(calls[0]?.body ?? "");
-    expect(wireParams.get("subject_token")).toBe("header.payload.signature-user-123");
-    expect(wireParams.get("grant_type")).toBe(TOKEN_EXCHANGE_GRANT_TYPE);
-    // The agent client (azp) authenticates the exchange; the user JWT is the subject.
-    expect(wireParams.get("client_id")).toBe("kc-client-id");
-  });
-
-  it("exchangeV2 fails closed on an UNKNOWN agent client with NO egress — never presents the user JWT (FR-012/NFR-014)", async () => {
-    const { http, calls } = recordingHttp({ status: 200, json: { access_token: "x", expires_in: 1 } });
-    const endpoint = createKeycloakTokenEndpoint(deps({ http, credentials: resolverFor("dag-mail") }));
-
-    const r = await endpoint.exchangeV2({
-      userSub: "user-1",
-      agentClientId: "dag-UNGRANTED",
-      scope: mailScope(),
-      audience: "https://graph.microsoft.com",
-      subjectToken,
-    });
-
-    expect(r.ok).toBe(false);
-    if (r.ok) throw new Error("expected refusal");
-    expect(r.error.kind).toBe("downstream-denied");
-    // ZERO egress: no credential → nothing to authenticate the exchange AS → the
-    // user JWT is never sent anywhere.
-    expect(calls.length).toBe(0);
-    // NFR-014: neither the secret nor the user JWT leaks into the refusal reason.
-    if (r.error.kind === "downstream-denied") {
-      expect(r.error.reason).not.toContain("kc-super-secret");
-      expect(r.error.reason).not.toContain("header.payload.signature-user-123");
-    }
-  });
-
-  it("exchangeV2 maps a Keycloak 4xx denial to downstream-denied (a settled exchange refusal)", async () => {
-    const { http } = recordingHttp({ status: 400, json: { error_description: "subject_token expired" } });
-    const endpoint = createKeycloakTokenEndpoint(deps({ http, credentials: resolverFor("dag-mail") }));
-
-    const r = await endpoint.exchangeV2({
-      userSub: "user-1",
-      agentClientId: "dag-mail",
-      scope: mailScope(),
-      audience: "https://graph.microsoft.com",
-      subjectToken,
-    });
-    expect(r.ok).toBe(false);
-    if (r.ok) throw new Error("expected denial");
-    expect(r.error.kind).toBe("downstream-denied");
-  });
-
-  it("exchangeV2 maps a transport-level rejection to infra-unreachable on the exchange hop (never throws)", async () => {
-    const { http } = recordingHttp(() => {
-      throw new Error("socket hang up");
-    });
-    const endpoint = createKeycloakTokenEndpoint(deps({ http, credentials: resolverFor("dag-mail") }));
-
-    const r = await endpoint.exchangeV2({
-      userSub: "user-1",
-      agentClientId: "dag-mail",
-      scope: mailScope(),
-      audience: "https://graph.microsoft.com",
-      subjectToken,
-    });
-    expect(r.ok).toBe(false);
-    if (r.ok) throw new Error("expected err");
-    expect(r.error.kind).toBe("infra-unreachable");
-    if (r.error.kind === "infra-unreachable") {
-      expect(r.error.operation).toBe("exchange");
-      expect(r.error.hop).toBe("token-exchange");
-      // The user JWT is never echoed into the diagnostic message (NFR-014).
-      expect(r.error.message).not.toContain("header.payload.signature-user-123");
+      // NFR-014: the request body (and the secret in it) is never echoed.
+      expect(r.error.message).not.toContain("kc-super-secret");
     }
   });
 });

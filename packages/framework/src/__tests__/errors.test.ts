@@ -594,6 +594,9 @@ describe("retriabilityOf — single source of truth for the retry fast-fail fork
     [{ kind: "source-has-incoming", nodeId: nid, message: "has edge" }, "retriable"],
     [{ kind: "invalid-dag-input-edge", edge: { from: "$input", to: "n" }, message: "bad" }, "retriable"],
     [{ kind: "infra-unreachable", operation: "mint", hop: "cc", message: "down" }, "retriable"],
+    // A settled authority answer (AD-8): replay re-derives the same refusal.
+    // Every cause is pinned in authority-unavailable-error.test.ts.
+    [{ kind: "authority-unavailable", scope: "graph:mail.send", agentClientId: "agent-x", cause: { kind: "federation-rejected", reason: "issuer" } }, "non-retriable"],
     // Both map-width refusals are functions of the SAME upstream output a retry
     // would re-read, so a retry reproduces the verdict exactly; labelling them
     // retriable would burn the node's whole budget re-deriving one answer.
@@ -710,6 +713,8 @@ describe("usageOfError — FR-001 token-attribution contract", () => {
     [{ kind: "source-has-incoming", nodeId: nid, message: "has edge" }, undefined],
     [{ kind: "invalid-dag-input-edge", edge: { from: "$input", to: "n" }, message: "bad" }, undefined],
     [{ kind: "infra-unreachable", operation: "mint", hop: "cc", message: "down" }, undefined],
+    // An authority refusal precedes any LLM call.
+    [{ kind: "authority-unavailable", scope: "graph:mail.send", agentClientId: "agent-x", cause: { kind: "capability-not-admitted" } }, undefined],
     // Fan errors summarise children whose spend was attributed as each child
     // settled — even a usage-carrying primary must not be counted again.
     [frameworkError.fanBudgetRefused(nid, coverageRefusal), undefined],

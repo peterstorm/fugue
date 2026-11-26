@@ -107,6 +107,14 @@ export { createCronScheduler } from "./scheduler/scheduler.js";
 // Capability helpers not already supplied by the leading types barrel.
 // ---------------------------------------------------------------------------
 export { makeNodeContext, consoleLogger, noopTracer, noopObserver, createPassthroughBroker } from "./shared/index.js";
+// The bounded execution inventory (outer nodes, then each map's direct
+// children) the runtime preflight claims capabilities over. Public so a host
+// deciding a run's authority before execution reads the same node set.
+export { runtimeNodeInventory } from "./shared/runtime-node-inventory.js";
+// The authority-unavailable vocabulary (AD-8) and the one construction of its
+// authority-changed failure.
+export { authorityChangedError } from "./types/errors.js";
+export type { AuthorityChangedCapability, AuthorityUnavailableCause, AuthorityUnavailableError } from "./types/errors.js";
 // Built-in capability catalogue — runtime values consumed by `fugue capabilities`
 // and any tooling that needs the authoritative built-in set + its metadata.
 export { BUILTIN_CAPABILITY_KEYS, BUILTIN_CAPABILITY_INFO } from "./types/node.js";

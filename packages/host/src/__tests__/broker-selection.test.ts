@@ -112,44 +112,38 @@ describe("selectCapabilityBroker (boot wiring, C7.5)", () => {
     expect(logs.some((l) => l.level === "warn" && l.msg.includes("empty scope policy"))).toBe(true);
   });
 
-  it("warns once when the LIVE broker is selected without a subject-token resolver (user exchange fails closed)", () => {
-    // Defense-in-depth (item 4): omitting the resolver arg leaves the inert
-    // fail-safe default backing a LIVE broker — user RFC 8693 exchange then fails
-    // closed. The boot warning names that cause so the misconfiguration is
-    // diagnosable rather than surfacing as opaque per-run refusals.
+  it("a USER-origin invocation reaches the agent's own client_credentials mint — no subject-token resolver, no exchange (INV-1, FR-003)", async () => {
+    // The live broker is selected with no subject-token wiring at all: a user hop
+    // mints the agent's own assertion, so the assigned scope reaches the unwired
+    // Keycloak endpoint on the client_credentials hop (never a token-exchange hop,
+    // never a local refusal for a missing user proof).
     const { logger, logs } = collectLogs();
     const config = configFrom({
       REALM_JWT_ISSUER: "https://kc.example.com/realms/fugue-platform",
       AGENT_CLIENT_SCOPES: JSON.stringify({ "dag-mail": ["msgraph:mail.send"] }),
     });
-    // No 5th `resolveSubjectToken` arg → the inert default is used.
     const broker = selectCapabilityBroker(config, { tracer: passTracer, logger }, logger);
     expect(broker).toBeDefined();
-    const subjectWarnings = logs.filter(
-      (l) => l.level === "warn" && l.msg.includes("without a subject-token resolver"),
-    );
-    expect(subjectWarnings).toHaveLength(1);
-    expect(subjectWarnings[0]?.msg).toContain("FAIL CLOSED");
-  });
+    if (!broker) return;
+    expect(logs.some((l) => l.msg.includes("subject-token"))).toBe(false);
+    expect(logs.some((l) => l.msg.includes("RFC 8693"))).toBe(false);
 
-  it("does NOT warn about the subject-token resolver when a real resolver is wired", () => {
-    // The normal createHost path passes the live registry's `resolve`. A
-    // non-inert resolver must NOT trip the wiring-slip warning.
-    const { logger, logs } = collectLogs();
-    const config = configFrom({
-      REALM_JWT_ISSUER: "https://kc.example.com/realms/fugue-platform",
-      AGENT_CLIENT_SCOPES: JSON.stringify({ "dag-mail": ["msgraph:mail.send"] }),
-    });
-    const broker = selectCapabilityBroker(
-      config,
-      { tracer: passTracer, logger },
-      logger,
-      Date.now,
-      // A live-shaped resolver (distinct function identity from the inert default).
-      () => undefined,
+    const result = await broker.mintFor(
+      {
+        origin: { kind: "user", sub: "user-abc", agentClientId: "dag-mail" },
+        runId: makeRunId("run-user"),
+        dagId: makeDagId("dag-boot"),
+        nodeId: makeNodeId("node-a"),
+      },
+      ["msgraph:mail.send" as Capability],
     );
-    expect(broker).toBeDefined();
-    expect(logs.some((l) => l.msg.includes("without a subject-token resolver"))).toBe(false);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected the unwired endpoint to fail closed");
+    expect(result.error.kind).toBe("infra-unreachable");
+    if (result.error.kind === "infra-unreachable") {
+      expect(result.error.operation).toBe("mint");
+      expect(result.error.hop).toBe("client-credentials");
+    }
   });
 
   it("warns when AGENT_CLIENT_SCOPES is configured while REALM_JWT_ISSUER is unset — the policy is inert", () => {

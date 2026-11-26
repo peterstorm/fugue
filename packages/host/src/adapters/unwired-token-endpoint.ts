@@ -18,8 +18,9 @@ import { err } from "@fuguejs/framework";
 import type { KeycloakTokenEndpoint } from "./keycloak-token-endpoint.js";
 
 /**
- * Build the unwired endpoint. Both methods return `infra-unreachable` tagged with
- * the operation that was attempted, so the audit trail pinpoints the unwired hop.
+ * Build the unwired endpoint. Its one method returns `infra-unreachable` tagged
+ * with the client-credentials mint hop, so the audit trail pinpoints the unwired
+ * hop.
  */
 export const createUnwiredTokenEndpoint = (): KeycloakTokenEndpoint => ({
   mintClientCredentials: async () =>
@@ -27,13 +28,6 @@ export const createUnwiredTokenEndpoint = (): KeycloakTokenEndpoint => ({
       kind: "infra-unreachable",
       operation: "mint",
       hop: "client-credentials",
-      message: "Keycloak token endpoint is not wired (awaiting JWKS/token HTTP adapter)",
-    }),
-  exchangeV2: async () =>
-    err({
-      kind: "infra-unreachable",
-      operation: "exchange",
-      hop: "token-exchange",
       message: "Keycloak token endpoint is not wired (awaiting JWKS/token HTTP adapter)",
     }),
 });

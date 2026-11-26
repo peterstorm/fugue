@@ -9,9 +9,10 @@
  *     named operation; no raw client/token field is reachable (type-level).
  *   - US4 / SC-008 — cache TTL: repeated (identity,audience,scope) within TTL →
  *     at most one mint call on the endpoint.
- *   - SC-010 / FR-308/309 — exchange semantics: user origin → exactly one V2
- *     exchange (sub=user, azp=agent); agent origin → 0 exchanges, one
- *     client_credentials mint.
+ *   - INV-1 / FR-002 / FR-003 — only the agent's own identity is presented:
+ *     every origin (user or agent) mints ONE `client_credentials` assertion AS
+ *     the agent's Keycloak client; a user origin's `sub` is attribution only
+ *     (audit), never presented, and no RFC 8693 exchange body is ever built.
  *   - FR-504 / SC-009 — every mint AND refusal emits exactly one correlated
  *     record with sub/azp/runId/nodeId/scope.
  */
@@ -24,19 +25,20 @@ import type {
   InvocationOrigin,
   ScopedCapabilityHandle,
   Tracer,
-  RunId,
 } from "@fuguejs/framework";
 import type { LogPort } from "../../ports.js";
 import { createKeycloakBroker } from "../keycloak-broker.js";
 import type {
   KeycloakTokenEndpoint,
   ClientCredentialsRequest,
-  ExchangeV2Request,
 } from "../keycloak-token-endpoint.js";
+import { createKeycloakTokenEndpoint } from "../keycloak-token-endpoint-http.js";
+import type { HttpPost } from "../fetch-http-post.js";
+import type { AgentClientCredentials } from "../agent-client-credentials.js";
 import type { EntraWifExchange, WifExchangeRequest } from "../entra-wif.js";
 import type { GraphHttp, GraphRequest } from "../graph-capability.js";
 import { scopeName, audienceForScope } from "../../domain/capability-scope.js";
-import { markSubjectToken, type SubjectToken } from "../../domain/auth.js";
+import type { AgentClientId } from "../../domain/auth.js";
 import { collectLogs } from "./fixtures/log-capture.js";
 
 // ── Test spine ──────────────────────────────────────────────────────────────
@@ -55,7 +57,6 @@ const passTracer: Tracer = { withSpan: async (_n, _t, fn) => fn() };
  */
 const recordingEndpoint = (opts?: { ttlSec?: number }) => {
   const ccCalls: ClientCredentialsRequest[] = [];
-  const exCalls: ExchangeV2Request[] = [];
   let mintCounter = 0;
   const ttlSec = opts?.ttlSec ?? 3600;
   const endpoint: KeycloakTokenEndpoint = {
@@ -64,15 +65,8 @@ const recordingEndpoint = (opts?: { ttlSec?: number }) => {
       mintCounter += 1;
       return { ok: true, value: { accessToken: `cc-token-${mintCounter}`, expiresInSec: ttlSec } };
     },
-    exchangeV2: async (req) => {
-      exCalls.push(req);
-      mintCounter += 1;
-      // Simulate the exchanged token's claims so SC-010 (sub stays user, azp
-      // becomes agent) is assertable from the recorded request inputs.
-      return { ok: true, value: { accessToken: `ex-token-${mintCounter}`, expiresInSec: ttlSec } };
-    },
   };
-  return { endpoint, ccCalls, exCalls, egressCount: () => ccCalls.length + exCalls.length };
+  return { endpoint, ccCalls, egressCount: () => ccCalls.length };
 };
 
 /**
@@ -179,22 +173,13 @@ const mintedClient = (
  */
 type BrokerArgs = Parameters<typeof createKeycloakBroker>[0];
 
-/**
- * A fixed verified subject token the default `resolveSubjectToken` hands back for
- * every run — so the pre-T7 user-path tests (which assert the exchange SUCCEEDS)
- * keep exercising the proof-bearing path. Tests that pin the FR-030 fail-closed
- * behaviour override `resolveSubjectToken` with one that returns `undefined`.
- */
-const TEST_SUBJECT_TOKEN: SubjectToken = markSubjectToken("user.jwt.proof");
-
 const mkBroker = (
-  deps: Omit<BrokerArgs, "entraWif" | "graphHttp" | "resolveSubjectToken"> &
-    Partial<Pick<BrokerArgs, "entraWif" | "graphHttp" | "resolveSubjectToken">>,
+  deps: Omit<BrokerArgs, "entraWif" | "graphHttp"> &
+    Partial<Pick<BrokerArgs, "entraWif" | "graphHttp">>,
 ) =>
   createKeycloakBroker({
     entraWif: deps.entraWif ?? recordingWif().wif,
     graphHttp: deps.graphHttp ?? recordingGraphHttp().graphHttp,
-    resolveSubjectToken: deps.resolveSubjectToken ?? (() => TEST_SUBJECT_TOKEN),
     ...deps,
   });
 
@@ -536,41 +521,54 @@ describe("keycloak-broker — half-lifetime floor keeps a short-lived token usab
   });
 });
 
-// ── Exchange semantics (SC-010 / FR-308/309) ─────────────────────────────
+// ── Only the agent's own identity is presented (INV-1 / FR-002 / FR-003) ──────
 
-describe("keycloak-broker — exchange semantics (SC-010/FR-308/309)", () => {
-  it("USER origin → exactly one Token Exchange V2; sub stays user, azp becomes agent; 0 client_credentials", async () => {
-    const { endpoint, ccCalls, exCalls } = recordingEndpoint();
-    const { logger } = collectLogs();
-    const broker = mkBroker({
-      endpoint,
-      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
-      tracer: passTracer,
-      logger,
-      now: () => 0,
-    });
+/**
+ * Resolve the mail-send scope for a USER origin (initiator user-abc, through
+ * agent fugue-agent-mail) against `endpoint`, recording the WIF assertions and
+ * the audit log.
+ */
+const resolveUserMailSend = async (endpoint: KeycloakTokenEndpoint) => {
+  const { wif, calls: wifCalls } = recordingWif();
+  const { logger, logs } = collectLogs();
+  const broker = mkBroker({
+    endpoint,
+    entraWif: wif,
+    assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+    tracer: passTracer,
+    logger,
+    now: () => 0,
+  });
+  const result = await broker.mintFor(
+    invocationFor(userOrigin("user-abc", "fugue-agent-mail")),
+    [cap("msgraph:mail.send")],
+  );
+  return { result, wifCalls, logs };
+};
 
-    const result = await broker.mintFor(
-      invocationFor(userOrigin("user-abc", "fugue-frontend")),
-      [cap("msgraph:mail.send")],
-    );
+describe("keycloak-broker — every origin mints the agent's own client_credentials assertion (INV-1/FR-002/FR-003)", () => {
+  it("USER origin → exactly one client_credentials mint AS the agent; the initiator sub is never presented", async () => {
+    const { endpoint, ccCalls } = recordingEndpoint();
+    const { result, wifCalls } = await resolveUserMailSend(endpoint);
 
     expect(result.ok).toBe(true);
-    expect(exCalls.length).toBe(1);
-    expect(ccCalls.length).toBe(0); // 0 client_credentials on the user path
-    expect(exCalls[0]?.userSub).toBe("user-abc"); // sub stays the user
-    expect(exCalls[0]?.agentClientId).toBe("fugue-frontend"); // azp becomes the agent
-    // SC-007 / FR-304 — narrowing AT EGRESS: the exact scope+audience that
-    // was requested is threaded into the exchange call, not a broader grant.
-    const exReq = exCalls[0];
-    if (exReq === undefined) throw new Error("expected one exchange call");
-    expect(scopeName(exReq.scope)).toBe("msgraph:mail.send");
-    expect(exReq.audience).toBe(audienceForScope(exReq.scope, undefined)!);
-    expect(exReq.audience).toBe("https://graph.microsoft.com");
+    expect(ccCalls.length).toBe(1);
+    // The request carries ONLY the agent's identity and the narrowing: the
+    // initiator `sub` is attribution, never part of what is presented.
+    const ccReq = ccCalls[0];
+    if (ccReq === undefined) throw new Error("expected one client_credentials call");
+    expect(Object.keys(ccReq).sort()).toEqual(["agentClientId", "audience", "scope"]);
+    expect(ccReq.agentClientId).toBe("fugue-agent-mail");
+    expect(JSON.stringify(ccCalls)).not.toContain("user-abc");
+    // SC-007 / FR-304 — narrowing AT EGRESS: the exact scope+audience requested.
+    expect(scopeName(ccReq.scope)).toBe("msgraph:mail.send");
+    expect(ccReq.audience).toBe("https://graph.microsoft.com");
+    // The federated assertion presented to Entra is the agent's own SA token.
+    expect(wifCalls.map((c) => c.clientAssertion)).toEqual(["cc-token-1"]);
   });
 
-  it("AGENT origin → exactly one client_credentials mint; 0 exchanges (FR-309)", async () => {
-    const { endpoint, ccCalls, exCalls } = recordingEndpoint();
+  it("AGENT origin → exactly one client_credentials mint (FR-309)", async () => {
+    const { endpoint, ccCalls } = recordingEndpoint();
     const { logger } = collectLogs();
     const broker = mkBroker({
       endpoint,
@@ -587,7 +585,6 @@ describe("keycloak-broker — exchange semantics (SC-010/FR-308/309)", () => {
 
     expect(result.ok).toBe(true);
     expect(ccCalls.length).toBe(1);
-    expect(exCalls.length).toBe(0); // agent hops perform ZERO exchanges
     expect(ccCalls[0]?.agentClientId).toBe("fugue-agent-sites");
     // SC-007 / FR-304 — narrowing AT EGRESS for the agent (client_credentials)
     // path: the requested scope+audience are threaded verbatim into the mint.
@@ -599,179 +596,82 @@ describe("keycloak-broker — exchange semantics (SC-010/FR-308/309)", () => {
   });
 });
 
-// ── User subject_token proof threading + fail-closed (T7 / FR-030/031/032) ───
+// ── Wire level: a user-origin run never builds an exchange body (INV-1) ──────
 
-describe("keycloak-broker — user exchange presents the resolved subject_token (FR-030/FR-031)", () => {
-  it("USER branch passes the run's resolved subject_token into exchangeV2; sub stays user, azp becomes agent", async () => {
-    const { endpoint, exCalls, ccCalls } = recordingEndpoint();
-    const { logger } = collectLogs();
-    const proof = markSubjectToken("verified.user.jwt");
-    const seen: RunId[] = [];
-    const broker = mkBroker({
-      endpoint,
-      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
-      // The side-channel hands back THIS run's verified token (the host-side
-      // thread the run-context factory bound at run start, FR-032).
-      resolveSubjectToken: (rid) => {
-        seen.push(rid);
-        return proof;
-      },
-      tracer: passTracer,
-      logger,
-      now: () => 0,
+/** A call-recording HTTP transport answering every POST with a fresh SA token. */
+const recordingKeycloakHttp = () => {
+  const bodies: string[] = [];
+  const http: HttpPost = {
+    post: async (_url, body) => {
+      bodies.push(body);
+      return { status: 200, json: { access_token: "agent-sa-token", expires_in: 3600 } };
+    },
+  };
+  return { http, bodies };
+};
+
+/** Resolves one known agent client's Keycloak credential; every other client misses. */
+const credentialsFor = (agentClientId: string): AgentClientCredentials =>
+  (id: AgentClientId) =>
+    (id as string) === agentClientId ? { clientId: agentClientId, clientSecret: "agent-secret" } : undefined;
+
+describe("keycloak-broker — a user-origin run mints client_credentials only, never an exchange body (INV-1/FR-002/FR-003)", () => {
+  it("over the LIVE Keycloak endpoint adapter, the wire carries exactly the agent's client_credentials form", async () => {
+    const { http, bodies } = recordingKeycloakHttp();
+    const endpoint = createKeycloakTokenEndpoint({
+      config: { tokenUrl: "https://kc.example.com/realms/fugue-platform/protocol/openid-connect/token" },
+      http,
+      credentials: credentialsFor("fugue-agent-mail"),
     });
-
-    const result = await broker.mintFor(
-      invocationFor(userOrigin("user-abc", "fugue-agent-mail")),
-      [cap("msgraph:mail.send")],
-    );
+    const { result, wifCalls } = await resolveUserMailSend(endpoint);
 
     expect(result.ok).toBe(true);
-    // Exactly one exchange, the resolved proof presented as the subject_token.
-    expect(exCalls.length).toBe(1);
-    expect(ccCalls.length).toBe(0); // 0 client_credentials on the user path
-    expect(exCalls[0]?.subjectToken).toBe(proof);
-    expect(exCalls[0]?.userSub).toBe("user-abc"); // sub stays user (FR-031)
-    expect(exCalls[0]?.agentClientId).toBe("fugue-agent-mail"); // azp becomes agent
-    // The resolver was keyed on the run's id (the host-side side-channel key).
-    expect(seen).toEqual([runId]);
+    expect(bodies).toHaveLength(1);
+    const params = new URLSearchParams(bodies[0]);
+    expect(params.get("grant_type")).toBe("client_credentials");
+    expect(params.get("client_id")).toBe("fugue-agent-mail");
+    expect([...params.keys()].sort()).toEqual(["audience", "client_id", "client_secret", "grant_type", "scope"]);
+    // Never an RFC 8693 exchange body: no token-exchange grant, no subject token,
+    // and the initiator's sub appears nowhere on the wire.
+    expect(bodies[0]).not.toContain("token-exchange");
+    expect(bodies[0]).not.toContain("subject_token");
+    expect(bodies[0]).not.toContain("user-abc");
+    // The agent's own SA token is the only assertion presented to Entra.
+    expect(wifCalls.map((c) => c.clientAssertion)).toEqual(["agent-sa-token"]);
   });
 
-  it("AGENT branch NEVER resolves nor presents a subject_token (FR-309)", async () => {
-    const { endpoint, ccCalls, exCalls } = recordingEndpoint();
-    const { logger } = collectLogs();
-    let resolverCalls = 0;
-    const broker = mkBroker({
-      endpoint,
-      assignedScopes: () => new Set<string>(["msgraph:sites.read"]),
-      // If the agent branch ever consulted the side-channel, this counter would tick.
-      resolveSubjectToken: () => {
-        resolverCalls += 1;
-        return markSubjectToken("should-never-be-asked");
-      },
-      tracer: passTracer,
-      logger,
-      now: () => 0,
-    });
-
-    const result = await broker.mintFor(
-      invocationFor(agentOrigin("fugue-agent-sites")),
-      [cap("msgraph:sites.read")],
-    );
-
-    expect(result.ok).toBe(true);
-    expect(ccCalls.length).toBe(1); // client_credentials only
-    expect(exCalls.length).toBe(0); // zero exchanges — and so zero subject tokens
-    // The agent hop never even asks the side-channel for a subject token.
-    expect(resolverCalls).toBe(0);
-  });
-});
-
-describe("keycloak-broker — user exchange FAILS CLOSED with no resolvable subject_token (FR-030)", () => {
-  it("refuses (policy-refusal) and performs ZERO egress when resolveSubjectToken returns undefined — no proof-less token", async () => {
-    const { endpoint, egressCount } = recordingEndpoint();
-    const { wif, wifCount } = recordingWif();
-    const { logger, logs } = collectLogs();
-    const broker = mkBroker({
-      endpoint,
-      entraWif: wif,
-      // The scope IS assigned — the local scope gate passes — but the user run has
-      // NO resolvable verified token. The exchange MUST NOT proceed proof-less.
-      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
-      resolveSubjectToken: () => undefined,
-      tracer: passTracer,
-      logger,
-      now: () => 0,
-    });
-
-    const result = await broker.mintFor(
-      invocationFor(userOrigin("user-abc", "fugue-agent-mail")),
-      [cap("msgraph:mail.send")],
-    );
-
-    // Fail closed: a settled policy-refusal (NOT a token, NOT a silent success).
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("expected fail-closed refusal");
-    expect(result.error.kind).toBe("policy-refusal");
-    if (result.error.kind === "policy-refusal") {
-      expect(result.error.scope).toBe("msgraph:mail.send");
-      expect(result.error.agentClientId).toBe("fugue-agent-mail");
-    }
-    // NEVER issue a proof-less token: NO exchange egress AND no WIF egress.
-    expect(egressCount()).toBe(0);
-    expect(wifCount()).toBe(0);
-    // The fail-closed outcome is audited as a mint-failed refusal (SC-009).
-    const refusals = logs.filter((l) => l.data?.result === "refusal");
-    expect(refusals.length).toBe(1);
-    expect(refusals[0]?.data?.reason).toBe("mint-failed:policy-refusal");
-    // No mint record — nothing was minted.
-    expect(logs.filter((l) => l.data?.result === "mint").length).toBe(0);
-  });
-});
-
-describe("keycloak-broker — NFR-011: no raw subject_token reachable from a returned handle", () => {
-  it("the minted user handle exposes ONLY the operation method — no token/subjectToken/client field", async () => {
-    const { endpoint } = recordingEndpoint();
-    const { wif } = recordingWif();
-    const { graphHttp } = recordingGraphHttp();
-    const { logger } = collectLogs();
-    const proof = markSubjectToken("verified.user.jwt-NFR011");
-    const broker = mkBroker({
-      endpoint,
-      entraWif: wif,
-      graphHttp,
-      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
-      resolveSubjectToken: () => proof,
-      tracer: passTracer,
-      logger,
-      now: () => 0,
-    });
-
-    const result = await broker.mintFor(
-      invocationFor(userOrigin("user-abc", "fugue-agent-mail")),
-      [cap("msgraph:mail.send")],
-    );
+  it("the minted user-origin handle exposes ONLY the operation method — no token, client or initiator field", async () => {
+    const { result } = await resolveUserMailSend(recordingEndpoint().endpoint);
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected mint");
     const handle = mintedClient(
       result.value,
       cap("msgraph:mail.send"),
     ) as Record<string, unknown>;
-    // Only the operation method — no raw authority of ANY kind on the handle.
     expect(Object.keys(handle)).toEqual(["sendMail"]);
     expect(handle.token).toBeUndefined();
-    expect(handle.subjectToken).toBeUndefined();
     expect(handle.client).toBeUndefined();
-    // The raw subject token does not appear ANYWHERE in the handle's serialised form.
-    expect(JSON.stringify(handle)).not.toContain("verified.user.jwt-NFR011");
+    expect(JSON.stringify(handle)).not.toContain("user-abc");
   });
 });
 
 // ── Audit coverage (FR-504 / SC-009) ──────────────────────────────────────
 
 describe("keycloak-broker — correlated audit on every mint AND refusal (FR-504/SC-009)", () => {
-  it("a successful mint emits exactly one record with sub/azp/runId/nodeId/scope", async () => {
-    const { endpoint } = recordingEndpoint();
-    const { logger, logs } = collectLogs();
-    const broker = mkBroker({
-      endpoint,
-      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
-      tracer: passTracer,
-      logger,
-      now: () => 0,
-    });
-
-    await broker.mintFor(invocationFor(userOrigin("user-abc", "fugue-frontend")), [cap("msgraph:mail.send")]);
+  it("a user-origin mint emits exactly one record: the initiator sub as attribution, via the agent's client_credentials", async () => {
+    const { logs } = await resolveUserMailSend(recordingEndpoint().endpoint);
 
     const mintRecords = logs.filter((l) => l.data?.result === "mint");
     expect(mintRecords.length).toBe(1);
     const rec = mintRecords[0]?.data ?? {};
+    // Attribution only: the record names the initiator; the authority is the agent's.
     expect(rec.sub).toBe("user-abc");
-    expect(rec.azp).toBe("fugue-frontend");
+    expect(rec.azp).toBe("fugue-agent-mail");
     expect(rec.runId).toBe(runId as string);
     expect(rec.nodeId).toBe(nodeId as string);
     expect(rec.scope).toBe("msgraph:mail.send");
-    expect(rec.via).toBe("token-exchange-v2");
+    expect(rec.via).toBe("client_credentials");
+    expect(rec.acquisition).toBe("minted");
   });
 
   it("a fail-closed refusal emits exactly one record with the five fields (agent hop → no sub)", async () => {
@@ -802,16 +702,15 @@ describe("keycloak-broker — correlated audit on every mint AND refusal (FR-504
 // ── Endpoint-denial branch — refusal audit + Result surfacing (A3 / SC-009) ─
 
 /**
- * A token endpoint that DENIES every mint/exchange with a settled
- * `downstream-denied`. Exercises the broker's `mint-failed:<kind>` refusal-audit
- * branch (keycloak-broker.ts ~261-265) which the always-`ok:true` recording fake
- * never reaches — closing the SC-009 "100% of refusals audited" coverage gap.
+ * A token endpoint that DENIES every mint with a settled `downstream-denied`.
+ * Exercises the broker's `mint-failed:<kind>` refusal-audit branch, which the
+ * always-`ok:true` recording fake never reaches — closing the SC-009 "100% of
+ * refusals audited" coverage gap.
  */
 const denyingEndpoint = (resource: string, reason: string) => {
   const denial = err({ kind: "downstream-denied" as const, resource, reason });
   const endpoint: KeycloakTokenEndpoint = {
     mintClientCredentials: async () => denial,
-    exchangeV2: async () => denial,
   };
   return { endpoint };
 };
@@ -1016,9 +915,9 @@ describe("keycloak-broker — Entra WIF second egress after the Keycloak mint (T
   });
 
   it("an AGENT-path successful resolution audits the mint with via === client_credentials", async () => {
-    // The user-path `via === "token-exchange-v2"` is checked in the audit-coverage
-    // suite; this closes the agent-path half — the agent hop mints via
-    // `client_credentials` (NO token exchange, FR-309) and the audit witnesses it.
+    // The user-origin record is checked in the audit-coverage suite; this closes
+    // the agent-origin half — the agent hop mints via `client_credentials` and
+    // its record carries no initiator.
     const { endpoint } = recordingEndpoint();
     const { wif } = recordingWif();
     const { logger, logs } = collectLogs();
@@ -1108,43 +1007,66 @@ describe("keycloak-broker — a throwing audit sink never breaks mintFor's Resul
 
 // ── Cross-identity cache isolation + single-flight (review C7 / SC-008) ──────
 
-describe("keycloak-broker — cache keyed by IDENTITY, not just scope (C7.2)", () => {
-  it("two user hops with DIFFERENT subs (same agent+scope, same TTL window) each mint their OWN token — no cross-identity reuse", async () => {
-    const { endpoint, exCalls, egressCount } = recordingEndpoint({ ttlSec: 3600 });
-    const { wif, wifCount } = recordingWif({ ttlSec: 3600 });
-    const { graphHttp, requests } = recordingGraphHttp();
-    const { logger } = collectLogs();
-    const broker = mkBroker({
-      endpoint,
-      entraWif: wif,
-      graphHttp,
-      assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
-      tracer: passTracer,
-      logger,
-      now: () => 1_000, // fixed clock → both calls inside the same freshness window
-    });
+type SendMailHandle = {
+  sendMail: (m: { from: string; to: string; subject: string; body: string }) => Promise<unknown>;
+};
 
-    const a = await broker.mintFor(invocationFor(userOrigin("user-A", "fugue-agent-mail")), [cap("msgraph:mail.send")]);
-    const b = await broker.mintFor(invocationFor(userOrigin("user-B", "fugue-agent-mail")), [cap("msgraph:mail.send")]);
-    expect(a.ok && b.ok).toBe(true);
-    if (!a.ok || !b.ok) throw new Error("expected both to resolve");
+/** Resolve the mail-send scope for each origin in turn on ONE broker, then drive each handle once. */
+const bearersFor = async (origins: readonly InvocationOrigin[]) => {
+  const { endpoint, egressCount } = recordingEndpoint({ ttlSec: 3600 });
+  const { wif, wifCount } = recordingWif({ ttlSec: 3600 });
+  const { graphHttp, requests } = recordingGraphHttp();
+  const { logger, logs } = collectLogs();
+  const broker = mkBroker({
+    endpoint,
+    entraWif: wif,
+    graphHttp,
+    assignedScopes: () => new Set<string>(["msgraph:mail.send"]),
+    tracer: passTracer,
+    logger,
+    now: () => 1_000, // fixed clock → every call inside the same freshness window
+  });
+  for (const origin of origins) {
+    const resolved = await broker.mintFor(invocationFor(origin), [cap("msgraph:mail.send")]);
+    if (!resolved.ok) throw new Error(`expected ${origin.kind} origin to resolve`);
+    const handle = mintedClient(resolved.value, cap("msgraph:mail.send")) as SendMailHandle;
+    await handle.sendMail({ from: "a@x", to: "t@x", subject: "s", body: "b" });
+  }
+  return { egressCount, wifCount, bearers: requests.map((r) => r.bearer), logs };
+};
 
-    // Distinct subjects ⇒ distinct cache identities ⇒ TWO exchanges + TWO WIF
-    // hops. If the cache keyed on scope alone (or omitted the sub), user-B would
-    // be served user-A's token and egress would be 1.
+describe("keycloak-broker — cache keyed by the AGENT identity the token is minted AS (C7.2, INV-1)", () => {
+  it("user hops with DIFFERENT subs through the SAME agent share the agent's own token — the initiator is attribution, not identity", async () => {
+    const { egressCount, wifCount, bearers, logs } = await bearersFor([
+      userOrigin("user-A", "fugue-agent-mail"),
+      userOrigin("user-B", "fugue-agent-mail"),
+      agentOrigin("fugue-agent-mail"),
+    ]);
+
+    // One agent ⇒ one token: the user's sub never partitions the cache, because
+    // the authority minted is the agent's own client_credentials assertion.
+    expect(egressCount()).toBe(1);
+    expect(wifCount()).toBe(1);
+    expect(new Set(bearers).size).toBe(1);
+    // Each resolution still audits its OWN initiator (or none, for the agent hop).
+    const mints = logs.filter((l) => l.data?.result === "mint");
+    expect(mints.map((l) => l.data?.sub)).toEqual(["user-A", "user-B", undefined]);
+    expect(mints.map((l) => l.data?.acquisition)).toEqual(["minted", "cache-reuse", "cache-reuse"]);
+  });
+
+  it("DIFFERENT agents (same scope, same TTL window) each mint their OWN token — no cross-agent reuse", async () => {
+    const { egressCount, wifCount, bearers } = await bearersFor([
+      userOrigin("user-A", "fugue-agent-mail"),
+      userOrigin("user-A", "fugue-agent-other"),
+    ]);
+
+    // Distinct agents ⇒ distinct cache identities ⇒ TWO mints + TWO WIF hops. If
+    // the cache keyed on scope alone, the second agent would be served the
+    // first agent's token and egress would be 1.
     expect(egressCount()).toBe(2);
     expect(wifCount()).toBe(2);
-    expect(exCalls.map((c) => c.userSub).sort()).toEqual(["user-A", "user-B"]);
-
-    // And the bearer each user's handle presents downstream is DISTINCT.
-    const sendMailA = mintedClient(a.value, cap("msgraph:mail.send")) as {
-      sendMail: (m: { from: string; to: string; subject: string; body: string }) => Promise<unknown>;
-    };
-    const sendMailB = mintedClient(b.value, cap("msgraph:mail.send")) as typeof sendMailA;
-    await sendMailA.sendMail({ from: "a@x", to: "t@x", subject: "s", body: "b" });
-    await sendMailB.sendMail({ from: "b@x", to: "t@x", subject: "s", body: "b" });
-    expect(requests).toHaveLength(2);
-    expect(requests[0]?.bearer).not.toBe(requests[1]?.bearer);
+    expect(bearers).toHaveLength(2);
+    expect(bearers[0]).not.toBe(bearers[1]);
   });
 
   it("the SAME user hop reused within the TTL window mints ONCE (SC-008) — cache HIT, no second egress", async () => {
@@ -1180,7 +1102,6 @@ describe("keycloak-broker — single-flight under concurrency (review I1/SC-008)
         await new Promise((r) => setTimeout(r, 5));
         return { ok: true, value: { accessToken: `cc-${cc}`, expiresInSec: 3600 } };
       },
-      exchangeV2: async () => ({ ok: true, value: { accessToken: "ex", expiresInSec: 3600 } }),
     };
     let wifN = 0;
     const wif: EntraWifExchange = {
@@ -1254,9 +1175,6 @@ describe("keycloak-broker — a THROWING injected port surfaces as err, never an
       mintClientCredentials: async () => {
         calls += 1;
         await new Promise((r) => setTimeout(r, 5)); // let the two waiters overlap
-        throw new Error("port contract violated");
-      },
-      exchangeV2: async () => {
         throw new Error("port contract violated");
       },
     };
@@ -1394,12 +1312,12 @@ describe("keycloak-broker — throw fence attributes the hop actually in flight"
     }
   });
 
-  it("a THROWING SA endpoint still attributes the origin's own hop (agent → mint/client-credentials)", async () => {
+  it.each([
+    ["agent", agentOrigin("fugue-agent-mail")],
+    ["user", userOrigin("user-abc", "fugue-agent-mail")],
+  ])("a THROWING SA endpoint on a %s origin is attributed to the client_credentials mint hop", async (_label, origin) => {
     const throwingEndpoint: KeycloakTokenEndpoint = {
       mintClientCredentials: async () => {
-        throw new Error("sa endpoint exploded");
-      },
-      exchangeV2: async () => {
         throw new Error("sa endpoint exploded");
       },
     };
@@ -1412,15 +1330,15 @@ describe("keycloak-broker — throw fence attributes the hop actually in flight"
       now: () => 0,
     });
 
-    const result = await broker.mintFor(
-      invocationFor(agentOrigin("fugue-agent-mail")),
-      [cap("msgraph:mail.send")],
-    );
+    const result = await broker.mintFor(invocationFor(origin), [cap("msgraph:mail.send")]);
 
     expect(result.ok).toBe(false);
-    if (!result.ok && result.error.kind === "infra-unreachable") {
+    if (result.ok) throw new Error("expected err");
+    expect(result.error.kind).toBe("infra-unreachable");
+    if (result.error.kind === "infra-unreachable") {
       expect(result.error.operation).toBe("mint");
       expect(result.error.hop).toBe("client-credentials");
+      expect(result.error.message).toContain("sa endpoint exploded");
     }
   });
 });
