@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "kind": "loom-verification-manifest",
   "checks": [
     {
@@ -99,6 +99,151 @@
         "kind": "required-file",
         "path": ".loom/completion-reports/pr53-host-regression.junit.xml"
       }
+    },
+    {
+      "id": "project:framework-typecheck",
+      "scope": "wave",
+      "executable": "bun",
+      "args": [
+        "run",
+        "--cwd",
+        "packages/framework",
+        "typecheck"
+      ],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "report": {
+        "kind": "not-required"
+      }
+    },
+    {
+      "id": "project:host-typecheck",
+      "scope": "wave",
+      "executable": "bun",
+      "args": [
+        "run",
+        "--cwd",
+        "packages/host",
+        "typecheck"
+      ],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "report": {
+        "kind": "not-required"
+      }
+    },
+    {
+      "id": "project:framework-test",
+      "scope": "wave",
+      "executable": "bun",
+      "args": [
+        "test",
+        "packages/framework",
+        "--path-ignore-patterns=**/dist/**",
+        "--reporter=junit",
+        "--reporter-outfile=.loom/completion-reports/framework-test.junit.xml"
+      ],
+      "cwd": ".",
+      "timeoutMs": 900000,
+      "report": {
+        "kind": "required-file",
+        "path": ".loom/completion-reports/framework-test.junit.xml"
+      }
+    },
+    {
+      "id": "project:host-test",
+      "scope": "wave",
+      "executable": "bun",
+      "args": [
+        "test",
+        "packages/host/src",
+        "--path-ignore-patterns=**/signals.test.ts",
+        "--reporter=junit",
+        "--reporter-outfile=.loom/completion-reports/host-test.junit.xml"
+      ],
+      "cwd": ".",
+      "timeoutMs": 900000,
+      "report": {
+        "kind": "required-file",
+        "path": ".loom/completion-reports/host-test.junit.xml"
+      }
+    },
+    {
+      "id": "project:host-signals-test",
+      "scope": "wave",
+      "executable": "bun",
+      "args": [
+        "test",
+        "packages/host/src/__tests__/lifecycle/signals.test.ts",
+        "--reporter=junit",
+        "--reporter-outfile=.loom/completion-reports/host-signals-test.junit.xml"
+      ],
+      "cwd": ".",
+      "timeoutMs": 300000,
+      "report": {
+        "kind": "required-file",
+        "path": ".loom/completion-reports/host-signals-test.junit.xml"
+      }
+    },
+    {
+      "id": "project:scripts-test",
+      "scope": "wave",
+      "executable": "bun",
+      "args": [
+        "test",
+        "scripts/",
+        "--reporter=junit",
+        "--reporter-outfile=.loom/completion-reports/scripts-test.junit.xml"
+      ],
+      "cwd": ".",
+      "timeoutMs": 300000,
+      "report": {
+        "kind": "required-file",
+        "path": ".loom/completion-reports/scripts-test.junit.xml"
+      }
+    },
+    {
+      "id": "project:doc-links",
+      "scope": "wave",
+      "executable": "bun",
+      "args": [
+        "scripts/check-doc-links.ts"
+      ],
+      "cwd": ".",
+      "timeoutMs": 120000,
+      "report": {
+        "kind": "not-required"
+      }
     }
-  ]
+  ],
+  "acceptanceRunner": {
+    "executable": "bun",
+    "args": [
+      "test",
+      "--reporter=junit",
+      "--reporter-outfile=.loom/completion-reports/acceptance.junit.xml",
+      "{files}"
+    ],
+    "cwd": ".",
+    "timeoutMs": 240000,
+    "report": {
+      "kind": "required-file",
+      "path": ".loom/completion-reports/acceptance.junit.xml"
+    }
+  },
+  "affectedRunner": {
+    "executable": "bun",
+    "args": [
+      "test",
+      "--reporter=junit",
+      "--reporter-outfile=.loom/completion-reports/affected.junit.xml",
+      "{files}"
+    ],
+    "cwd": ".",
+    "timeoutMs": 240000,
+    "report": {
+      "kind": "required-file",
+      "path": ".loom/completion-reports/affected.junit.xml"
+    }
+  }
 }

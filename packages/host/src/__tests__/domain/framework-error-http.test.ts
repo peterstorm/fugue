@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import type { FrameworkError } from "@fuguejs/framework";
+import { authorityChangedError, type AuthorityUnavailableCause, type FrameworkError } from "@fuguejs/framework";
 import { classifyFrameworkError } from "../../domain/framework-error-http.js";
 
 describe("classifyFrameworkError", () => {
@@ -209,6 +209,64 @@ describe("classifyFrameworkError", () => {
     });
   });
 
+  // AD-8 / FR-015: each identity failure reaches the client as its own status,
+  // and none is a host malfunction — every cause is a settled authority answer
+  // or a configuration state that a retry cannot clear, so none feeds the
+  // breaker and none invites a retry with Retry-After.
+  describe("authority-unavailable (AD-8)", () => {
+    // An authority-changed failure's scope is derived from its first change, so
+    // it is built through its one construction; every other cause is a literal.
+    const failure = (cause: AuthorityUnavailableCause): FrameworkError =>
+      cause.kind === "authority-changed"
+        ? authorityChangedError("agent-x", cause.changes)
+        : { kind: "authority-unavailable", scope: "graph:mail.send", agentClientId: "agent-x", cause };
+    const statusByCause: ReadonlyArray<readonly [AuthorityUnavailableCause, number]> = [
+      [{ kind: "federation-grant-missing", grants: ["entra-exchange"] }, 403],
+      [{ kind: "authority-unconfigured", missing: ["ENTRA_TENANT_ID"] }, 503],
+      [{ kind: "federation-rejected", reason: "audience" }, 502],
+      [{ kind: "reauthorization-required", reason: "refused" }, 401],
+      [{ kind: "reauthorization-required", reason: "custody-expired" }, 401],
+      [{ kind: "reauthorization-required", reason: "custody-absent" }, 401],
+      [{ kind: "capability-not-admitted" }, 403],
+      [{ kind: "authority-changed", changes: [{ capability: "graph:mail.send", change: "mode-changed" }] }, 409],
+    ];
+
+    for (const [cause, status] of statusByCause) {
+      const label = "reason" in cause ? `${cause.kind}{${cause.reason}}` : cause.kind;
+      it(`${label} → ${status}, does NOT trip the circuit, no Retry-After`, () => {
+        const c = classifyFrameworkError(failure(cause));
+        expect(c.status).toBe(status);
+        expect(c.countsAsCircuitFailure).toBe(false);
+        expect(c.retryAfterSeconds).toBeUndefined();
+      });
+    }
+
+    it("distinguishes policy refusal, missing configuration, federation mismatch and re-authorization by status (FR-015)", () => {
+      const statuses = [
+        classifyFrameworkError(failure({ kind: "federation-grant-missing", grants: ["graph:mail.send"] })).status,
+        classifyFrameworkError(failure({ kind: "authority-unconfigured", missing: ["ENTRA_AGENT_IDENTITIES"] })).status,
+        classifyFrameworkError(failure({ kind: "federation-rejected", reason: "unknown" })).status,
+        classifyFrameworkError(failure({ kind: "reauthorization-required", reason: "refused" })).status,
+      ];
+      expect(new Set(statuses).size).toBe(statuses.length);
+      // A federation rejection is not a transient outage: never the 503 of
+      // infra-unreachable, never a breaker trip.
+      const outage = classifyFrameworkError({ kind: "infra-unreachable", operation: "federation", hop: "entra", message: "down" });
+      expect(classifyFrameworkError(failure({ kind: "federation-rejected", reason: "issuer" }))).not.toEqual(outage);
+    });
+
+    it("a fan whose primary child failed authority-unavailable takes that child's class", () => {
+      const c = classifyFrameworkError({
+        kind: "fan-child-failed",
+        nodeId: "map" as never,
+        primary: { index: 0 as never, error: failure({ kind: "reauthorization-required", reason: "refused" }) },
+        causes: { kind: "secondaries", secondary: [{ index: 1 as never, error: { kind: "transient", nodeId: "c" as never, message: "x" } }] },
+      });
+      expect(c.status).toBe(401);
+      expect(c.countsAsCircuitFailure).toBe(false);
+    });
+  });
+
   it("validation → 500, DOES trip the circuit", () => {
     const e: FrameworkError = { kind: "validation", nodeId: "n" as never, message: "bad" };
     const c = classifyFrameworkError(e);
@@ -257,6 +315,13 @@ describe("classifyFrameworkError", () => {
       const c = classifyFrameworkError(wrapped("fan-budget-refused"));
       expect(c.status).toBe(429);
       expect(c.countsAsCircuitFailure).toBe(false);
+    });
+
+    it("rooted in authority-unavailable → 403, does NOT trip the circuit (only the kind survives: a settled authority answer, never 500)", () => {
+      const c = classifyFrameworkError(wrapped("authority-unavailable"));
+      expect(c.status).toBe(403);
+      expect(c.countsAsCircuitFailure).toBe(false);
+      expect(c.retryAfterSeconds).toBeUndefined();
     });
 
     it("rooted in fan-child-failed → 500 (only the kind survives the wrapper, the primary is unknowable)", () => {

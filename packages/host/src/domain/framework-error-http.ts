@@ -13,6 +13,15 @@
  *   - `policy-refusal` / `downstream-denied` → 403. A settled "no" from the
  *     broker's local gate or the downstream identity provider. Fail-closed,
  *     never retried (ADR-0059) → does NOT count as a circuit failure.
+ *   - `authority-unavailable` (AD-8, FR-015) → by cause, so a client can tell
+ *     the identity failures apart: `federation-grant-missing` 403,
+ *     `authority-unconfigured` 503, `federation-rejected` 502,
+ *     `reauthorization-required` 401, `capability-not-admitted` 403,
+ *     `authority-changed` 409. Every cause is a settled answer or a
+ *     configuration state a retry cannot clear: none counts as a circuit
+ *     failure and none carries Retry-After. A transient identity failure is
+ *     `infra-unreachable`, never this kind. Wrapped in `retry-exhausted` only
+ *     the kind survives, so it falls back to 403, never 500.
  *   - `fan-budget-refused` → 429, the same class as `llm-budget-exceeded`:
  *     a fan's projection refusal is a settled per-run budget limit.
  *   - `fan-child-failed` → the class of its PRIMARY (lowest-index) child error.
@@ -63,7 +72,7 @@
  */
 
 import { match, P } from "ts-pattern";
-import type { FrameworkError, FrameworkErrorKind } from "@fuguejs/framework";
+import type { AuthorityUnavailableCause, FrameworkError, FrameworkErrorKind } from "@fuguejs/framework";
 import type { HostError } from "./host-error.js";
 import { httpStatusFor, retryAfterSecondsFor } from "./host-error.js";
 
@@ -84,6 +93,16 @@ const SETTLED_DENIAL: FrameworkErrorHttp = { status: 403, countsAsCircuitFailure
 const BUDGET_LIMIT: FrameworkErrorHttp = { status: 429, countsAsCircuitFailure: false, retryAfterSeconds: 60 };
 const INFRA_OUTAGE: FrameworkErrorHttp = { status: 503, countsAsCircuitFailure: true, retryAfterSeconds: 5 };
 const EXECUTION_FAILURE: FrameworkErrorHttp = { status: 500, countsAsCircuitFailure: true };
+
+/** An identity failure's status by cause; none is a host fault (AD-8). */
+const classifyAuthorityUnavailable = (cause: AuthorityUnavailableCause): FrameworkErrorHttp =>
+  match(cause)
+    .with({ kind: P.union("federation-grant-missing", "capability-not-admitted") }, () => SETTLED_DENIAL)
+    .with({ kind: "authority-unconfigured" }, () => ({ status: 503, countsAsCircuitFailure: false }))
+    .with({ kind: "federation-rejected" }, () => ({ status: 502, countsAsCircuitFailure: false }))
+    .with({ kind: "reauthorization-required" }, () => ({ status: 401, countsAsCircuitFailure: false }))
+    .with({ kind: "authority-changed" }, () => ({ status: 409, countsAsCircuitFailure: false }))
+    .exhaustive();
 
 /**
  * Every kind that classifies as a genuine execution failure (500 + breaker).
@@ -133,6 +152,9 @@ const classifyRootKind = (
 ): FrameworkErrorHttp =>
   match(kind)
     .with("policy-refusal", "downstream-denied", () => SETTLED_DENIAL)
+    // The cause that picks its status does not survive the wrapper; the kind
+    // alone still says "a settled authority answer", so never 500 + breaker.
+    .with("authority-unavailable", () => SETTLED_DENIAL)
     .with("llm-budget-exceeded", "fan-budget-refused", () => BUDGET_LIMIT)
     .with("infra-unreachable", () => INFRA_OUTAGE)
     // A wrapped `fan-child-failed` is classified by its PRIMARY child error in
@@ -224,6 +246,8 @@ export const classifyFrameworkError = (error: FrameworkError): FrameworkErrorHtt
     // One arm for the pair, matching how `classifyRootKind` already groups them,
     // so the two classifiers cannot drift on what counts as a settled denial.
     .with({ kind: P.union("policy-refusal", "downstream-denied") }, () => SETTLED_DENIAL)
+    // An identity failure — its cause decides the status (AD-8, FR-015).
+    .with({ kind: "authority-unavailable" }, (e) => classifyAuthorityUnavailable(e.cause))
     // Deterministic per-run usage limit — client should back off, not the host.
     // A fan's budget projection refusal is the same class of settled per-run
     // usage limit: the client must raise the budget, the host did its job.

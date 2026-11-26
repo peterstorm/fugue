@@ -72,6 +72,96 @@ export type MissingCapability = {
   readonly capability: Capability;
 };
 
+// The closed vocabularies of `AuthorityUnavailableCause`, each written once and
+// read by both the type and its persisted parser.
+const FEDERATION_REJECTION_REASONS = ["issuer", "subject", "audience", "unknown"] as const;
+const REAUTHORIZATION_REASONS = ["refused", "custody-expired", "custody-absent"] as const;
+const AUTHORITY_CHANGE_KINDS = ["mode-changed", "removed", "newly-brokered", "resource-changed"] as const;
+
+/** One admitted capability whose authority the host no longer matches (AD-12). */
+export type AuthorityChangedCapability = {
+  readonly capability: string;
+  readonly change: (typeof AUTHORITY_CHANGE_KINDS)[number];
+};
+
+/** A list with at least one element: a cause that names nothing is unrepresentable. */
+type NonEmptyArray<T> = readonly [T, ...T[]];
+
+type AuthorityChangedCause = {
+  readonly kind: "authority-changed";
+  readonly changes: NonEmptyArray<AuthorityChangedCapability>;
+};
+
+/**
+ * Why an agent's authority for a scope is unavailable (AD-8). Every cause is a
+ * settled answer or a configuration state; a transient realm or Entra failure
+ * is `infra-unreachable`, never one of these. No cause carries free text from
+ * an identity provider: names (grants, configuration keys, capabilities) and
+ * closed reasons only, so no credential material can ride along (INV-3).
+ *
+ *   - `federation-grant-missing`: the realm assertion lacks the named grants.
+ *   - `authority-unconfigured`: the named configuration keys are absent or were
+ *     rejected (a dark Entra leg, missing admin consent).
+ *   - `federation-rejected`: the identity provider refused the federated
+ *     assertion's issuer, subject or audience.
+ *   - `reauthorization-required`: the delegated authority must be re-granted
+ *     by the initiator (refused refresh, custody expired or absent).
+ *   - `capability-not-admitted`: a brokered capability the run was not
+ *     admitted for.
+ *   - `authority-changed`: the host's authority for admitted capabilities
+ *     drifted since admission; build it with `authorityChangedError`.
+ */
+export type AuthorityUnavailableCause =
+  | { readonly kind: "federation-grant-missing"; readonly grants: NonEmptyArray<string> }
+  | { readonly kind: "authority-unconfigured"; readonly missing: NonEmptyArray<string> }
+  | { readonly kind: "federation-rejected"; readonly reason: (typeof FEDERATION_REJECTION_REASONS)[number] }
+  | { readonly kind: "reauthorization-required"; readonly reason: (typeof REAUTHORIZATION_REASONS)[number] }
+  | { readonly kind: "capability-not-admitted" }
+  | AuthorityChangedCause;
+
+/**
+ * The scope of an `authority-changed` failure: its first change's capability.
+ * Minted only by `authorityChangedError`, so a scope that disagrees with the
+ * changes cannot be written; it reads as the plain string it is.
+ */
+type AuthorityChangedScope = string & { readonly __brand: "AuthorityChangedScope" };
+
+type AuthorityUnavailableFields = {
+  readonly kind: "authority-unavailable";
+  readonly agentClientId: string;
+};
+
+/**
+ * The agent client `agentClientId` cannot act with authority for `scope`, for
+ * `cause` (AD-8, FR-015). Non-retriable: replay re-derives the same answer.
+ * For `authority-changed`, `scope` is derived from the first change, never
+ * written: build that failure with `authorityChangedError`.
+ */
+export type AuthorityUnavailableError =
+  | (AuthorityUnavailableFields & {
+      readonly scope: string;
+      readonly cause: Exclude<AuthorityUnavailableCause, AuthorityChangedCause>;
+    })
+  | (AuthorityUnavailableFields & {
+      readonly scope: AuthorityChangedScope;
+      readonly cause: AuthorityChangedCause;
+    });
+
+/**
+ * The one construction of an `authority-changed` failure: `scope` is derived
+ * from the first change, so the two cannot disagree. The persisted schema
+ * refuses a record where they do and rebuilds the rest through here.
+ */
+export const authorityChangedError = (
+  agentClientId: string,
+  changes: NonEmptyArray<AuthorityChangedCapability>,
+): AuthorityUnavailableError => ({
+  kind: "authority-unavailable",
+  scope: changes[0].capability as AuthorityChangedScope,
+  agentClientId,
+  cause: { kind: "authority-changed", changes },
+});
+
 /**
  * Tokens consumed by a call that ultimately failed. Carried on the error
  * variants emitted by the tool-use loop (`node-crash`, `transient`, `aborted`)
@@ -389,6 +479,7 @@ export type FrameworkError =
       readonly resource: string;
       readonly reason: string;
     }
+  | AuthorityUnavailableError
   | {
       /**
        * A `map` node's `widthFrom` field did not resolve to an array on the
@@ -609,6 +700,26 @@ const persistedFanFailureCausesSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("refusal"), refusal: persistedFanRefusalSchema }),
   z.object({ kind: z.literal("secondaries-and-refusal"), secondary: persistedSecondariesSchema, refusal: persistedFanRefusalSchema }),
 ]);
+// An authority-unavailable cause on the wire. Cause objects strip unknown keys,
+// so a field smuggled onto a cause (a credential, say) never survives
+// recovery; the closed reasons and the non-empty name and change lists are
+// re-established.
+const persistedAuthorityChangeSchema = z.object({
+  capability: z.string(),
+  change: z.enum(AUTHORITY_CHANGE_KINDS),
+});
+const persistedNamesSchema = z.tuple([z.string()], z.string());
+const persistedAuthorityUnavailableCauseSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("federation-grant-missing"), grants: persistedNamesSchema }),
+  z.object({ kind: z.literal("authority-unconfigured"), missing: persistedNamesSchema }),
+  z.object({ kind: z.literal("federation-rejected"), reason: z.enum(FEDERATION_REJECTION_REASONS) }),
+  z.object({ kind: z.literal("reauthorization-required"), reason: z.enum(REAUTHORIZATION_REASONS) }),
+  z.object({ kind: z.literal("capability-not-admitted") }),
+  z.object({
+    kind: z.literal("authority-changed"),
+    changes: z.tuple([persistedAuthorityChangeSchema], persistedAuthorityChangeSchema),
+  }),
+]);
 /**
  * Every `FrameworkError` discriminant, as a table the COMPILER keeps in
  * lockstep with the union: a kind missing from here, or a key here that is not
@@ -651,6 +762,7 @@ const FRAMEWORK_ERROR_KIND_TABLE: Record<FrameworkErrorKind, true> = {
   "infra-unreachable": true,
   "policy-refusal": true,
   "downstream-denied": true,
+  "authority-unavailable": true,
   "map-width-invalid": true,
   "map-width-exceeded": true,
   "fan-budget-refused": true,
@@ -710,6 +822,15 @@ const PersistedFrameworkErrorSchemaDefinition = z.discriminatedUnion("kind", [
   z.looseObject({ kind: z.literal("infra-unreachable"), operation: z.enum(["mint", "exchange", "federation", "downstream"]), hop: z.string(), message: z.string() }),
   z.looseObject({ kind: z.literal("policy-refusal"), scope: z.string(), agentClientId: z.string().optional() }),
   z.looseObject({ kind: z.literal("downstream-denied"), resource: z.string(), reason: z.string() }),
+  z.looseObject({
+    kind: z.literal("authority-unavailable"),
+    scope: z.string(),
+    agentClientId: z.string(),
+    cause: persistedAuthorityUnavailableCauseSchema,
+  }).refine(
+    (e) => e.cause.kind !== "authority-changed" || e.cause.changes[0].capability === e.scope,
+    { message: "an authority-changed failure's scope is its first change's capability" },
+  ),
   z.looseObject({ kind: z.literal("map-width-invalid"), nodeId: PersistedNodeIdSchema, widthFrom: z.string(), found: z.string() }),
   z.looseObject({
     kind: z.literal("map-width-exceeded"),
@@ -733,31 +854,40 @@ type ExhaustivePersistedFrameworkErrorSchema = [MissingPersistedFrameworkErrorKi
   ? z.ZodType<FrameworkError>
   : never;
 
+type PersistedFrameworkErrorRecord = z.output<typeof PersistedFrameworkErrorSchemaDefinition>;
+
 /**
- * Re-correlate a parsed `checkpoint-write-failed` record.
- *
- * The wire record is four independent fields; the in-memory ADT is two
- * correlated address arms. Routing the parsed record back through THE ONE
- * construction path (`buildCheckpointWriteFailed`) rebuilds the correlation
- * from the same rule the writer used, so a persisted record can never enter
- * the process as a half-correlated value (a placeholder id with no
- * `invalidRunId`, or a real id carrying one). The rebuild is idempotent on
+ * Rebuild the parsed record's correlated fields through THE ONE construction
+ * path that writes them, so a persisted record can never enter the process
+ * as a value its writer could not have built. Each rebuild is idempotent on
  * every record this framework writes.
+ *
+ *   - `checkpoint-write-failed`: the wire record is four independent fields;
+ *     the in-memory ADT is two correlated address arms, re-correlated by
+ *     `buildCheckpointWriteFailed` (no placeholder id without `invalidRunId`,
+ *     no real id carrying one).
+ *   - `authority-unavailable{authority-changed}`: the scope is derived from
+ *     the first change by `authorityChangedError` (the member's refine has
+ *     already refused a record where they disagree).
  */
-const correlateCheckpointAddresses = (
-  parsed: z.output<typeof PersistedFrameworkErrorSchemaDefinition>,
-): FrameworkError =>
-  parsed.kind === "checkpoint-write-failed"
-    ? buildCheckpointWriteFailed(
-        parsed.invalidRunId ?? parsed.runId,
-        parsed.invalidNodeId ?? parsed.nodeId,
-        parsed.message,
-      )
-    : parsed;
+const canonicalFrameworkErrorOf = (parsed: PersistedFrameworkErrorRecord): FrameworkError => {
+  if (parsed.kind === "checkpoint-write-failed") {
+    return buildCheckpointWriteFailed(
+      parsed.invalidRunId ?? parsed.runId,
+      parsed.invalidNodeId ?? parsed.nodeId,
+      parsed.message,
+    );
+  }
+  if (parsed.kind !== "authority-unavailable") return parsed;
+  const { cause } = parsed;
+  return cause.kind === "authority-changed"
+    ? { ...parsed, ...authorityChangedError(parsed.agentClientId, cause.changes) }
+    : { ...parsed, cause };
+};
 
 /** Loose, exhaustive wire parser for persisted `FrameworkError` control-plane data. */
 export const PersistedFrameworkErrorSchema: ExhaustivePersistedFrameworkErrorSchema =
-  PersistedFrameworkErrorSchemaDefinition.transform(correlateCheckpointAddresses);
+  PersistedFrameworkErrorSchemaDefinition.transform(canonicalFrameworkErrorOf);
 
 /**
  * Compare an unknown source with its canonical parser output using data
@@ -916,6 +1046,8 @@ export const usageOfError = (e: FrameworkError): PartialTokenUsage | undefined =
       { kind: "infra-unreachable" },
       { kind: "policy-refusal" },
       { kind: "downstream-denied" },
+      // An authority refusal is decided before the capability is acquired.
+      { kind: "authority-unavailable" },
       // A map width is decided BEFORE any child runs, so neither map error can
       // have consumed a token.
       { kind: "map-width-invalid" },
@@ -982,6 +1114,9 @@ export const retriabilityOf = (e: FrameworkError): Retriability =>
       { kind: "aborted" },
       { kind: "policy-refusal" },
       { kind: "downstream-denied" },
+      // A settled authority answer or configuration state (AD-8): replay
+      // re-derives it. Transient identity failures are `infra-unreachable`.
+      { kind: "authority-unavailable" },
       { kind: "llm-budget-exceeded" },
       { kind: "missing-capability" },
       // `cache-error` carries an explicit discriminant where the operation
@@ -1054,6 +1189,7 @@ export const messageOf = (e: unknown): string => {
         { kind: "aborted" },
         { kind: "policy-refusal" },
         { kind: "downstream-denied" },
+        { kind: "authority-unavailable" },
         { kind: "llm-budget-exceeded" },
         { kind: "missing-capability" },
         CONTEXT_ONLY_KINDS,
@@ -1118,6 +1254,8 @@ export const formatFrameworkError = (e: FrameworkError): string =>
         ? `policy refusal: scope '${e.scope}' not assigned to agent client '${e.agentClientId}'`
         : `policy refusal: scope '${e.scope}' not recognised (agent client unknown)`)
     .with({ kind: "downstream-denied" }, (e) => `downstream denied resource '${e.resource}': ${e.reason}`)
+    .with({ kind: "authority-unavailable" }, (e) =>
+      `authority unavailable for scope '${e.scope}' (agent client '${e.agentClientId}'): ${formatAuthorityUnavailableCause(e.cause)}`)
     .with({ kind: "fan-budget-refused" }, (e) => `map node '${e.nodeId}' ${formatFanRefusal(e.refusal)}`)
     .with({ kind: "fan-child-failed" }, (e) => {
       const head = `map node '${e.nodeId}': child ${e.primary.index} failed: ${formatFrameworkError(e.primary.error)}`;
@@ -1128,6 +1266,18 @@ export const formatFrameworkError = (e: FrameworkError): string =>
           `${head}; ${formatSecondaries(c.secondary)}; also ${formatFanRefusal(c.refusal)}`)
         .exhaustive();
     })
+    .exhaustive();
+
+/** The cause's declared fields only, so nothing riding on the value is rendered (INV-3). */
+const formatAuthorityUnavailableCause = (cause: AuthorityUnavailableCause): string =>
+  match(cause)
+    .with({ kind: "federation-grant-missing" }, (c) => `the realm assertion lacks federation grants [${c.grants.join(", ")}]`)
+    .with({ kind: "authority-unconfigured" }, (c) => `the authority is not configured (missing [${c.missing.join(", ")}])`)
+    .with({ kind: "federation-rejected" }, (c) => `the identity provider rejected the federation (${c.reason})`)
+    .with({ kind: "reauthorization-required" }, (c) => `the initiator must re-authorize the delegation (${c.reason})`)
+    .with({ kind: "capability-not-admitted" }, () => "the capability was not admitted to this run's authority")
+    .with({ kind: "authority-changed" }, (c) =>
+      `the host's authority changed since admission: ${c.changes.map((x) => `${x.capability} (${x.change})`).join(", ")}`)
     .exhaustive();
 
 /** A figure in the unit of the ceiling axis it is measured on. */
